@@ -91,6 +91,8 @@ async function runConnectorEtl(
     const mapping = config.mappings.find(m => m.sourceModule === module)
     if (!mapping || !mapping.targetTable) continue
 
+    await ensureEntityTable(pool, schemaName, mapping.targetTable)
+
     let offset = 0
     while (true) {
       const batchClient = await pool.connect()
@@ -193,6 +195,72 @@ function applyConnectorMapping(
   if (mapping.targetTable === 'crm_deals' && !row['title']) row['title'] = sourceId
 
   return row
+}
+
+// ── Ensure a specific entity table exists (create from template if missing) ───
+
+const ENTITY_TABLE_DDL: Record<string, (schema: string) => string> = {
+  crm_contacts: (s) => `
+    CREATE TABLE IF NOT EXISTS "${s}".crm_contacts (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      external_id VARCHAR(255), source_type VARCHAR(50), source_integration_id UUID,
+      first_name VARCHAR(255), last_name VARCHAR(255), full_name VARCHAR(511),
+      email VARCHAR(255), email_secondary VARCHAR(255), phone VARCHAR(50), mobile VARCHAR(50),
+      company_name VARCHAR(500), job_title VARCHAR(255), department VARCHAR(255), website VARCHAR(500),
+      address_line1 VARCHAR(500), address_line2 VARCHAR(500), city VARCHAR(100), state VARCHAR(100),
+      country VARCHAR(2) DEFAULT 'TR', postal_code VARCHAR(20),
+      contact_type VARCHAR(50) DEFAULT 'contact', lead_source VARCHAR(100), lead_status VARCHAR(100),
+      status VARCHAR(50) DEFAULT 'active', lead_score INTEGER DEFAULT 0,
+      tags JSONB DEFAULT '[]', custom_fields JSONB DEFAULT '{}',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), deleted_at TIMESTAMPTZ
+    )`,
+  crm_companies: (s) => `
+    CREATE TABLE IF NOT EXISTS "${s}".crm_companies (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      external_id VARCHAR(255), source_type VARCHAR(50), source_integration_id UUID,
+      name VARCHAR(500) NOT NULL, legal_name VARCHAR(500), industry VARCHAR(100),
+      website VARCHAR(500), email VARCHAR(255), phone VARCHAR(50),
+      city VARCHAR(100), state VARCHAR(100), country VARCHAR(2) DEFAULT 'TR', postal_code VARCHAR(20),
+      address_line1 VARCHAR(500), tax_number VARCHAR(50), tax_office VARCHAR(100),
+      employee_count INTEGER, annual_revenue NUMERIC(15,2),
+      tags JSONB DEFAULT '[]', custom_fields JSONB DEFAULT '{}',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), deleted_at TIMESTAMPTZ
+    )`,
+  crm_deals: (s) => `
+    CREATE TABLE IF NOT EXISTS "${s}".crm_deals (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      external_id VARCHAR(255), source_type VARCHAR(50),
+      title VARCHAR(500) NOT NULL, stage VARCHAR(100) DEFAULT 'new',
+      deal_value NUMERIC(15,2), currency VARCHAR(3) DEFAULT 'TRY',
+      probability SMALLINT DEFAULT 0, expected_close_date DATE,
+      lead_source VARCHAR(100), description TEXT,
+      contact_id UUID, company_id UUID,
+      tags JSONB DEFAULT '[]', custom_fields JSONB DEFAULT '{}',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), deleted_at TIMESTAMPTZ
+    )`,
+  erp_products: (s) => `
+    CREATE TABLE IF NOT EXISTS "${s}".erp_products (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      external_id VARCHAR(255), source_type VARCHAR(50),
+      name VARCHAR(500) NOT NULL, sku VARCHAR(100), barcode VARCHAR(100),
+      category VARCHAR(255), description TEXT,
+      cost_price NUMERIC(15,4), sale_price NUMERIC(15,4), currency VARCHAR(3) DEFAULT 'TRY',
+      stock_quantity NUMERIC(15,3) DEFAULT 0, unit VARCHAR(50) DEFAULT 'adet',
+      is_active BOOLEAN DEFAULT TRUE,
+      tags JSONB DEFAULT '[]', custom_fields JSONB DEFAULT '{}',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), deleted_at TIMESTAMPTZ
+    )`,
+}
+
+async function ensureEntityTable(pool: Pool, schemaName: string, tableName: string): Promise<void> {
+  const ddlFn = ENTITY_TABLE_DDL[tableName]
+  if (!ddlFn) return
+  const client = await pool.connect()
+  try {
+    await client.query(ddlFn(schemaName))
+  } finally {
+    client.release()
+  }
 }
 
 // ── Ensure ETL support tables exist in entity schema ─────────────────────────

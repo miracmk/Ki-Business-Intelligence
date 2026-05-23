@@ -553,8 +553,8 @@ export const crmRoutes: FastifyPluginAsync = async (app) => {
           if ((adapter as any).getTableCount) recordCount = await (adapter as any).getTableCount(mod.apiName)
         } catch { /* ignore */ }
 
-        modules.push({ name: mod.apiName, label: mod.pluralLabel ?? mod.apiName, recordCount, fields: enrichedFields, relations: [] })
-        send('structure', JSON.stringify({ name: mod.apiName, label: mod.pluralLabel ?? mod.apiName, fieldCount: fields.length, recordCount }), 15 + Math.round(((i + 1) / total) * 70))
+        modules.push({ name: mod.apiName, label: mod.pluralLabel ?? mod.apiName, recordCount, fields: enrichedFields, relations: [], sampleRows: sampleRows.slice(0, 5) })
+        send('structure', JSON.stringify({ name: mod.apiName, label: mod.pluralLabel ?? mod.apiName, recordCount, fields: enrichedFields, sampleRows: sampleRows.slice(0, 5) }), 15 + Math.round(((i + 1) / total) * 70))
       }
 
       const cacheKey = `ki:crm:structure:${id}`
@@ -569,6 +569,143 @@ export const crmRoutes: FastifyPluginAsync = async (app) => {
     }
   })
 
+  // GET /api/v1/crm/connections/:id/generate-connector/stream (SSE)
+  // userMappings passed as URL-encoded JSON in ?m= query param
+  app.get('/connections/:id/generate-connector/stream', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    const { token, m } = req.query as { token?: string; m?: string }
+
+    try {
+      if (token) {
+        const decoded = app.jwt.verify(token) as any
+        ;(req as any).user = decoded
+      } else {
+        await (req as any).jwtVerify()
+      }
+    } catch {
+      reply.raw.writeHead(401); reply.raw.end('Unauthorized'); return
+    }
+
+    let userMappings: Record<string, string | null> = {}
+    try { if (m) userMappings = JSON.parse(decodeURIComponent(m)) } catch { /* ignore */ }
+
+    const conn = await db.query.crmConnections.findFirst({ where: eq(crmConnections.id, id) })
+    if (!conn) { reply.raw.writeHead(404); reply.raw.end(); return }
+
+    reply.raw.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    })
+
+    const sendSSE = (type: string, message: string, percent: number, extra?: Record<string, unknown>) => {
+      reply.raw.write(`data: ${JSON.stringify({ type, message, percent, ...extra })}\n\n`)
+    }
+
+    const heartbeat = setInterval(() => { reply.raw.write(': ping\n\n') }, 15000)
+    reply.raw.on('close', () => clearInterval(heartbeat))
+
+    try {
+      const cacheKey = `ki:crm:structure:${id}`
+      const cached = await redis.get(cacheKey)
+      const allModules: any[] = cached ? JSON.parse(cached) : []
+
+      const mappedModules = allModules.filter(mod => userMappings[mod.name])
+      sendSSE('progress', `${mappedModules.length} modül analiz edilecek`, 5)
+
+      const promptModules: any[] = []
+      for (let i = 0; i < mappedModules.length; i++) {
+        const mod = mappedModules[i]!
+        sendSSE('progress', `"${mod.label ?? mod.name}" hazırlanıyor — ${mod.fields?.length ?? 0} alan`, 5 + Math.round((i / Math.max(mappedModules.length, 1)) * 25))
+        promptModules.push({
+          sourceModule: mod.name,
+          targetTable: userMappings[mod.name],
+          fields: (mod.fields ?? []).slice(0, 50),
+          sampleRows: (mod.sampleRows ?? []).slice(0, 5),
+        })
+      }
+
+      sendSSE('progress', 'AI prompt hazırlandı, OpenRouter\'a gönderiliyor...', 30)
+
+      const TARGET_SCHEMA_DETAIL = `
+crm_contacts: first_name, last_name, full_name, email, phone, mobile, company_name, job_title, department, website, address_line1, city, state, country(2-char ISO), postal_code, contact_type, lead_source, lead_status
+crm_companies: name, legal_name, industry, website, email, phone, city, country(2-char ISO), tax_number, tax_office
+crm_deals: title, deal_value(numeric), currency(3-char), stage, probability(0-100), expected_close_date
+erp_products: name, sku, barcode, category, description, cost_price(numeric), sale_price(numeric), currency, stock_quantity(numeric), unit`
+
+      const openrouterKey = env.OPENROUTER_API_KEY
+      let connectorConfig: any = null
+
+      if (openrouterKey && promptModules.length > 0) {
+        try {
+          const prompt = `You are a data integration expert. The user has already decided which source module maps to which target table. Your ONLY job is field-level mapping — do NOT change targetTable values.
+
+USER MODULE MAPPINGS (fixed):
+${promptModules.map(m => `- "${m.sourceModule}" → ${m.targetTable}`).join('\n')}
+
+TARGET SCHEMA:
+${TARGET_SCHEMA_DETAIL}
+
+SOURCE MODULES WITH SAMPLE DATA:
+${JSON.stringify(promptModules, null, 2)}
+
+Rules:
+1. targetTable is fixed — copy it exactly as given.
+2. For each source field, find the best targetField using sample data values (not just field name).
+3. Choose transform: direct, phone_e164(for phone numbers), country_iso(2-char country), name_case(proper case), email_lower(emails), currency_strip(monetary amounts), custom(no match).
+4. Unmatched fields: targetField="custom_fields", transform="custom", customFieldKey=sourceFieldName.
+5. Output ONLY valid JSON, no markdown:
+{"mappings":[{"sourceModule":"str","targetTable":"str","fields":[{"sourceField":"str","targetField":"str","transform":"direct","customFieldKey":null}]}],"unmappedFields":[]}`
+
+          const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${openrouterKey}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              model: 'nvidia/llama-3.1-nemotron-70b-instruct:free',
+              messages: [{ role: 'user', content: prompt }],
+              temperature: 0.1, max_tokens: 4000,
+            }),
+            signal: AbortSignal.timeout(45000),
+          })
+
+          sendSSE('progress', 'AI yanıtı işleniyor...', 80)
+          const aiData = await res.json() as any
+          const raw = aiData.choices?.[0]?.message?.content ?? ''
+          const jsonMatch = raw.match(/\{[\s\S]*\}/)
+          if (jsonMatch) {
+            const parsed = JSON.parse(jsonMatch[0])
+            connectorConfig = {
+              version: 2, generatedAt: new Date().toISOString(), sourceType: conn.crmType,
+              userMappings, mappings: parsed.mappings ?? [], unmappedFields: parsed.unmappedFields ?? [], aiGenerated: true,
+            }
+          }
+        } catch (err) {
+          sendSSE('progress', `AI hatası — fallback kullanılıyor`, 80)
+          console.error('[generate-connector/stream] AI error:', err)
+        }
+      }
+
+      if (!connectorConfig) {
+        sendSSE('progress', 'Regex tabanlı konnektör oluşturuluyor...', 80)
+        connectorConfig = {
+          version: 2, generatedAt: new Date().toISOString(), sourceType: conn.crmType,
+          userMappings, mappings: buildFallbackMappingsFromUserMap(promptModules), unmappedFields: [], aiGenerated: false,
+        }
+      }
+
+      sendSSE('progress', 'Konnektör kaydediliyor...', 90)
+      await db.update(crmConnections).set({ connectorConfig, updatedAt: new Date() }).where(eq(crmConnections.id, id))
+
+      sendSSE('done', 'Konnektör hazır', 100, { connector: connectorConfig })
+    } catch (err: any) {
+      sendSSE('error', err.message ?? 'Bilinmeyen hata', 0)
+    } finally {
+      clearInterval(heartbeat)
+      reply.raw.end()
+    }
+  })
+
   // POST /api/v1/crm/connections/:id/generate-connector
   app.post('/connections/:id/generate-connector', { onRequest: [app.authenticate] }, async (req, reply) => {
     const { id } = req.params as { id: string }
@@ -576,48 +713,31 @@ export const crmRoutes: FastifyPluginAsync = async (app) => {
     const conn = await db.query.crmConnections.findFirst({ where: eq(crmConnections.id, id) })
     if (!conn) return reply.status(404).send({ error: 'Bağlantı bulunamadı' })
 
+    const { userMappings = {} } = (req.body as any) ?? {}
     const cacheKey = `ki:crm:structure:${id}`
     const cached = await redis.get(cacheKey)
-    const modules = cached ? JSON.parse(cached) : ((req.body as any)?.modules ?? [])
-    if (!modules.length) return reply.status(400).send({ error: 'Önce yapı taraması yapın' })
+    const allModules: any[] = cached ? JSON.parse(cached) : ((req.body as any)?.modules ?? [])
+    if (!allModules.length) return reply.status(400).send({ error: 'Önce yapı taraması yapın' })
 
-    const TARGET_SCHEMA = `
-crm_contacts: id, first_name, last_name, email, phone, company_id, contact_type, custom_fields(jsonb)
-crm_companies: id, name, industry, website, phone, custom_fields(jsonb)
-crm_deals: id, title, value, currency, stage, contact_id, company_id, custom_fields(jsonb)
-erp_products: id, name, sku, price, currency, stock_qty, custom_fields(jsonb)`
+    const hasUserMappings = Object.keys(userMappings).length > 0
+    const promptModules = hasUserMappings
+      ? allModules.filter(m => userMappings[m.name]).map(m => ({ sourceModule: m.name, targetTable: userMappings[m.name], fields: (m.fields ?? []).slice(0, 50), sampleRows: (m.sampleRows ?? []).slice(0, 5) }))
+      : allModules.slice(0, 15).map(m => ({ sourceModule: m.name, targetTable: null, fields: (m.fields ?? []).slice(0, 30), sampleRows: (m.sampleRows ?? []).slice(0, 3) }))
 
     const openrouterKey = env.OPENROUTER_API_KEY
     let connectorConfig: any = null
 
-    if (openrouterKey) {
+    if (openrouterKey && promptModules.length > 0) {
       try {
-        const prompt = `You are a data integration expert. Map the following source CRM structure to our target schema.
-
-SOURCE MODULES (JSON):
-${JSON.stringify(modules.slice(0, 15), null, 2)}
-
-TARGET SCHEMA:
-${TARGET_SCHEMA}
-
-Rules:
-- For each source module, decide which target table it maps to (crm_contacts, crm_companies, crm_deals, erp_products, or null if no match)
-- For each source field, decide: targetField (exact column name from target), transform type
-- transform types: direct, phone_e164, country_iso, name_case, email_lower, currency_strip, custom
-- Fields with no match → targetField="custom_fields", transform="custom", customFieldKey=sourceFieldName
-- Respond ONLY with valid JSON matching this exact structure:
-{
-  "mappings": [
-    {
-      "sourceModule": "string",
-      "targetTable": "crm_contacts|crm_companies|crm_deals|erp_products|null",
-      "fields": [
-        {"sourceField":"string","targetField":"string","transform":"direct","customFieldKey":"string|null"}
-      ]
-    }
-  ],
-  "unmappedFields": ["module.field"]
-}`
+        const prompt = hasUserMappings
+          ? `You are a data integration expert. Module-to-table mapping is fixed by the user. Do field-level mapping only.
+MAPPINGS (fixed): ${promptModules.map(m => `"${m.sourceModule}"→${m.targetTable}`).join(', ')}
+TARGET COLUMNS: crm_contacts(first_name,last_name,email,phone,mobile,company_name,job_title,city,country,contact_type,lead_source,custom_fields), crm_companies(name,industry,website,email,phone,city,country,tax_number,custom_fields), crm_deals(title,deal_value,currency,stage,probability,expected_close_date,custom_fields), erp_products(name,sku,category,cost_price,sale_price,currency,stock_quantity,unit,custom_fields)
+SOURCE DATA: ${JSON.stringify(promptModules, null, 2)}
+Rules: use sample data to pick transforms(phone_e164,email_lower,name_case,currency_strip,country_iso,direct,custom). Unmatched→custom_fields. Output ONLY JSON: {"mappings":[{"sourceModule":"str","targetTable":"str","fields":[{"sourceField":"str","targetField":"str","transform":"direct","customFieldKey":null}]}],"unmappedFields":[]}`
+          : `Map source CRM modules to target tables. SOURCE: ${JSON.stringify(promptModules, null, 2)}
+Decide targetTable (crm_contacts|crm_companies|crm_deals|erp_products|null) and field mappings.
+Output ONLY JSON: {"mappings":[{"sourceModule":"str","targetTable":"str","fields":[{"sourceField":"str","targetField":"str","transform":"direct","customFieldKey":null}]}],"unmappedFields":[]}`
 
         const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
           method: 'POST',
@@ -625,8 +745,7 @@ Rules:
           body: JSON.stringify({
             model: 'nvidia/llama-3.1-nemotron-70b-instruct:free',
             messages: [{ role: 'user', content: prompt }],
-            temperature: 0.1,
-            max_tokens: 4000,
+            temperature: 0.1, max_tokens: 4000,
           }),
           signal: AbortSignal.timeout(45000),
         })
@@ -636,11 +755,8 @@ Rules:
         if (jsonMatch) {
           const parsed = JSON.parse(jsonMatch[0])
           connectorConfig = {
-            version: 1,
-            generatedAt: new Date().toISOString(),
-            sourceType: conn.crmType,
-            mappings: parsed.mappings ?? [],
-            unmappedFields: parsed.unmappedFields ?? [],
+            version: 2, generatedAt: new Date().toISOString(), sourceType: conn.crmType,
+            userMappings, mappings: parsed.mappings ?? [], unmappedFields: parsed.unmappedFields ?? [], aiGenerated: true,
           }
         }
       } catch (err) {
@@ -648,16 +764,13 @@ Rules:
       }
     }
 
-    // Fallback: basic regex-based mapping if AI failed
     if (!connectorConfig) {
-      const fallbackMappings = buildFallbackMappings(modules, conn.crmType)
+      const fallbackMappings = hasUserMappings
+        ? buildFallbackMappingsFromUserMap(promptModules)
+        : buildFallbackMappings(allModules, conn.crmType)
       connectorConfig = {
-        version: 1,
-        generatedAt: new Date().toISOString(),
-        sourceType: conn.crmType,
-        mappings: fallbackMappings,
-        unmappedFields: [],
-        aiGenerated: false,
+        version: 2, generatedAt: new Date().toISOString(), sourceType: conn.crmType,
+        userMappings, mappings: fallbackMappings, unmappedFields: [], aiGenerated: false,
       }
     }
 
@@ -689,43 +802,67 @@ Rules:
   })
 }
 
-function buildFallbackMappings(modules: any[], sourceType: string) {
+const FIELD_MAP_PATTERNS: Record<string, { target: string; transform: string }> = {
+  email: { target: 'email', transform: 'email_lower' },
+  mail:  { target: 'email', transform: 'email_lower' },
+  phone: { target: 'phone', transform: 'phone_e164' },
+  mobile: { target: 'mobile', transform: 'phone_e164' },
+  first_name: { target: 'first_name', transform: 'name_case' },
+  last_name:  { target: 'last_name',  transform: 'name_case' },
+  name:       { target: 'name',       transform: 'name_case' },
+  full_name:  { target: 'full_name',  transform: 'name_case' },
+  website:    { target: 'website',    transform: 'direct' },
+  industry:   { target: 'industry',   transform: 'direct' },
+  amount:     { target: 'deal_value', transform: 'currency_strip' },
+  deal_name:  { target: 'title',      transform: 'direct' },
+  stage:      { target: 'stage',      transform: 'direct' },
+  price:      { target: 'sale_price', transform: 'currency_strip' },
+  unit_price: { target: 'sale_price', transform: 'currency_strip' },
+  cost_price: { target: 'cost_price', transform: 'currency_strip' },
+  sku:        { target: 'sku',        transform: 'direct' },
+  quantity:   { target: 'stock_quantity', transform: 'direct' },
+  stock:      { target: 'stock_quantity', transform: 'direct' },
+  country:    { target: 'country',    transform: 'country_iso' },
+  city:       { target: 'city',       transform: 'direct' },
+  address:    { target: 'address_line1', transform: 'direct' },
+  job_title:  { target: 'job_title',  transform: 'direct' },
+  title:      { target: 'job_title',  transform: 'direct' },
+  company:    { target: 'company_name', transform: 'name_case' },
+  tax_number: { target: 'tax_number', transform: 'direct' },
+  category:   { target: 'category',   transform: 'direct' },
+  description:{ target: 'description', transform: 'direct' },
+}
+
+function buildFallbackMappingsFromUserMap(promptModules: Array<{ sourceModule: string; targetTable: string; fields: any[] }>) {
+  return promptModules.map(mod => ({
+    sourceModule: mod.sourceModule,
+    targetTable: mod.targetTable,
+    fields: (mod.fields ?? []).map((f: any) => {
+      const key = (f.name ?? '').toLowerCase()
+      const mapped = FIELD_MAP_PATTERNS[key]
+      if (mapped) return { sourceField: f.name, targetField: mapped.target, transform: mapped.transform, customFieldKey: null }
+      return { sourceField: f.name, targetField: 'custom_fields', transform: 'custom', customFieldKey: f.name }
+    }),
+  }))
+}
+
+function buildFallbackMappings(modules: any[], _sourceType: string) {
   const contactPatterns  = /contact|lead|person|müşteri|kişi/i
   const companyPatterns  = /account|company|firma|şirket|organization/i
   const dealPatterns     = /deal|opportunity|fırsat|satış|pipeline/i
   const productPatterns  = /product|item|ürün|inventory/i
 
-  const fieldMap: Record<string, { target: string; transform: string }> = {
-    email: { target: 'email', transform: 'email_lower' },
-    mail:  { target: 'email', transform: 'email_lower' },
-    phone: { target: 'phone', transform: 'phone_e164' },
-    mobile: { target: 'phone', transform: 'phone_e164' },
-    first_name: { target: 'first_name', transform: 'name_case' },
-    last_name:  { target: 'last_name',  transform: 'name_case' },
-    name:       { target: 'name',       transform: 'name_case' },
-    website:    { target: 'website',    transform: 'direct' },
-    industry:   { target: 'industry',   transform: 'direct' },
-    amount:     { target: 'value',      transform: 'currency_strip' },
-    deal_name:  { target: 'title',      transform: 'direct' },
-    stage:      { target: 'stage',      transform: 'direct' },
-    price:      { target: 'price',      transform: 'currency_strip' },
-    sku:        { target: 'sku',        transform: 'direct' },
-    quantity:   { target: 'stock_qty',  transform: 'direct' },
-  }
-
   return modules.map((mod: any) => {
     let targetTable: string | null = null
-    if (contactPatterns.test(mod.name))  targetTable = 'crm_contacts'
+    if (contactPatterns.test(mod.name))      targetTable = 'crm_contacts'
     else if (companyPatterns.test(mod.name)) targetTable = 'crm_companies'
     else if (dealPatterns.test(mod.name))    targetTable = 'crm_deals'
     else if (productPatterns.test(mod.name)) targetTable = 'erp_products'
 
     const fields = (mod.fields ?? []).map((f: any) => {
-      const key = f.name?.toLowerCase()
-      const mapped = fieldMap[key ?? '']
-      if (mapped && targetTable) {
-        return { sourceField: f.name, targetField: mapped.target, transform: mapped.transform, customFieldKey: null }
-      }
+      const key = (f.name ?? '').toLowerCase()
+      const mapped = FIELD_MAP_PATTERNS[key]
+      if (mapped && targetTable) return { sourceField: f.name, targetField: mapped.target, transform: mapped.transform, customFieldKey: null }
       return { sourceField: f.name, targetField: 'custom_fields', transform: 'custom', customFieldKey: f.name }
     })
 

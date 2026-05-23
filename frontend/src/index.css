@@ -1,0 +1,222 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ═══════════════════════════════════════════════════════════════════
+   AURORA GLASS  ·  Ki Business Intelligence
+   Palette: Teal #26A69A  ·  Mint #7DD3C0  ·  Forest #2D8A6B
+   Light ↔ Dark via .dark on <html>
+   ═══════════════════════════════════════════════════════════════════ */
+
+/* ── CSS Variables ─────────────────────────────────────────────── */
+:root {
+  --teal:   #26A69A;
+  --mint:   #7DD3C0;
+  --forest: #2D8A6B;
+
+  /* Surfaces */
+  --surface:     rgba(255, 255, 255, 0.72);
+  --surface-2:   rgba(255, 255, 255, 0.44);
+  --surface-3:   rgba(38, 166, 154, 0.06);
+  --surface-h:   rgba(255, 255, 255, 0.88);
+
+  /* Borders */
+  --border:      rgba(38, 166, 154, 0.20);
+  --border-s:    rgba(38, 166, 154, 0.42);
+
+  /* Text */
+  --text-1:      #0e2b26;
+  --text-2:      #2c7068;
+  --text-3:      #6ba9a2;
+
+  /* Accent */
+  --accent:      #26A69A;
+  --accent-h:    #1d8c81;
+
+  /* Effects */
+  --shadow:    0 4px 20px rgba(38,166,154,0.09), 0 1px 4px rgba(0,0,0,0.05);
+  --shadow-lg: 0 8px 40px rgba(38,166,154,0.13), 0 2px 8px rgba(0,0,0,0.07);
+
+  /* Modal (opaque, readable regardless of backdrop) */
+  --surface-modal:   #f0faf8;
+  --surface-modal-2: #e2f4f1;
+
+  /* Aurora orbs */
+  --orb-a: rgba(38,  166, 154, 0.18);
+  --orb-b: rgba(45,  138, 107, 0.13);
+  --orb-c: rgba(125, 211, 192, 0.09);
+}
+
+.dark {
+  --surface:     rgba(255, 255, 255, 0.05);
+  --surface-2:   rgba(0,   0,   0,   0.32);
+  --surface-3:   rgba(38, 166, 154, 0.08);
+  --surface-h:   rgba(255, 255, 255, 0.09);
+
+  --border:      rgba(125, 211, 192, 0.12);
+  --border-s:    rgba(125, 211, 192, 0.30);
+
+  --text-1:      #d8f4ef;
+  --text-2:      #7DD3C0;
+  --text-3:      #3a6b64;
+
+  --accent:      #26A69A;
+  --accent-h:    #7DD3C0;
+
+  --shadow:    0 4px 24px rgba(0,0,0,0.42), 0 1px 4px rgba(0,0,0,0.26);
+  --shadow-lg: 0 8px 40px rgba(0,0,0,0.56), 0 2px 8px rgba(0,0,0,0.36);
+
+  --orb-a: rgba(38,  166, 154, 0.22);
+  --orb-b: rgba(45,  138, 107, 0.16);
+  --orb-c: rgba(125, 211, 192, 0.06);
+
+  /* Modal overrides — solid in dark mode */
+  --surface-modal:   #0f2420;
+  --surface-modal-2: #162e29;
+}
+
+/* ── Base ──────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; }
+
+html { font-size: 16px; scroll-behavior: smooth; }
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  color: var(--text-1);
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  -webkit-font-smoothing: antialiased;
+  background-color: #eef9f7;
+  background-attachment: fixed;
+  overflow-x: hidden;
+  position: relative;
+}
+
+/* Light mode body gradient */
+body {
+  background-image: linear-gradient(135deg, #d4f2ed 0%, #f0fdfa 40%, #e0f2fe 100%);
+}
+
+/* Dark mode body gradient */
+.dark body {
+  background-color: #071410;
+  background-image: linear-gradient(135deg, #071410 0%, #0b1d29 55%, #071410 100%);
+}
+
+/* Aurora orbs – positioned via pseudo-element on a wrapper */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background:
+    radial-gradient(ellipse 65vw 55vh at 78%  -8%, var(--orb-a), transparent),
+    radial-gradient(ellipse 52vw 48vh at -8%  82%, var(--orb-b), transparent),
+    radial-gradient(ellipse 44vw 44vh at 50% 108%, var(--orb-c), transparent);
+}
+
+#root { position: relative; z-index: 1; min-height: 100vh; }
+
+/* ── Scrollbar ─────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border-s); border-radius: 99px; }
+::-webkit-scrollbar-thumb:hover { background: var(--accent); }
+
+/* ── Glass utilities ───────────────────────────────────────────── */
+@layer utilities {
+  .glass {
+    background: var(--surface);
+    backdrop-filter: blur(20px) saturate(1.5);
+    -webkit-backdrop-filter: blur(20px) saturate(1.5);
+    border: 1px solid var(--border);
+    box-shadow: var(--shadow);
+  }
+  .glass-strong {
+    background: var(--surface);
+    backdrop-filter: blur(30px) saturate(1.8);
+    -webkit-backdrop-filter: blur(30px) saturate(1.8);
+    border: 1px solid var(--border-s);
+    box-shadow: var(--shadow-lg);
+  }
+  .glass-nested {
+    background: var(--surface-2);
+  }
+  .aurora-accent   { color: var(--accent); }
+  .aurora-border   { border-color: var(--border); }
+  .aurora-border-s { border-color: var(--border-s); }
+  .text-1 { color: var(--text-1); }
+  .text-2 { color: var(--text-2); }
+  .text-3 { color: var(--text-3); }
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   CASCADE OVERRIDES
+   Maps every hardcoded dark-theme Tailwind class → aurora glass token
+   Zero page-file rewrites required.
+   ═══════════════════════════════════════════════════════════════════ */
+
+/* ── Surfaces ──────────────────────────────────────────────────── */
+.bg-\[\#0a0a0a\] {
+  background: var(--surface-2) !important;
+}
+.bg-\[\#111111\] {
+  background: var(--surface) !important;
+  backdrop-filter: blur(20px) saturate(1.5) !important;
+  -webkit-backdrop-filter: blur(20px) saturate(1.5) !important;
+}
+.bg-\[\#222\],
+.bg-\[\#222222\] {
+  background: var(--surface-3) !important;
+}
+
+/* ── Borders ───────────────────────────────────────────────────── */
+.border-\[\#2a2a2a\] { border-color: var(--border) !important; }
+
+/* ── Accent (indigo → aurora teal) ────────────────────────────── */
+.text-\[\#6366f1\]              { color: var(--accent) !important; }
+.border-\[\#6366f1\]            { border-color: var(--accent) !important; }
+.bg-\[\#6366f1\]                { background: var(--accent) !important; }
+.bg-\[\#4f46e5\]                { background: var(--accent-h) !important; }
+.hover\:bg-\[\#4f46e5\]:hover   { background: var(--accent-h) !important; }
+.hover\:bg-\[\#222\]:hover,
+.hover\:bg-\[\#2a2a2a\]:hover   { background: var(--surface-h) !important; }
+.focus\:ring-\[\#6366f1\]:focus {
+  --tw-ring-color: rgba(38, 166, 154, 0.5) !important;
+}
+/* bg-[#6366f1]/10 accent tint */
+.bg-\[\#6366f1\]\/10            { background: rgba(38, 166, 154, 0.10) !important; }
+
+/* ── Text inside glass cards ───────────────────────────────────── */
+/* Headings and body copy become aurora-dark in light mode */
+.bg-\[\#111111\] .text-white   { color: var(--text-1); }
+.bg-\[\#111111\] .text-gray-300 { color: var(--text-2); }
+.bg-\[\#111111\] .text-gray-400 { color: var(--text-2); }
+.bg-\[\#111111\] .text-gray-500 { color: var(--text-3); }
+.bg-\[\#111111\] .text-gray-600 { color: var(--text-3); }
+
+.bg-\[\#0a0a0a\] .text-gray-300 { color: var(--text-2); }
+.bg-\[\#0a0a0a\] .text-gray-400 { color: var(--text-2); }
+.bg-\[\#0a0a0a\] .text-gray-500 { color: var(--text-3); }
+
+/* ── Page-level headings (outside cards) ──────────────────────── */
+main h1, main h2, main h3, main h4 { color: var(--text-1); }
+main .text-gray-400 { color: var(--text-2); }
+main .text-gray-500 { color: var(--text-3); }
+main .text-gray-300 { color: var(--text-2); }
+
+/* ── Preserve white text on colored elements ───────────────────── */
+button.text-white,
+a.text-white,
+.bg-\[\#6366f1\].text-white,
+.bg-red-600.text-white,
+.bg-red-700.text-white,
+.bg-\[\#111111\] button.text-white,
+.bg-\[\#111111\] a.text-white {
+  color: white !important;
+}
+
+/* ── Sidebar text overrides ────────────────────────────────────── */
+aside .text-gray-400 { color: var(--text-2); }
+aside .text-gray-500 { color: var(--text-3); }

@@ -1,0 +1,69 @@
+import { useEffect } from 'react'
+import { Routes, Route, Navigate } from 'react-router-dom'
+import { useAuth } from './store/auth'
+import Layout from './components/Layout'
+import Landing from './pages/Landing'
+import Login from './pages/Login'
+import TwoFactor from './pages/TwoFactor'
+import Dashboard from './pages/Dashboard'
+import Modules from './pages/Modules'
+import Accounting from './pages/Accounting'
+import Files from './pages/Files'
+import AiChat from './pages/AiChat'
+import EntityAI from './pages/EntityAI'
+import Support from './pages/Support'
+import Settings from './pages/Settings'
+import Admin from './pages/Admin'
+import PlatformSettings from './pages/PlatformSettings'
+function PrivateRoute({ children }: { children: React.ReactNode }) {
+  const { accessToken } = useAuth()
+  if (!accessToken) return <Navigate to="/app/login" replace />
+  return <>{children}</>
+}
+
+function AdminRoute({ children }: { children: React.ReactNode }) {
+  const { accessToken, user } = useAuth()
+  if (!accessToken) return <Navigate to="/app/login" replace />
+  const role = (user as any)?.role
+  if (role !== 'admin' && role !== 'supervisor') return <Navigate to="/app/dashboard" replace />
+  return <>{children}</>
+}
+
+function AppShell() {
+  return (
+    <div className="min-h-screen">
+      <Routes>
+        <Route path="/" element={<Landing />} />
+        <Route path="/app/login" element={<Login />} />
+        <Route path="/app/login/2fa" element={<TwoFactor />} />
+        <Route path="/app" element={<PrivateRoute><Layout /></PrivateRoute>}>
+          <Route index element={<Navigate to="/app/dashboard" replace />} />
+          <Route path="dashboard"  element={<Dashboard />} />
+          <Route path="crm"        element={<Modules />} />
+          <Route path="modules"    element={<Navigate to="/app/crm" replace />} />
+          <Route path="accounting" element={<Accounting />} />
+          <Route path="files"      element={<Files />} />
+          <Route path="chat"       element={<AiChat />} />
+          <Route path="entity-ai"  element={<EntityAI />} />
+          <Route path="support"    element={<Support />} />
+          <Route path="settings"   element={<Settings />} />
+          <Route path="admin"          element={<AdminRoute><Admin /></AdminRoute>} />
+          <Route path="admin/settings" element={<AdminRoute><PlatformSettings /></AdminRoute>} />
+        </Route>
+      </Routes>
+    </div>
+  )
+}
+
+function App() {
+  useEffect(() => {
+    const saved = localStorage.getItem('ki-theme')
+    const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches
+    const isDark = saved ? saved === 'dark' : prefersDark
+    document.documentElement.classList.toggle('dark', isDark)
+  }, [])
+
+  return <AppShell />
+}
+
+export default App

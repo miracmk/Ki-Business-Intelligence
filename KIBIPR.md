@@ -734,4 +734,65 @@ entity_{slug}.crm_contacts / crm_companies / crm_deals / erp_products
 
 ---
 
-*Son güncelleme: YFZ 1-17 tamamlandı. Platform temizliği (Admin.tsx), 5 adımlı CRM konnektör sihirbazı (SSE canlı log, AI alan eşleştirme, v2 connector ETL), periyodik sync scheduler, entity DB önizleme. Build ve deploy yapıldı. 23 Mayıs 2026.*
+#### YFZ 18 — CRM Sihirbazı Yeniden Tasarımı (6 Adım + Kullanıcı Modül Eşleştirmesi)
+
+**Görev 1 — Platform Management Temizliği**
+- [x] Admin.tsx doğrulandı: hâlâ temiz (3 tab: Genel Bakış / Entityler / Destek), chat/model state yok
+
+**Görev 2 — 6 Adımlı Sihirbaz (CrmConnectorWizard.tsx tam yeniden yazıldı)**
+- [x] Adım 1: Kaynak tipi seçimi (Veritabanı seçilmeden ilerlenemez; CRM API → bilgi kartı gösterilir)
+- [x] Adım 2: DB bağlantı formu + test + kaydet (değişmedi)
+- [x] Adım 3: SSE tarama çalışırken canlı log + modül listesi; tarama bitince 3-sekme yapı görüntüsü:
+  - **Modüller sekmesi:** Modül adı, kayıt sayısı, alan sayısı tablosu
+  - **Alanlar sekmesi:** Her modülün kolon adları, tipleri, örnek değerleri (tüm modüller birleşik)
+  - **Örnek Veri sekmesi:** Her modülden ham ilk 5 satır (alan başlıklı tablo)
+- [x] Adım 4: Modül eşleştirmesi — kullanıcı dropdown ile hedef tablo seçer (AI yok)
+  - Regex öneri motoru (`suggestTargetTable()`): contact/lead→crm_contacts, account/company→crm_companies, deal/opportunity→crm_deals, product/item→erp_products
+  - Dropdown'lar: `background: var(--surface-modal), color: var(--text-1)` (dark mode uyumlu)
+  - Eşleşen modül sayacı alt satırda gösterilir
+- [x] Adım 5: AI konnektör üretimi — SSE canlı log akışı
+  - Yeni endpoint: `GET /crm/connections/:id/generate-connector/stream?token=&m=<urlencoded-userMappings-json>`
+  - Modül başına progress eventi: "X modülü hazırlanıyor — Y alan"
+  - OpenRouter AI çağrısı: sadece field mapping (modül eşleştirmesi kullanıcıdan sabit)
+  - Fallback regex: `buildFallbackMappingsFromUserMap()` — userMappings'ten targetTable, alan adına göre transform
+  - Konnektör DB'ye kaydedilir, done eventi içinde connector JSON gönderilir
+  - Tamamlanınca Adım 6'ya otomatik geçiş (600ms delay)
+- [x] Adım 6: Önizleme ve onay — iki sütun düzen:
+  - Sol: düzenlenebilir alan eşleştirme tablosu (kaynak, hedef input, transform select)
+  - Sağ: DB schema önizlemesi — her hedef tablo için eşleşen alanlar (yeşil badge) + custom_fields'e gidenler (gri badge)
+  - "Onayla ve Kaydet" → PUT connector + POST sync/entity + modal kapanır
+
+**Görev 3 — generate-connector POST Endpoint Güncelleme**
+- [x] Request body'ye `userMappings: Record<string, string | null>` eklendi
+- [x] AI prompt: `hasUserMappings=true` durumunda "modül eşleştirmesi sabittir, sadece field mapping yap" prompt'u
+- [x] AI prompt: `hasUserMappings=false` durumunda eski modül+field mapping prompt'u (geriye dönük uyumluluk)
+- [x] Fallback: `hasUserMappings=true` → `buildFallbackMappingsFromUserMap()` (targetTable userMappings'ten), `false` → `buildFallbackMappings()` (regex module detection)
+- [x] connectorConfig `version: 2` (userMappings tabanlı) vs eski `version: 1`
+
+**Görev 4 — scan-structure SSE'ye Örnek Veri Ekleme**
+- [x] SSE `structure` eventi: `{ name, label, recordCount, fields: enrichedFields, sampleRows: [...5 ham satır] }`
+- [x] Redis cache: modül objesi artık `sampleRows` içeriyor
+- [x] Frontend Adım 3 "Örnek Veri" sekmesi bu veriyi kullanıyor
+
+**Görev 5 — Dropdown Görünürlük**
+- [x] Tüm `<select>` ve `<option>` öğeleri: `background: var(--surface-modal), color: var(--text-1)`
+- [x] TARGET_TABLE_OPTIONS sabit liste olarak tanımlandı (API'den gelmiyor)
+
+**Görev 6 — entity-etl.ts Güncelleme**
+- [x] `ENTITY_TABLE_DDL`: her hedef tablo için `CREATE TABLE IF NOT EXISTS` DDL
+- [x] `ensureEntityTable(pool, schemaName, tableName)`: tablo varlığını kontrol eder, yoksa DDL çalıştırır
+- [x] `runConnectorEtl()`: her mapping öncesi `ensureEntityTable()` çağrısı — entity provisioning yapılmamış olsa bile çalışır
+- [x] Upsert conflict kolonu: `external_id` (entity-schema-template.sql ile uyumlu)
+
+**Yeni Sabit/Fonksiyonlar (crm.ts)**
+- [x] `FIELD_MAP_PATTERNS`: alan adı → `{target, transform}` eşleştirme sözlüğü (30+ pattern)
+- [x] `buildFallbackMappingsFromUserMap()`: userMappings kullanarak targetTable belirler, FIELD_MAP_PATTERNS ile field mapping
+- [x] `buildFallbackMappings()`: eski regex-tabanlı modül detection (v1 uyumluluğu için)
+
+**Deploy:**
+- Build: `✓ built in 5.32s`
+- Backend: `docker compose restart ki_api` — `[CrmScheduler] Started`
+
+---
+
+*Son güncelleme: YFZ 1-18 tamamlandı. 6 adımlı CRM konnektör sihirbazı: kullanıcı modül eşleştirmesi (Adım 4), AI sadece field mapping yapar (Adım 5 SSE), örnek veri 3 sekmeli yapı görüntüsü (Adım 3), entity tablo garantisi (ensureEntityTable), dark-mode uyumlu dropdown'lar. 23 Mayıs 2026.*

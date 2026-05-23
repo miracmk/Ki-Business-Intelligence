@@ -1,27 +1,13 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Navigate } from 'react-router-dom'
-import { BarChart3, Sparkles, ShieldCheck, Users, RefreshCw, Send } from 'lucide-react'
+import { BarChart3, Sparkles, ShieldCheck, Users, RefreshCw } from 'lucide-react'
 import api from '../lib/api'
 import { useAuth } from '../store/auth'
-
-const MODEL_ROLE_INFO: Record<string, { label: string; desc: string }> = {
-  conversation:       { label: 'Konuşma', desc: 'Kullanıcı ile doğrudan sohbet eden ana model' },
-  db_search:          { label: 'DB Arama', desc: 'SQL sorgu üretimi ve veritabanı aramaları' },
-  qdrant_search:      { label: 'Vektör Arama', desc: 'Qdrant semantik vektör araması' },
-  redis_search:       { label: 'Cache Arama', desc: 'Redis önbellek ve hızlı veri erişimi' },
-  intent:             { label: 'Niyet Tespiti', desc: 'Kullanıcı niyetini anlama ve sınıflandırma' },
-  support_intent:     { label: 'Destek Niyet', desc: 'Destek taleplerinde niyet tespiti' },
-  support_refine:     { label: 'Destek Geliştirme', desc: 'Destek yanıtlarını iyileştirme ve netleştirme' },
-  support_resolver:   { label: 'Destek Çözüm', desc: 'Çözüm önerisi üretme' },
-  support_answering:  { label: 'Destek Yanıt', desc: 'Son kullanıcıya yanıt oluşturma' },
-}
 
 const tabs = [
   { id: 'overview', label: 'Genel Bakış' },
   { id: 'entities', label: 'Entityler' },
-  { id: 'chat', label: 'KIBI Chat' },
   { id: 'support', label: 'Destek' },
-  { id: 'models', label: 'Model Yönetimi' },
 ]
 
 const serviceCategories = [
@@ -45,70 +31,20 @@ export default function Admin() {
   const [metrics, setMetrics] = useState<any>(null)
   const [entities, setEntities] = useState<any[]>([])
   const [tickets, setTickets] = useState<any[]>([])
-  const [models, setModels] = useState<any[]>([])
-  const [chatMessages, setChatMessages] = useState<any[]>([])
-  const [chatInput, setChatInput] = useState('')
-  const [chatLoading, setChatLoading] = useState(false)
   const [entityQuery, setEntityQuery] = useState('')
   const [ticketFilter, setTicketFilter] = useState('')
   const [statusFilter, setStatusFilter] = useState('')
   const [ticketDetail, setTicketDetail] = useState<any>(null)
-  const [modelEdit, setModelEdit] = useState<any>(null)
-  const [modelForm, setModelForm] = useState<any>({ primaryModel: '', fallback1: '', fallback2: '', fallback3: '', provider: 'openrouter', apiKey: '', temperature: 0.4, maxTokens: 1500, isActive: true })
-  const [openrouterModels, setOpenrouterModels] = useState<any[]>([])
 
   useEffect(() => {
     if (user?.role !== 'admin' && user?.role !== 'supervisor') return
     api.get('/admin/metrics').then(res => setMetrics(res.data)).catch(console.error)
     api.get('/admin/entities?limit=20').then(res => setEntities(res.data.entities ?? [])).catch(console.error)
     api.get('/admin/support/tickets').then(res => setTickets(res.data.tickets ?? [])).catch(console.error)
-    api.get('/admin/models').then(res => setModels(res.data.models ?? [])).catch(console.error)
-    api.get('/ai/openrouter-models').then(res => setOpenrouterModels(res.data.models ?? [])).catch(console.error)
   }, [user])
 
   const activeEntities = useMemo(() => entities.filter((entity) => !entityQuery || String(entity.company_name ?? entity.client_id ?? '').toLowerCase().includes(entityQuery.toLowerCase())), [entities, entityQuery])
   const activeTickets = useMemo(() => tickets.filter((ticket) => (!ticketFilter || ticket.service_category?.includes(ticketFilter)) && (!statusFilter || ticket.status === statusFilter)), [tickets, ticketFilter, statusFilter])
-
-  const handleModelEdit = (model: any) => {
-    setModelEdit(model)
-    // Drizzle ORM returns camelCase field names
-    setModelForm({
-      primaryModel: model.primaryModel || '',
-      fallback1: model.fallback1 || '',
-      fallback2: model.fallback2 || '',
-      fallback3: model.fallback3 || '',
-      provider: model.provider || 'openrouter',
-      apiKey: model.apiKey || '',
-      temperature: Number(model.temperature) || 0.4,
-      maxTokens: Number(model.maxTokens) || 1500,
-      isActive: model.isActive ?? true,
-    })
-  }
-
-  const saveModelConfig = async () => {
-    if (!modelEdit) return
-    await api.put(`/admin/models/${modelEdit.modelRole}`, modelForm)
-    setModelEdit(null)
-    api.get('/admin/models').then(res => setModels(res.data.models ?? [])).catch(console.error)
-  }
-
-  const sendChat = async () => {
-    if (!chatInput.trim()) return
-    setChatMessages((prev) => [...prev, { role: 'user', content: chatInput }])
-    setChatLoading(true)
-    try {
-      const sessionId = localStorage.getItem('kibi-admin-session') || `admin-${Date.now()}`
-      localStorage.setItem('kibi-admin-session', sessionId)
-      const { data } = await api.post('/kibi/chat', { message: chatInput, sessionId })
-      setChatMessages((prev) => [...prev, { role: 'assistant', content: data.response || data.answer || 'Yanıt yok' }])
-      setChatInput('')
-    } catch (error) {
-      console.error(error)
-      setChatMessages((prev) => [...prev, { role: 'assistant', content: 'Mesaj gönderilemedi.' }])
-    } finally {
-      setChatLoading(false)
-    }
-  }
 
   const loadTicket = async (ticket: any) => {
     setTicketDetail(ticket)
@@ -263,40 +199,6 @@ export default function Admin() {
         </div>
       )}
 
-      {currentTab === 'chat' && (
-        <div className="grid gap-6 lg:grid-cols-[360px_1fr]">
-          <div className="space-y-4">
-            <div className="p-6 rounded-3xl border border-[#2a2a2a] bg-[#111111]">
-              <h3 className="text-lg font-semibold text-white mb-3">Kısa Açıklama</h3>
-              <p className="text-gray-400 text-sm">KIBI ile platform genelindeki veriler üzerinden sorular sorabilirsiniz.</p>
-            </div>
-          </div>
-          <div className="flex flex-col rounded-3xl border border-[#2a2a2a] bg-[#111111] overflow-hidden">
-            <div className="p-6 border-b border-[#2a2a2a]"><h2 className="text-lg font-semibold text-white">KIBI Admin Chat</h2></div>
-            <div className="flex-1 p-6 overflow-y-auto space-y-4">
-              {chatMessages.length === 0 && <div className="text-gray-500">Sorunuzu aşağıya yazın.</div>}
-              {chatMessages.map((msg, index) => (
-                <div key={index} className={`max-w-[80%] ${msg.role === 'user' ? 'ml-auto bg-[#6366f1] text-white' : 'bg-[#0f172a] text-gray-200'} rounded-3xl px-4 py-3`}> {msg.content}</div>
-              ))}
-            </div>
-            <div className="p-4 border-t border-[#2a2a2a] bg-[#090a0f]">
-              <div className="flex gap-3">
-                <textarea
-                  value={chatInput}
-                  onChange={(e) => setChatInput(e.target.value)}
-                  rows={2}
-                  className="flex-1 rounded-3xl border border-[#2a2a2a] bg-[#111111] px-4 py-3 text-white"
-                  placeholder="KIBI'ye sorun..."
-                />
-                <button onClick={sendChat} disabled={chatLoading} className="flex items-center gap-2 px-4 py-3 rounded-3xl bg-[#6366f1] text-white disabled:opacity-50">
-                  <Send size={16} /> Gönder
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
       {currentTab === 'support' && (
         <div className="grid gap-6 lg:grid-cols-[360px_1fr]">
           <div className="p-6 rounded-3xl border border-[#2a2a2a] bg-[#111111] space-y-4">
@@ -363,102 +265,6 @@ export default function Admin() {
         </div>
       )}
 
-      {currentTab === 'models' && (
-        <div className="grid gap-6 lg:grid-cols-[1fr_360px]">
-          <div className="space-y-6">
-            <div className="rounded-3xl border border-[#2a2a2a] bg-[#111111] p-6">
-              <h2 className="text-lg font-semibold text-white mb-4">KIBI AI — Model Konfigürasyonları</h2>
-              <div className="space-y-4">
-                {models.length === 0 ? (
-                  <p className="text-gray-500">Henüz model konfigürasyonu bulunamadı.</p>
-                ) : models.map((model) => {
-                  const info = MODEL_ROLE_INFO[model.modelRole]
-                  return (
-                    <div key={model.id} className="rounded-3xl border border-[#2a2a2a] p-4 bg-[#0b1120]">
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-2 flex-wrap">
-                            <p className="text-white font-semibold">{info?.label ?? model.modelRole}</p>
-                            <span className={`text-xs px-2 py-0.5 rounded-full ${model.isActive ? 'bg-green-900 text-green-300' : 'bg-gray-700 text-gray-400'}`}>
-                              {model.isActive ? 'Aktif' : 'Pasif'}
-                            </span>
-                          </div>
-                          {info?.desc && <p className="text-xs text-gray-500 mt-0.5">{info.desc}</p>}
-                          <p className="text-sm text-[#6366f1] mt-1 truncate font-mono text-xs">{model.primaryModel || '— seçilmedi —'}</p>
-                        </div>
-                        <button onClick={() => handleModelEdit(model)} className="px-3 py-2 rounded-2xl bg-[#6366f1] text-white text-sm shrink-0">Düzenle</button>
-                      </div>
-                    </div>
-                  )
-                })}
-              </div>
-            </div>
-          </div>
-          <div className="rounded-3xl border border-[#2a2a2a] bg-[#111111] p-6">
-            <h2 className="text-lg font-semibold text-white mb-4">Model Düzenle</h2>
-            {!modelEdit ? (
-              <p className="text-gray-500">Listeden bir model seçin.</p>
-            ) : (
-              <div className="space-y-4">
-                <div>
-                  <p className="text-sm text-gray-400">Rol</p>
-                  <p className="mt-1 text-white font-medium">{MODEL_ROLE_INFO[modelEdit.modelRole]?.label ?? modelEdit.modelRole}</p>
-                  {MODEL_ROLE_INFO[modelEdit.modelRole]?.desc && (
-                    <p className="text-xs text-gray-500 mt-0.5">{MODEL_ROLE_INFO[modelEdit.modelRole].desc}</p>
-                  )}
-                </div>
-                {(['primaryModel', 'fallback1', 'fallback2', 'fallback3'] as const).map((key, i) => (
-                  <div key={key}>
-                    <label className="text-sm text-gray-400">{i === 0 ? 'Ana Model' : `Yedek ${i}`}</label>
-                    <select
-                      value={modelForm[key]}
-                      onChange={e => setModelForm({ ...modelForm, [key]: e.target.value })}
-                      className="w-full mt-1 px-4 py-3 rounded-3xl bg-[#0a0a0a] border border-[#2a2a2a] text-white text-sm"
-                    >
-                      <option value="">— Seçin —</option>
-                      {openrouterModels.map((m: any) => (
-                        <option key={m.id} value={m.id}>{m.name ?? m.id}</option>
-                      ))}
-                      {modelForm[key] && !openrouterModels.find((m: any) => m.id === modelForm[key]) && (
-                        <option value={modelForm[key]}>{modelForm[key]}</option>
-                      )}
-                    </select>
-                  </div>
-                ))}
-                <div>
-                  <label className="text-sm text-gray-400">Provider</label>
-                  <select value={modelForm.provider} onChange={e => setModelForm({ ...modelForm, provider: e.target.value })} className="w-full mt-1 px-4 py-3 rounded-3xl bg-[#0a0a0a] border border-[#2a2a2a] text-white text-sm">
-                    <option value="openrouter">OpenRouter</option>
-                    <option value="openai">OpenAI</option>
-                    <option value="anthropic">Anthropic</option>
-                    <option value="google">Google</option>
-                    <option value="custom">Custom</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="text-sm text-gray-400">API Key</label>
-                  <input type="password" value={modelForm.apiKey} onChange={e => setModelForm({ ...modelForm, apiKey: e.target.value })} className="w-full mt-1 px-4 py-3 rounded-3xl bg-[#0a0a0a] border border-[#2a2a2a] text-white" />
-                </div>
-                <div className="grid gap-4 sm:grid-cols-2">
-                  <div>
-                    <label className="text-sm text-gray-400">Temperature</label>
-                    <input type="number" step="0.1" min="0" max="2" value={modelForm.temperature} onChange={e => setModelForm({ ...modelForm, temperature: Number(e.target.value) })} className="w-full mt-1 px-4 py-3 rounded-3xl bg-[#0a0a0a] border border-[#2a2a2a] text-white" />
-                  </div>
-                  <div>
-                    <label className="text-sm text-gray-400">Max Tokens</label>
-                    <input type="number" value={modelForm.maxTokens} onChange={e => setModelForm({ ...modelForm, maxTokens: Number(e.target.value) })} className="w-full mt-1 px-4 py-3 rounded-3xl bg-[#0a0a0a] border border-[#2a2a2a] text-white" />
-                  </div>
-                </div>
-                <div className="flex items-center gap-3">
-                  <input id="activeToggle" type="checkbox" checked={modelForm.isActive} onChange={e => setModelForm({ ...modelForm, isActive: e.target.checked })} className="h-4 w-4 accent-[#6366f1]" />
-                  <label htmlFor="activeToggle" className="text-gray-300">Aktif</label>
-                </div>
-                <button onClick={saveModelConfig} className="w-full px-4 py-3 rounded-3xl bg-[#6366f1] text-white">Kaydet</button>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
     </div>
   )
 }

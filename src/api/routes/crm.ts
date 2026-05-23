@@ -421,4 +421,314 @@ export const crmRoutes: FastifyPluginAsync = async (app) => {
     await db.update(crmConnections).set({ ...(name && { name }), ...(isActive !== undefined && { isActive }), updatedAt: new Date() }).where(eq(crmConnections.id, id))
     return reply.send({ ok: true })
   })
+
+  // ── Structure scan ──────────────────────────────────────────────────────────
+
+  // POST /api/v1/crm/connections/:id/scan-structure
+  app.post('/connections/:id/scan-structure', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const { id } = req.params as { id: string }
+
+    const cacheKey = `ki:crm:structure:${id}`
+    const cached = await redis.get(cacheKey)
+    if (cached) return reply.send({ modules: JSON.parse(cached), cached: true })
+
+    const conn = await db.query.crmConnections.findFirst({ where: eq(crmConnections.id, id) })
+    if (!conn) return reply.status(404).send({ error: 'Bağlantı bulunamadı' })
+
+    const creds = decryptJson<any>(conn.credentials)
+    const adapter = createAdapter({ ...creds, type: conn.crmType } as any)
+
+    const rawModules = await adapter.getModules()
+    const modules: any[] = []
+
+    for (const mod of rawModules.slice(0, 50)) {
+      const fields = await adapter.getModuleFields(mod.apiName).catch(() => [])
+      let sampleRows: any[] = []
+      try {
+        const sr = await adapter.search({ module: mod.apiName, page: 1, perPage: 5 })
+        sampleRows = sr.records ?? []
+      } catch { /* ignore */ }
+
+      const enrichedFields = fields.map((f: any) => {
+        const sampleValues = sampleRows
+          .map(r => r[f.apiName] ?? r[f.name])
+          .filter(v => v != null && String(v).length > 0)
+          .slice(0, 3)
+          .map(v => String(v))
+        return { name: f.apiName ?? f.name, label: f.label ?? f.name, type: f.dataType ?? f.type, sampleValues }
+      })
+
+      let recordCount = 0
+      try {
+        if ((adapter as any).getTableCount) {
+          recordCount = await (adapter as any).getTableCount(mod.apiName)
+        }
+      } catch { /* ignore */ }
+
+      modules.push({
+        name: mod.apiName,
+        label: mod.pluralLabel ?? mod.apiName,
+        recordCount,
+        fields: enrichedFields,
+        relations: [],
+      })
+    }
+
+    await redis.set(cacheKey, JSON.stringify(modules), 'EX', 1800)
+    return reply.send({ modules, scannedAt: new Date().toISOString() })
+  })
+
+  // GET /api/v1/crm/connections/:id/scan-structure/stream  (SSE)
+  // SSE endpoint — EventSource cannot send headers, so we accept token via query param
+  app.get('/connections/:id/scan-structure/stream', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    const { token } = req.query as { token?: string }
+
+    // Auth: try header first, then query param
+    try {
+      if (token) {
+        // manually verify token from query param
+        const decoded = app.jwt.verify(token) as any
+        ;(req as any).user = decoded
+      } else {
+        await (req as any).jwtVerify()
+      }
+    } catch {
+      reply.raw.writeHead(401); reply.raw.end('Unauthorized'); return
+    }
+
+    const conn = await db.query.crmConnections.findFirst({ where: eq(crmConnections.id, id) })
+    if (!conn) {
+      reply.raw.writeHead(404); reply.raw.end(); return
+    }
+
+    reply.raw.writeHead(200, {
+      'Content-Type':  'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection':    'keep-alive',
+      'X-Accel-Buffering': 'no',
+    })
+
+    const send = (type: string, message: string, percent: number) => {
+      reply.raw.write(`data: ${JSON.stringify({ type, message, percent })}\n\n`)
+    }
+
+    const heartbeat = setInterval(() => { reply.raw.write(': ping\n\n') }, 15000)
+    reply.raw.on('close', () => clearInterval(heartbeat))
+
+    try {
+      send('progress', 'Bağlantı kontrol ediliyor...', 2)
+      const creds = decryptJson<any>(conn.credentials)
+      const adapter = createAdapter({ ...creds, type: conn.crmType } as any)
+
+      send('progress', 'Modüller taranıyor...', 5)
+      const rawModules = await adapter.getModules()
+      send('progress', `${rawModules.length} modül bulundu`, 15)
+
+      const modules: any[] = []
+      const total = Math.min(rawModules.length, 50)
+
+      for (let i = 0; i < total; i++) {
+        const mod = rawModules[i]!
+        send('progress', `"${mod.pluralLabel ?? mod.apiName}" taranıyor...`, 15 + Math.round((i / total) * 70))
+
+        const fields = await adapter.getModuleFields(mod.apiName).catch(() => [])
+        let sampleRows: any[] = []
+        try {
+          const sr = await adapter.search({ module: mod.apiName, page: 1, perPage: 5 })
+          sampleRows = sr.records ?? []
+        } catch { /* ignore */ }
+
+        const enrichedFields = fields.map((f: any) => {
+          const sampleValues = sampleRows
+            .map(r => r[f.apiName] ?? r[f.name])
+            .filter(v => v != null && String(v).length > 0)
+            .slice(0, 3)
+            .map(v => String(v))
+          return { name: f.apiName ?? f.name, label: f.label ?? f.name, type: f.dataType ?? f.type, sampleValues }
+        })
+
+        let recordCount = 0
+        try {
+          if ((adapter as any).getTableCount) recordCount = await (adapter as any).getTableCount(mod.apiName)
+        } catch { /* ignore */ }
+
+        modules.push({ name: mod.apiName, label: mod.pluralLabel ?? mod.apiName, recordCount, fields: enrichedFields, relations: [] })
+        send('structure', JSON.stringify({ name: mod.apiName, label: mod.pluralLabel ?? mod.apiName, fieldCount: fields.length, recordCount }), 15 + Math.round(((i + 1) / total) * 70))
+      }
+
+      const cacheKey = `ki:crm:structure:${id}`
+      await redis.set(cacheKey, JSON.stringify(modules), 'EX', 1800)
+      send('done', `Tarama tamamlandı — ${modules.length} modül, önbelleğe alındı`, 100)
+
+    } catch (err: any) {
+      send('error', err.message ?? 'Bilinmeyen hata', 0)
+    } finally {
+      clearInterval(heartbeat)
+      reply.raw.end()
+    }
+  })
+
+  // POST /api/v1/crm/connections/:id/generate-connector
+  app.post('/connections/:id/generate-connector', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const { id } = req.params as { id: string }
+
+    const conn = await db.query.crmConnections.findFirst({ where: eq(crmConnections.id, id) })
+    if (!conn) return reply.status(404).send({ error: 'Bağlantı bulunamadı' })
+
+    const cacheKey = `ki:crm:structure:${id}`
+    const cached = await redis.get(cacheKey)
+    const modules = cached ? JSON.parse(cached) : ((req.body as any)?.modules ?? [])
+    if (!modules.length) return reply.status(400).send({ error: 'Önce yapı taraması yapın' })
+
+    const TARGET_SCHEMA = `
+crm_contacts: id, first_name, last_name, email, phone, company_id, contact_type, custom_fields(jsonb)
+crm_companies: id, name, industry, website, phone, custom_fields(jsonb)
+crm_deals: id, title, value, currency, stage, contact_id, company_id, custom_fields(jsonb)
+erp_products: id, name, sku, price, currency, stock_qty, custom_fields(jsonb)`
+
+    const openrouterKey = env.OPENROUTER_API_KEY
+    let connectorConfig: any = null
+
+    if (openrouterKey) {
+      try {
+        const prompt = `You are a data integration expert. Map the following source CRM structure to our target schema.
+
+SOURCE MODULES (JSON):
+${JSON.stringify(modules.slice(0, 15), null, 2)}
+
+TARGET SCHEMA:
+${TARGET_SCHEMA}
+
+Rules:
+- For each source module, decide which target table it maps to (crm_contacts, crm_companies, crm_deals, erp_products, or null if no match)
+- For each source field, decide: targetField (exact column name from target), transform type
+- transform types: direct, phone_e164, country_iso, name_case, email_lower, currency_strip, custom
+- Fields with no match → targetField="custom_fields", transform="custom", customFieldKey=sourceFieldName
+- Respond ONLY with valid JSON matching this exact structure:
+{
+  "mappings": [
+    {
+      "sourceModule": "string",
+      "targetTable": "crm_contacts|crm_companies|crm_deals|erp_products|null",
+      "fields": [
+        {"sourceField":"string","targetField":"string","transform":"direct","customFieldKey":"string|null"}
+      ]
+    }
+  ],
+  "unmappedFields": ["module.field"]
+}`
+
+        const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${openrouterKey}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model: 'nvidia/llama-3.1-nemotron-70b-instruct:free',
+            messages: [{ role: 'user', content: prompt }],
+            temperature: 0.1,
+            max_tokens: 4000,
+          }),
+          signal: AbortSignal.timeout(45000),
+        })
+        const aiData = await res.json() as any
+        const raw = aiData.choices?.[0]?.message?.content ?? ''
+        const jsonMatch = raw.match(/\{[\s\S]*\}/)
+        if (jsonMatch) {
+          const parsed = JSON.parse(jsonMatch[0])
+          connectorConfig = {
+            version: 1,
+            generatedAt: new Date().toISOString(),
+            sourceType: conn.crmType,
+            mappings: parsed.mappings ?? [],
+            unmappedFields: parsed.unmappedFields ?? [],
+          }
+        }
+      } catch (err) {
+        console.error('[generate-connector] AI error:', err)
+      }
+    }
+
+    // Fallback: basic regex-based mapping if AI failed
+    if (!connectorConfig) {
+      const fallbackMappings = buildFallbackMappings(modules, conn.crmType)
+      connectorConfig = {
+        version: 1,
+        generatedAt: new Date().toISOString(),
+        sourceType: conn.crmType,
+        mappings: fallbackMappings,
+        unmappedFields: [],
+        aiGenerated: false,
+      }
+    }
+
+    await db.update(crmConnections)
+      .set({ connectorConfig, updatedAt: new Date() })
+      .where(eq(crmConnections.id, id))
+
+    return reply.send({ connector: connectorConfig, aiGenerated: connectorConfig.aiGenerated !== false })
+  })
+
+  // PUT /api/v1/crm/connections/:id/connector — save edited connector
+  app.put('/connections/:id/connector', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const { id } = req.params as { id: string }
+    const { connector } = req.body as { connector: any }
+    if (!connector) return reply.status(400).send({ error: 'connector gerekli' })
+    await db.update(crmConnections).set({ connectorConfig: connector, updatedAt: new Date() }).where(eq(crmConnections.id, id))
+    return reply.send({ ok: true })
+  })
+
+  // GET /api/v1/crm/connections/:id/sync-history
+  app.get('/connections/:id/sync-history', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const { id } = req.params as { id: string }
+    const jobs = await db.query.crmBulkJobs.findMany({
+      where: eq(crmBulkJobs.connectionId, id),
+      orderBy: (t, { desc }) => [desc(t.createdAt)],
+      limit: 20,
+    })
+    return reply.send({ jobs })
+  })
+}
+
+function buildFallbackMappings(modules: any[], sourceType: string) {
+  const contactPatterns  = /contact|lead|person|müşteri|kişi/i
+  const companyPatterns  = /account|company|firma|şirket|organization/i
+  const dealPatterns     = /deal|opportunity|fırsat|satış|pipeline/i
+  const productPatterns  = /product|item|ürün|inventory/i
+
+  const fieldMap: Record<string, { target: string; transform: string }> = {
+    email: { target: 'email', transform: 'email_lower' },
+    mail:  { target: 'email', transform: 'email_lower' },
+    phone: { target: 'phone', transform: 'phone_e164' },
+    mobile: { target: 'phone', transform: 'phone_e164' },
+    first_name: { target: 'first_name', transform: 'name_case' },
+    last_name:  { target: 'last_name',  transform: 'name_case' },
+    name:       { target: 'name',       transform: 'name_case' },
+    website:    { target: 'website',    transform: 'direct' },
+    industry:   { target: 'industry',   transform: 'direct' },
+    amount:     { target: 'value',      transform: 'currency_strip' },
+    deal_name:  { target: 'title',      transform: 'direct' },
+    stage:      { target: 'stage',      transform: 'direct' },
+    price:      { target: 'price',      transform: 'currency_strip' },
+    sku:        { target: 'sku',        transform: 'direct' },
+    quantity:   { target: 'stock_qty',  transform: 'direct' },
+  }
+
+  return modules.map((mod: any) => {
+    let targetTable: string | null = null
+    if (contactPatterns.test(mod.name))  targetTable = 'crm_contacts'
+    else if (companyPatterns.test(mod.name)) targetTable = 'crm_companies'
+    else if (dealPatterns.test(mod.name))    targetTable = 'crm_deals'
+    else if (productPatterns.test(mod.name)) targetTable = 'erp_products'
+
+    const fields = (mod.fields ?? []).map((f: any) => {
+      const key = f.name?.toLowerCase()
+      const mapped = fieldMap[key ?? '']
+      if (mapped && targetTable) {
+        return { sourceField: f.name, targetField: mapped.target, transform: mapped.transform, customFieldKey: null }
+      }
+      return { sourceField: f.name, targetField: 'custom_fields', transform: 'custom', customFieldKey: f.name }
+    })
+
+    return { sourceModule: mod.name, targetTable, fields }
+  })
 }

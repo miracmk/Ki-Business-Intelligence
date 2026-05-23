@@ -18,6 +18,7 @@
 import { Pool } from 'pg'
 import { db } from '../../lib/db.js'
 import { crmConnections, crmModules, crmFields, kibiEntities } from '../../../db/schema.js'
+import type { ConnectorConfig, ConnectorModuleMapping } from '../../../db/schema.js'
 import { eq } from 'drizzle-orm'
 import { decryptJson } from '../../lib/crypto.js'
 import { PostgreSqlAdapter } from '../../adapters/postgresql.js'
@@ -44,9 +45,14 @@ export async function runEntityEtl(connectionId: string): Promise<EtlResult> {
 
   const pool = new Pool({ connectionString: env.DATABASE_URL, max: 3 })
   try {
-    // Ensure entity schema has raw mirror + metadata tables
     await ensureEtlTables(pool, entity.entityDbSchema)
 
+    // v2: use connector config if available
+    if (conn.connectorConfig) {
+      return runConnectorEtl(pool, connectionId, entity.entityDbSchema, conn.crmType, conn.connectorConfig)
+    }
+
+    // v1 fallback
     if (conn.crmType === 'postgresql') {
       const creds = decryptJson<any>(conn.credentials)
       return runPostgresEtl(pool, connectionId, entity.entityDbSchema, creds, conn.tenantId)
@@ -56,6 +62,137 @@ export async function runEntityEtl(connectionId: string): Promise<EtlResult> {
   } finally {
     await pool.end()
   }
+}
+
+// ── v2: Connector-based ETL ───────────────────────────────────────────────────
+
+async function runConnectorEtl(
+  pool: Pool,
+  connectionId: string,
+  schemaName: string,
+  crmType: string,
+  config: ConnectorConfig,
+): Promise<EtlResult> {
+  const result: EtlResult = { ok: true, rows: 0, mirrored: 0, tables: [] }
+
+  const client = await pool.connect()
+  let modules: string[] = []
+  try {
+    const { rows } = await client.query<{ module_api_name: string }>(
+      `SELECT DISTINCT module_api_name FROM public.crm_records WHERE connection_id = $1`,
+      [connectionId]
+    )
+    modules = rows.map(r => r.module_api_name)
+  } finally {
+    client.release()
+  }
+
+  for (const module of modules) {
+    const mapping = config.mappings.find(m => m.sourceModule === module)
+    if (!mapping || !mapping.targetTable) continue
+
+    let offset = 0
+    while (true) {
+      const batchClient = await pool.connect()
+      let records: Array<{ data: Record<string, unknown>; crm_id: string }> = []
+      try {
+        const { rows } = await batchClient.query<{ data: Record<string, unknown>; crm_id: string }>(
+          `SELECT data, crm_id FROM public.crm_records WHERE connection_id = $1 AND module_api_name = $2 LIMIT $3 OFFSET $4`,
+          [connectionId, module, MIRROR_BATCH, offset]
+        )
+        records = rows
+      } finally {
+        batchClient.release()
+      }
+      if (records.length === 0) break
+
+      await bulkMirrorRecords(pool, schemaName, connectionId, module, records.map(r => ({ sourceId: r.crm_id, data: r.data })))
+      result.mirrored += records.length
+
+      for (const rec of records) {
+        const row = applyConnectorMapping(rec.data, mapping, connectionId, rec.crm_id, crmType)
+        if (row) {
+          await upsertEntityRow(pool, schemaName, mapping.targetTable, row, 'external_id')
+          result.rows++
+        }
+      }
+      if (!result.tables.includes(mapping.targetTable)) result.tables.push(mapping.targetTable)
+      if (records.length < MIRROR_BATCH) break
+      offset += MIRROR_BATCH
+    }
+  }
+
+  return result
+}
+
+function applyConnectorMapping(
+  data: Record<string, unknown>,
+  mapping: ConnectorModuleMapping,
+  connectionId: string,
+  sourceId: string,
+  sourceType: string,
+): Record<string, unknown> | null {
+  const row: Record<string, unknown> = {
+    external_id: sourceId,
+    source_type: sourceType,
+    source_integration_id: connectionId,
+  }
+  const custom: Record<string, unknown> = {}
+
+  for (const fieldMap of mapping.fields) {
+    const val = data[fieldMap.sourceField]
+    if (val === null || val === undefined || val === '') continue
+
+    const str = String(val)
+    let transformed: unknown = val
+
+    switch (fieldMap.transform) {
+      case 'email_lower':
+        transformed = str.toLowerCase().trim()
+        break
+      case 'name_case':
+        transformed = str.replace(/\w+/g, w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+        break
+      case 'phone_e164':
+        transformed = str.replace(/[^\d+]/g, '')
+        if (!transformed.startsWith('+') && String(transformed).length === 10) transformed = '+90' + transformed
+        break
+      case 'country_iso':
+        transformed = str.length === 2 ? str.toUpperCase() : val
+        break
+      case 'currency_strip':
+        transformed = parseFloat(str.replace(/[^\d.,]/g, '').replace(',', '.')) || val
+        break
+      case 'custom':
+        custom[fieldMap.customFieldKey ?? fieldMap.sourceField] = val
+        continue
+      default:
+        transformed = val
+    }
+
+    if (fieldMap.targetField === 'custom_fields') {
+      custom[fieldMap.customFieldKey ?? fieldMap.sourceField] = val
+    } else {
+      const isDate = ['created_at', 'updated_at', 'expected_close_date'].includes(fieldMap.targetField)
+      if (isDate) {
+        try { row[fieldMap.targetField] = new Date(str) } catch { /* skip */ }
+      } else {
+        row[fieldMap.targetField] = transformed
+      }
+    }
+  }
+
+  if (Object.keys(custom).length > 0) row['custom_fields'] = JSON.stringify(custom)
+
+  if (mapping.targetTable === 'crm_contacts' && !row['full_name']) {
+    const fn = (row['first_name'] ?? '') as string
+    const ln = (row['last_name']  ?? '') as string
+    row['full_name'] = `${fn} ${ln}`.trim() || row['email'] as string || sourceId
+  }
+  if (mapping.targetTable === 'crm_companies' && !row['name']) row['name'] = sourceId
+  if (mapping.targetTable === 'crm_deals' && !row['title']) row['title'] = sourceId
+
+  return row
 }
 
 // ── Ensure ETL support tables exist in entity schema ─────────────────────────

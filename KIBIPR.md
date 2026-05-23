@@ -661,4 +661,77 @@ entity_{slug}.crm_contacts / crm_companies / crm_deals / erp_products
 
 ---
 
-*Son güncelleme: YFZ 1-15 tamamlandı. Muhasebe OAuth (Zoho Books/QuickBooks/Xero), per-entity Telegram/Instagram webhook, in-app bildirim sistemi (zil dropdown), plan limit kontrolü (429), token kullanım takibi, admin plan yönetimi. Build ve deploy yapıldı. 23 Mayıs 2026.*
+#### YFZ 17 — Platform Temizliği + Akıllı CRM Konnektör Sihirbazı
+
+**FAZ A — Platform Management Temizliği**
+- [x] Admin.tsx → "KIBI Chat" tab kaldırıldı (Layout.tsx'te zaten var)
+- [x] Admin.tsx → "Model Yönetimi" tab kaldırıldı (PlatformSettings.tsx'te model selector mevcut)
+- [x] İlgili state/handler'lar temizlendi (models, chatMessages, chatInput, sendChat, handleModelEdit, saveModelConfig, openrouterModels)
+- [x] Admin.tsx artık 3 tab: Genel Bakış, Entityler, Destek
+
+**FAZ B — CRM Konnektör Sihirbazı (Akıllı Bağlama Akışı)**
+
+*B.1 — connector_config Schema + Migration*
+- [x] `ConnectorConfig`, `ConnectorModuleMapping`, `ConnectorFieldMapping` TypeScript interface'leri `db/schema.ts`'e eklendi
+- [x] `crm_connections.connector_config JSONB` kolonu DB'ye eklendi (ALTER TABLE IF NOT EXISTS)
+- [x] `db/migrations/0003_rainy_arclight.sql` no-op migration olarak güncellendi (çakışma önleme)
+
+*B.2 + B.3 — scan-structure Endpoint + SSE Streaming*
+- [x] `POST /api/v1/crm/connections/:id/scan-structure` — bağlantıyı okur, tüm modülleri + alanları + örnek 5 satırı tarar, Redis'e 30dk cache'ler
+- [x] `GET /api/v1/crm/connections/:id/scan-structure/stream` — SSE (Server-Sent Events), canlı tarama logu: `{type, message, percent}` frame'leri, 15s heartbeat, `reply.raw` kullanır
+
+*B.4 — AI Konnektör Üreteci*
+- [x] `POST /api/v1/crm/connections/:id/generate-connector` — Redis cache'teki yapıyı OpenRouter (Nemotron) ile analiz eder
+  - Hedef şema: crm_contacts, crm_companies, crm_deals, erp_products
+  - Transform tipleri: direct, phone_e164, country_iso, name_case, email_lower, currency_strip, custom
+  - AI başarısız olursa regex-based fallback (`buildFallbackMappings()`)
+  - Sonucu `crm_connections.connector_config`'e yazar
+- [x] `PUT /api/v1/crm/connections/:id/connector` — konnektör manuel düzenleme + kayıt
+- [x] `GET /api/v1/crm/connections/:id/sync-history` — son 20 bulk job geçmişi
+
+*B.5 — Entity ETL v2 — Connector Mode*
+- [x] `entity-etl.ts` → `runEntityEtl()` artık `conn.connectorConfig` varlığına göre yol seçer
+  - Konnektör varsa → `runConnectorEtl()` (v2, transform tabanlı)
+  - Yoksa → eski `runCrmRecordsEtl()` / `runPostgresEtl()` (v1 fallback)
+- [x] `runConnectorEtl()` — mapping'e göre her alanı dönüştürür (phone_e164, email_lower, name_case vb.), bilinmeyenleri custom_fields JSONB'ye toplar
+- [x] `applyConnectorMapping()` yardımcı fonksiyon
+
+*B.6 — CrmConnectorWizard.tsx Bileşeni*
+- [x] `frontend/src/components/CrmConnectorWizard.tsx` — 5 adımlı modal sihirbaz:
+  - **Adım 1:** Kaynak tipi seçimi (CRM API, Veritabanı, ERP-yakında)
+  - **Adım 2:** DB bağlantı formu + test butonu (PostgreSQL)
+  - **Adım 3:** SSE canlı log + bulunan yapı ağacı (EventSource)
+  - **Adım 4:** AI konnektör üretimi + JSON önizleme
+  - **Adım 5:** Eşleştirme tablosu (hedef alan, dönüşüm tipi düzenlenebilir) + onay
+- [x] Settings.tsx → CRM tab başlığına "Sihirbaz ile Bağla" butonu (Wand2 ikonu)
+- [x] Settings.tsx → `showCrmWizard` state + wizard modal render
+- [x] Settings.tsx → Bağlantı kartları genişletildi:
+  - `connectorConfig` badge (v1 etiket)
+  - "Konnektör Oluştur/Yenile" butonu
+  - "Yapıyı Yenile" butonu (eski "Metadata Sync")
+  - "Detay" toggle → entity kayıt sayıları, mapping tablosu, son sync'ler
+
+**FAZ C — Sync Akışı Tamamlama**
+- [x] `src/engine/crm-sync/crm-scheduler.ts` — plan bazlı periyodik ETL scheduler:
+  - free=günde 1, starter=4 saatte 1, growth=saatte 1, enterprise=15 dakikada 1
+  - Her 5 dk aktif bağlantıları tarar, interval geçtiyse fire-and-forget ETL başlatır
+- [x] `server.ts` → startup'ta `startCrmScheduler()` çağrılıyor (`[CrmScheduler] Started` log)
+- [x] Modules.tsx → tek "Sync" butonu (smart):
+  - Konnektör varsa → ETL tetikler (v2 modu)
+  - Yoksa → ham bulk sync başlatır (v1 fallback)
+- [x] "Ham Sync" + "AI Aynala" butonları kaldırıldı; "Modüller" → "Yapıyı Yenile"
+
+**FAZ D — Entity DB Önizleme**
+- [x] Settings.tsx bağlantı kartları detay panelinde entity veritabanı önizlemesi:
+  - crm_contacts / crm_companies / crm_deals / erp_products kayıt sayıları
+  - Son 5 sync'in özeti (modül, kayıt sayısı, tarih)
+  - Konnektör mapping tablosu (kaynak → hedef → alan sayısı)
+
+**Deploy:**
+- Build: `✓ built in 4.74s`
+- Migration: `connector_config JSONB` kolonu eklendi
+- Backend: `docker compose restart ki_api` — temiz başlangıç, `[CrmScheduler] Started`
+
+---
+
+*Son güncelleme: YFZ 1-17 tamamlandı. Platform temizliği (Admin.tsx), 5 adımlı CRM konnektör sihirbazı (SSE canlı log, AI alan eşleştirme, v2 connector ETL), periyodik sync scheduler, entity DB önizleme. Build ve deploy yapıldı. 23 Mayıs 2026.*

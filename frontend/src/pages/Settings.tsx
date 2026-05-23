@@ -3,10 +3,11 @@ import {
   Database, Brain, User, MessageSquare, CreditCard, Shield, Users,
   Plus, Trash2, Copy, Eye, EyeOff, QrCode, RefreshCw,
   AlertTriangle, CheckCircle, XCircle, X, Camera, Save,
-  Mail, Phone, MapPin, Building2, ExternalLink, UserPlus,
+  Mail, Phone, MapPin, Building2, ExternalLink, UserPlus, Wand2, Zap, History,
 } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import api from '../lib/api'
+import CrmConnectorWizard from '../components/CrmConnectorWizard'
 
 // ─── Channel schemas (based on official API docs) ─────────────────────────────
 
@@ -659,6 +660,10 @@ export default function Settings() {
 
   const [showApiKey, setShowApiKey] = useState(false)
   const [showCrmModal, setShowCrmModal] = useState(false)
+  const [showCrmWizard, setShowCrmWizard] = useState(false)
+  const [expandedConnId, setExpandedConnId] = useState<string | null>(null)
+  const [connSyncHistory, setConnSyncHistory] = useState<Record<string, any[]>>({})
+  const [connEntityData, setConnEntityData] = useState<Record<string, any>>({})
   const [showAccountingModal, setShowAccountingModal] = useState(false)
   const [showQrModal, setShowQrModal] = useState(false)
   const [qrData, setQrData] = useState<string>('')
@@ -1640,6 +1645,11 @@ export default function Settings() {
           <div className="flex items-center justify-between flex-wrap gap-2">
             <h3 className="text-lg font-semibold text-white">CRM / ERP Bağlantıları</h3>
             <div className="flex items-center gap-2 flex-wrap">
+              <button onClick={() => setShowCrmWizard(true)}
+                className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-all font-medium"
+                style={{ background: 'rgba(38,166,154,0.15)', color: 'var(--accent)', border: '1px solid rgba(38,166,154,0.3)' }}>
+                <Wand2 size={14} /> Sihirbaz ile Bağla
+              </button>
               <button onClick={() => { setShowOAuthModal(true); setOauthMsg('') }}
                 className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-all"
                 style={{ background: 'rgba(45,138,107,0.12)', color: 'var(--forest)', border: '1px solid rgba(45,138,107,0.25)' }}>
@@ -1649,60 +1659,139 @@ export default function Settings() {
               <button onClick={() => { setDbTarget('crm'); setShowDbModal(true); setDbTestResult(null) }}
                 className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-all"
                 style={{ background: 'rgba(99,102,241,0.12)', color: '#818cf8', border: '1px solid rgba(99,102,241,0.25)' }}>
-                <Database size={14} />
-                DB ile Bağla
+                <Database size={14} /> DB ile Bağla
               </button>
               <button onClick={() => setShowCrmModal(true)}
                 className="flex items-center gap-2 px-3 py-2 bg-[#6366f1] hover:bg-[#4f46e5] text-white rounded-lg text-sm">
-                <Plus size={14} />
-                API Key ile Ekle
+                <Plus size={14} /> API Key ile Ekle
               </button>
             </div>
           </div>
 
           {crmConnections.length === 0 ? (
             <div className="p-8 bg-[#111111] rounded-xl border border-[#2a2a2a] text-center">
-              <p className="text-gray-500">Henüz CRM / ERP bağlantısı yok</p>
+              <p className="text-gray-500">Henüz CRM / ERP bağlantısı yok. Sihirbaz ile kolayca ekleyin.</p>
             </div>
           ) : (
             <div className="space-y-3">
-              {crmConnections.map(conn => (
-                <div key={conn.id} className="p-4 bg-[#111111] rounded-xl border border-[#2a2a2a] flex items-center justify-between">
-                  <div className="flex items-center gap-4">
-                    <div>
-                      <p className="text-white font-medium">{conn.name}</p>
-                      <span className={`px-2 py-0.5 rounded text-xs ${crmBadgeClass(conn.crmType)}`}>
-                        {crmTypeLabel(conn.crmType)}
-                      </span>
+              {crmConnections.map((conn: any) => {
+                const isExpanded = expandedConnId === conn.id
+                const history = connSyncHistory[conn.id] ?? []
+                const entityData = connEntityData[conn.id]
+
+                const loadExpanded = async () => {
+                  if (!isExpanded) {
+                    setExpandedConnId(conn.id)
+                    try {
+                      const [hRes, eRes] = await Promise.all([
+                        api.get(`/crm/connections/${conn.id}/sync-history`).catch(() => ({ data: { jobs: [] } })),
+                        api.get(`/crm/connections/${conn.id}/entity-data`).catch(() => ({ data: {} })),
+                      ])
+                      setConnSyncHistory(p => ({ ...p, [conn.id]: hRes.data.jobs ?? [] }))
+                      setConnEntityData(p => ({ ...p, [conn.id]: eRes.data }))
+                    } catch { /* ignore */ }
+                  } else {
+                    setExpandedConnId(null)
+                  }
+                }
+
+                return (
+                  <div key={conn.id} className="bg-[#111111] rounded-xl border border-[#2a2a2a] overflow-hidden">
+                    {/* Header row */}
+                    <div className="p-4 flex items-center justify-between">
+                      <div className="flex items-center gap-4 flex-1 min-w-0">
+                        <div className="min-w-0">
+                          <p className="text-white font-medium truncate">{conn.name}</p>
+                          <div className="flex items-center gap-2 mt-0.5 flex-wrap">
+                            <span className={`px-2 py-0.5 rounded text-xs ${crmBadgeClass(conn.crmType)}`}>{crmTypeLabel(conn.crmType)}</span>
+                            {conn.connectorConfig && (
+                              <span className="px-2 py-0.5 rounded text-xs" style={{ background: 'rgba(38,166,154,0.15)', color: 'var(--accent)' }}>✓ Konnektör v{conn.connectorConfig.version}</span>
+                            )}
+                            <div className="flex items-center gap-1">
+                              <div className={`w-2 h-2 rounded-full ${conn.syncStatus === 'done' ? 'bg-green-500' : conn.syncStatus === 'running' ? 'bg-yellow-500' : conn.syncStatus === 'error' ? 'bg-red-500' : 'bg-gray-500'}`} />
+                              <span className="text-gray-400 text-xs">{conn.syncStatus || 'idle'}</span>
+                            </div>
+                            {conn.lastSyncAt && <span className="text-gray-500 text-xs">{new Date(conn.lastSyncAt).toLocaleDateString('tr-TR')}</span>}
+                          </div>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <button onClick={() => api.post(`/crm/connections/${conn.id}/generate-connector`).then(() => loadData()).catch(console.error)}
+                          className="flex items-center gap-1 px-2.5 py-1.5 rounded text-xs" style={{ background: 'rgba(45,138,107,0.12)', color: 'var(--forest)', border: '1px solid rgba(45,138,107,0.2)' }}>
+                          <Zap size={12} /> {conn.connectorConfig ? 'Konnektörü Yenile' : 'Konnektör Oluştur'}
+                        </button>
+                        <button onClick={() => metadataSync(conn.id)} className="px-2.5 py-1.5 bg-[#222] hover:bg-[#2a2a2a] text-gray-300 rounded text-xs">
+                          Yapıyı Yenile
+                        </button>
+                        <button onClick={loadExpanded} className="px-2.5 py-1.5 bg-[#222] hover:bg-[#2a2a2a] text-gray-300 rounded text-xs flex items-center gap-1">
+                          <History size={12} /> {isExpanded ? 'Kapat' : 'Detay'}
+                        </button>
+                        <button onClick={() => deleteCrm(conn.id)} className="p-1.5 text-red-400 hover:bg-red-900/20 rounded">
+                          <Trash2 size={14} />
+                        </button>
+                      </div>
                     </div>
-                    <div className="text-gray-500 text-sm">
-                      {conn.lastSyncAt ? `Son sync: ${new Date(conn.lastSyncAt).toLocaleDateString('tr-TR')}` : 'Henüz sync yok'}
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <div className={`w-2 h-2 rounded-full ${
-                        conn.syncStatus === 'done'    ? 'bg-green-500'  :
-                        conn.syncStatus === 'running' ? 'bg-yellow-500' :
-                        conn.syncStatus === 'error'   ? 'bg-red-500'    : 'bg-gray-500'
-                      }`}></div>
-                      <span className="text-gray-400 text-xs">{conn.syncStatus || 'idle'}</span>
-                    </div>
+
+                    {/* Expanded detail */}
+                    {isExpanded && (
+                      <div className="border-t border-[#2a2a2a] p-4 space-y-4">
+                        {/* Entity data preview */}
+                        {entityData && (
+                          <div>
+                            <p className="text-xs font-semibold text-gray-400 mb-2">Entity Veritabanı</p>
+                            <div className="grid gap-2 sm:grid-cols-4">
+                              {(['crm_contacts', 'crm_companies', 'crm_deals', 'erp_products'] as const).map(tbl => (
+                                <div key={tbl} className="p-3 rounded-lg text-center" style={{ background: 'var(--surface-2)', border: '1px solid var(--border)' }}>
+                                  <p className="text-lg font-bold" style={{ color: 'var(--accent)' }}>{entityData[tbl]?.count ?? 0}</p>
+                                  <p className="text-xs mt-0.5" style={{ color: 'var(--text-3)' }}>{tbl}</p>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Connector mappings */}
+                        {conn.connectorConfig?.mappings?.length > 0 && (
+                          <div>
+                            <p className="text-xs font-semibold text-gray-400 mb-2">Eşleştirme Tablosu ({conn.connectorConfig.mappings.filter((m: any) => m.targetTable).length} modül)</p>
+                            <div className="overflow-x-auto">
+                              <table className="w-full text-xs">
+                                <thead><tr style={{ background: 'var(--surface-2)' }}><th className="px-3 py-2 text-left text-gray-400">Kaynak</th><th className="px-3 py-2 text-left text-gray-400">Hedef Tablo</th><th className="px-3 py-2 text-left text-gray-400">Alan Sayısı</th></tr></thead>
+                                <tbody>
+                                  {conn.connectorConfig.mappings.slice(0, 8).map((m: any, i: number) => (
+                                    <tr key={i} className="border-t border-[#2a2a2a]">
+                                      <td className="px-3 py-1.5 font-mono text-gray-300">{m.sourceModule}</td>
+                                      <td className="px-3 py-1.5" style={{ color: m.targetTable ? 'var(--accent)' : 'var(--text-3)' }}>{m.targetTable ?? '— eşleşme yok —'}</td>
+                                      <td className="px-3 py-1.5 text-gray-500">{m.fields?.length ?? 0}</td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Sync history */}
+                        {history.length > 0 && (
+                          <div>
+                            <p className="text-xs font-semibold text-gray-400 mb-2">Son Sync'ler</p>
+                            <div className="space-y-1.5">
+                              {history.slice(0, 5).map((job: any) => (
+                                <div key={job.id} className="flex items-center gap-3 px-3 py-2 rounded-lg text-xs" style={{ background: 'var(--surface-2)' }}>
+                                  <div className={`w-2 h-2 rounded-full shrink-0 ${job.status === 'done' ? 'bg-green-500' : job.status === 'failed' ? 'bg-red-500' : 'bg-yellow-500'}`} />
+                                  <span className="text-gray-400">{job.moduleApiName}</span>
+                                  <span className="text-gray-500">{job.recordsCount ? `${job.recordsCount} kayıt` : ''}</span>
+                                  <span className="ml-auto text-gray-500">{job.createdAt ? new Date(job.createdAt).toLocaleString('tr-TR', { dateStyle: 'short', timeStyle: 'short' }) : ''}</span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
-                  <div className="flex items-center gap-2">
-                    <button
-                      onClick={() => metadataSync(conn.id)}
-                      className="px-3 py-1.5 bg-[#222] hover:bg-[#2a2a2a] text-gray-300 rounded text-sm"
-                    >
-                      Metadata Sync
-                    </button>
-                    <button
-                      onClick={() => deleteCrm(conn.id)}
-                      className="p-2 text-red-400 hover:bg-red-900/20 rounded"
-                    >
-                      <Trash2 size={16} />
-                    </button>
-                  </div>
-                </div>
-              ))}
+                )
+              })}
             </div>
           )}
         </div>
@@ -2627,6 +2716,13 @@ export default function Settings() {
             </button>
           </div>
         </div>
+      )}
+      {/* CRM Connector Wizard */}
+      {showCrmWizard && (
+        <CrmConnectorWizard
+          onClose={() => setShowCrmWizard(false)}
+          onDone={() => { setShowCrmWizard(false); loadData() }}
+        />
       )}
     </div>
   )

@@ -94,22 +94,24 @@ export default function Modules() {
       .finally(() => setSyncing(false))
   }
 
-  const startFullSync = () => {
+  const smartSync = () => {
     if (!selectedConn) return
-    setSyncing(true)
-    api.post(`/crm/connections/${selectedConn}/sync/full`)
-      .then(() => { setPolling(true); loadSyncStatus(selectedConn) })
-      .catch(() => {})
-      .finally(() => setSyncing(false))
-  }
-
-  const startEntityEtl = () => {
-    if (!selectedConn) return
-    setSyncing(true)
-    api.post(`/crm/connections/${selectedConn}/sync/entity`)
-      .then(() => alert('ETL başlatıldı. Tüm veriler aynalalanıyor ve AI ile normalize ediliyor. Bu işlem birkaç dakika sürebilir.'))
-      .catch((e: any) => alert(e.response?.data?.error || 'ETL başlatılamadı'))
-      .finally(() => setSyncing(false))
+    const conn = connections.find((c: any) => c.id === selectedConn)
+    if (conn?.connectorConfig) {
+      // v2: connector exists → trigger ETL
+      setSyncing(true)
+      api.post(`/crm/connections/${selectedConn}/sync/entity`)
+        .then(() => { setPolling(true); loadSyncStatus(selectedConn) })
+        .catch((e: any) => alert(e.response?.data?.error || 'ETL başlatılamadı'))
+        .finally(() => setSyncing(false))
+    } else {
+      // v1 fallback: ham bulk sync
+      setSyncing(true)
+      api.post(`/crm/connections/${selectedConn}/sync/full`)
+        .then(() => { setPolling(true); loadSyncStatus(selectedConn) })
+        .catch(() => {})
+        .finally(() => setSyncing(false))
+    }
   }
 
   const displayFields = fields.slice(0, 8)
@@ -130,26 +132,20 @@ export default function Modules() {
             {connections.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
           </select>
           <div className="flex gap-1.5 flex-wrap">
-            <button onClick={syncMetadata} disabled={!selectedConn || syncing} title="Metadata Sync — Tablo/modül yapısını tara"
+            <button onClick={syncMetadata} disabled={!selectedConn || syncing} title="Modül yapısını tara ve yenile"
               className="flex-1 flex items-center justify-center gap-1 py-1.5 rounded-lg text-xs transition-all disabled:opacity-40"
               style={{ background: 'var(--surface)', color: 'var(--text-2)', border: '1px solid var(--border)' }}>
               <RefreshCw size={11} className={syncing ? 'animate-spin' : ''} />
-              Modüller
+              Yapıyı Yenile
             </button>
-            <button onClick={startFullSync} disabled={!selectedConn || syncing || polling} title="Ham veri sync (crm_records)"
+            <button onClick={smartSync} disabled={!selectedConn || syncing || polling}
+              title="Konnektör varsa ETL kullanır, yoksa ham sync başlatır"
               className="flex-1 flex items-center justify-center gap-1 py-1.5 rounded-lg text-xs transition-all disabled:opacity-40"
               style={{ background: polling ? 'rgba(45,138,107,0.15)' : 'rgba(45,138,107,0.85)', color: '#fff' }}>
               {polling ? <Loader2 size={11} className="animate-spin" /> : <Play size={11} />}
-              {polling ? 'Sync...' : 'Ham Sync'}
+              {polling ? 'Sync...' : 'Sync'}
             </button>
           </div>
-          <button onClick={startEntityEtl} disabled={!selectedConn || syncing}
-            title="Tüm verileri aynala → AI ile normalize et → Entity DB'ye yaz"
-            className="w-full flex items-center justify-center gap-1.5 py-1.5 rounded-lg text-xs transition-all disabled:opacity-40"
-            style={{ background: 'rgba(99,102,241,0.85)', color: '#fff' }}>
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5v-9l6 4.5-6 4.5z"/></svg>
-            AI Aynala + Entity DB'ye Yaz
-          </button>
         </div>
 
         <div className="flex-1 overflow-y-auto p-2">

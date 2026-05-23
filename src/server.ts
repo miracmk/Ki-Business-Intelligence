@@ -14,8 +14,9 @@ import { ensureDbConnection, closeDb } from './lib/db.js'
 import { ensureRedisConnection, closeRedis } from './lib/redis.js'
 import { ensureQdrantConnection } from './lib/qdrant.js'
 
-import { authRoutes }       from './api/routes/auth.js'
-import { startImapPollers } from './engine/imap-poller.js'
+import { authRoutes }         from './api/routes/auth.js'
+import { startImapPollers }   from './engine/imap-poller.js'
+import { startCrmScheduler }  from './engine/crm-sync/crm-scheduler.js'
 import { crmRoutes }        from './api/routes/crm.js'
 import { aiRoutes }         from './api/routes/ai.js'
 import { tenantRoutes }     from './api/routes/tenant.js'
@@ -167,6 +168,7 @@ async function start() {
     await app.listen({ port: env.PORT, host: env.HOST })
     console.log('\n🚀 Ki Platform running on ' + env.HOST + ':' + env.PORT + '\n')
     startImapPollers().catch(e => console.error('[IMAP] Poller start failed:', e))
+    startCrmScheduler().catch(e => console.error('[CrmScheduler] Start failed:', e))
   } catch (err) {
     app.log.error(err)
     process.exit(1)

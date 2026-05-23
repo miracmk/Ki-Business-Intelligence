@@ -18,6 +18,27 @@ import {
 } from 'drizzle-orm/pg-core'
 import { relations } from 'drizzle-orm'
 
+// ─── Connector Config Type ────────────────────────────────────────────────────
+export interface ConnectorFieldMapping {
+  sourceField:     string
+  targetField:     string
+  transform:       'direct' | 'phone_e164' | 'country_iso' | 'name_case' | 'email_lower' | 'currency_strip' | 'custom'
+  transformParams?: Record<string, unknown>
+  customFieldKey?: string
+}
+export interface ConnectorModuleMapping {
+  sourceModule: string
+  targetTable:  string
+  fields:       ConnectorFieldMapping[]
+}
+export interface ConnectorConfig {
+  version:       number
+  generatedAt:   string
+  sourceType:    string
+  mappings:      ConnectorModuleMapping[]
+  unmappedFields: string[]
+}
+
 // ─── Enums ────────────────────────────────────────────────────────────────────
 export const userRoleEnum   = pgEnum('user_role',   [
   'admin',             // Platform sahibi/yönetici - tam yetki (mirac@kibusiness.co)
@@ -128,6 +149,8 @@ export const crmConnections = pgTable('crm_connections', {
   crmType:     crmTypeEnum('crm_type').notNull(),
   isActive:    boolean('is_active').notNull().default(true),
   credentials: text('credentials').notNull(), // AES-256-GCM encrypted JSON
+  // AI-generated connector config (field mapping, transformations)
+  connectorConfig: jsonb('connector_config').$type<ConnectorConfig>(),
   // Sync state
   lastSyncAt:  timestamp('last_sync_at', { withTimezone: true }),
   syncStatus:  syncStatusEnum('sync_status').default('idle'),

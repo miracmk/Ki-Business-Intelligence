@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import {
-  Database, Brain, User, MessageSquare, CreditCard, Shield,
+  Database, Brain, User, MessageSquare, CreditCard, Shield, Users,
   Plus, Trash2, Copy, Eye, EyeOff, QrCode, RefreshCw,
   AlertTriangle, CheckCircle, XCircle, X, Camera, Save,
-  Mail, Phone, MapPin, Building2, ExternalLink,
+  Mail, Phone, MapPin, Building2, ExternalLink, UserPlus,
 } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import api from '../lib/api'
@@ -620,6 +620,26 @@ export default function Settings() {
   const [channelForm, setChannelForm] = useState<Record<string, string>>({})
   const [savingChannel, setSavingChannel] = useState(false)
 
+  // Email SMTP+IMAP dedicated state
+  const [showEmailModal, setShowEmailModal] = useState(false)
+  const [emailConfig, setEmailConfig] = useState({
+    fromName: '', fromEmail: '',
+    smtpHost: '', smtpPort: '587', smtpSecure: false, smtpUser: '', smtpPassword: '',
+    imapHost: '', imapPort: '993', imapSecure: true, imapUser: '', imapPassword: '',
+    inboxFolder: 'INBOX', checkIntervalMinutes: 5, autoReply: false,
+    hasSmtpPassword: false, hasImapPassword: false,
+  })
+  const [savingEmail, setSavingEmail] = useState(false)
+  const [emailTestStatus, setEmailTestStatus] = useState<Record<string, 'idle'|'testing'|'ok'|'error'>>({ smtp: 'idle', imap: 'idle' })
+  const [emailTestMsg, setEmailTestMsg] = useState<Record<string, string>>({ smtp: '', imap: '' })
+
+  // Team state
+  const [teamMembers, setTeamMembers]   = useState<any[]>([])
+  const [inviteEmail, setInviteEmail]   = useState('')
+  const [inviteRole,  setInviteRole]    = useState('entity_sub')
+  const [inviting,    setInviting]      = useState(false)
+  const [inviteMsg,   setInviteMsg]     = useState('')
+
   // AI config — tri-model architecture (analysis / vector / conversation)
   const [aiConfig, setAiConfig] = useState({
     provider: 'openrouter',
@@ -656,6 +676,28 @@ export default function Settings() {
 
   // Webhook setup modal
   const [webhookSetup, setWebhookSetup] = useState<{ url: string; instructions: string; name: string; type: string } | null>(null)
+
+  // CRM OAuth modal
+  const [showOAuthModal, setShowOAuthModal]     = useState(false)
+  const [oauthProvider, setOauthProvider]       = useState<'zoho'|'hubspot'|'salesforce'>('zoho')
+  const [oauthForm, setOauthForm]               = useState({ name: '', clientId: '', clientSecret: '', region: 'com' })
+  const [oauthLoading, setOauthLoading]         = useState(false)
+  const [oauthMsg, setOauthMsg]                 = useState('')
+
+  // Accounting OAuth modal
+  const [showAccOAuthModal, setShowAccOAuthModal]   = useState(false)
+  const [accOAuthProvider, setAccOAuthProvider]     = useState<'zoho_books'|'quickbooks'|'xero'>('zoho_books')
+  const [accOAuthForm, setAccOAuthForm]             = useState({ name: '', clientId: '', clientSecret: '', region: 'com', organizationId: '' })
+  const [accOAuthLoading, setAccOAuthLoading]       = useState(false)
+  const [accOAuthMsg, setAccOAuthMsg]               = useState('')
+
+  // DB connection modal
+  const [showDbModal, setShowDbModal]           = useState(false)
+  const [_dbTarget, setDbTarget]                = useState<'crm'|'accounting'>('crm')
+  const [dbForm, setDbForm]                     = useState({ name: '', host: '', port: '5432', database: '', username: '', password: '', ssl: false })
+  const [dbTesting, setDbTesting]               = useState(false)
+  const [dbTestResult, setDbTestResult]         = useState<{ ok: boolean; isReadOnly?: boolean; tables?: string[]; error?: string } | null>(null)
+  const [dbSaving, setDbSaving]                 = useState(false)
 
   const showSuccess = (msg: string) => { setSaveMsg(msg); setTimeout(() => setSaveMsg(''), 3000) }
 
@@ -745,7 +787,23 @@ export default function Settings() {
     }
   }
 
-  useEffect(() => { loadData() }, [])
+  useEffect(() => {
+    loadData()
+    // Handle OAuth callback redirect
+    const params = new URLSearchParams(window.location.search)
+    const tabParam = params.get('tab')
+    if (tabParam === 'crm') setActiveTab('crm')
+    if (tabParam === 'accounting') setActiveTab('accounting')
+    if (params.get('oauth_success')) {
+      const provider = params.get('provider') ?? 'OAuth'
+      showSuccess(`${provider} bağlantısı başarıyla eklendi!`)
+      window.history.replaceState({}, '', `/app/settings?tab=${tabParam ?? 'crm'}`)
+    }
+    if (params.get('oauth_error')) {
+      setError(`OAuth hatası: ${params.get('oauth_error')}`)
+      window.history.replaceState({}, '', `/app/settings?tab=${tabParam ?? 'crm'}`)
+    }
+  }, [])
 
   useEffect(() => {
     if (activeTab === 'ai') {
@@ -754,6 +812,9 @@ export default function Settings() {
     }
     if (activeTab === 'channels') {
       loadChannelConfigs()
+    }
+    if (activeTab === 'team') {
+      api.get('/tenants/me/members').then(r => setTeamMembers(r.data.members ?? [])).catch(() => {})
     }
   }, [activeTab])
 
@@ -789,6 +850,119 @@ export default function Settings() {
     }
   }
 
+  const sendInvite = async () => {
+    if (!inviteEmail.trim()) return
+    setInviting(true); setInviteMsg('')
+    try {
+      const r = await api.post('/tenants/me/invites', { email: inviteEmail.trim(), role: inviteRole })
+      setInviteMsg(r.data.added ? 'Kullanıcı eklendi.' : 'Davet gönderildi.')
+      setInviteEmail('')
+      api.get('/tenants/me/members').then(r2 => setTeamMembers(r2.data.members ?? [])).catch(() => {})
+    } catch (e: any) {
+      setInviteMsg(e.response?.data?.error || 'Davet gönderilemedi')
+    } finally {
+      setInviting(false)
+      setTimeout(() => setInviteMsg(''), 3000)
+    }
+  }
+
+  const startOAuth = async () => {
+    if (!oauthForm.name || !oauthForm.clientId || !oauthForm.clientSecret) {
+      setOauthMsg('Tüm alanlar zorunlu'); return
+    }
+    setOauthLoading(true); setOauthMsg('')
+    try {
+      const r = await api.post('/crm/oauth/start', {
+        provider: oauthProvider,
+        name: oauthForm.name,
+        clientId: oauthForm.clientId,
+        clientSecret: oauthForm.clientSecret,
+        ...(oauthProvider === 'zoho' ? { region: oauthForm.region } : {}),
+      })
+      const popup = window.open(r.data.authUrl, 'oauth_popup', 'width=600,height=700,scrollbars=yes')
+      if (!popup) { setOauthMsg("Popup engellendi. Lutfen popup'lara izin verin."); return }
+      const timer = setInterval(() => {
+        if (popup.closed) {
+          clearInterval(timer)
+          loadData()
+          setShowOAuthModal(false)
+          setOauthLoading(false)
+        }
+      }, 500)
+    } catch (e: any) {
+      setOauthMsg(e.response?.data?.error || 'OAuth başlatılamadı')
+      setOauthLoading(false)
+    }
+  }
+
+  const startAccOAuth = async () => {
+    if (!accOAuthForm.name || !accOAuthForm.clientId || !accOAuthForm.clientSecret) {
+      setAccOAuthMsg('Tüm alanlar zorunlu'); return
+    }
+    setAccOAuthLoading(true); setAccOAuthMsg('')
+    try {
+      const r = await api.post('/accounting/oauth/start', {
+        provider: accOAuthProvider,
+        name: accOAuthForm.name,
+        clientId: accOAuthForm.clientId,
+        clientSecret: accOAuthForm.clientSecret,
+        ...(accOAuthProvider === 'zoho_books' ? { region: accOAuthForm.region, organizationId: accOAuthForm.organizationId } : {}),
+      })
+      const popup = window.open(r.data.authUrl, 'acc_oauth_popup', 'width=600,height=700,scrollbars=yes')
+      if (!popup) { setAccOAuthMsg("Popup engellendi. Lütfen popup'lara izin verin."); setAccOAuthLoading(false); return }
+      const timer = setInterval(() => {
+        if (popup.closed) {
+          clearInterval(timer)
+          loadData()
+          setShowAccOAuthModal(false)
+          setAccOAuthLoading(false)
+        }
+      }, 500)
+    } catch (e: any) {
+      setAccOAuthMsg(e.response?.data?.error || 'OAuth başlatılamadı')
+      setAccOAuthLoading(false)
+    }
+  }
+
+  const testDbConnection = async () => {
+    setDbTesting(true); setDbTestResult(null)
+    try {
+      const r = await api.post('/crm/db-test', {
+        host: dbForm.host, port: Number(dbForm.port),
+        database: dbForm.database, username: dbForm.username,
+        password: dbForm.password, ssl: dbForm.ssl,
+      })
+      setDbTestResult(r.data)
+    } catch (e: any) {
+      setDbTestResult({ ok: false, error: e.response?.data?.error || 'Bağlantı başarısız' })
+    } finally {
+      setDbTesting(false)
+    }
+  }
+
+  const saveDbConnection = async () => {
+    if (!dbForm.name || !dbForm.host || !dbForm.database || !dbForm.username) {
+      setDbTestResult({ ok: false, error: 'Ad, host, database ve kullanıcı zorunlu' }); return
+    }
+    setDbSaving(true)
+    try {
+      await api.post('/crm/db-connect', {
+        name: dbForm.name, host: dbForm.host, port: Number(dbForm.port),
+        database: dbForm.database, username: dbForm.username,
+        password: dbForm.password, ssl: dbForm.ssl,
+      })
+      setShowDbModal(false)
+      setDbForm({ name: '', host: '', port: '5432', database: '', username: '', password: '', ssl: false })
+      setDbTestResult(null)
+      loadData()
+      showSuccess('Veritabanı bağlantısı eklendi.')
+    } catch (e: any) {
+      setDbTestResult({ ok: false, error: e.response?.data?.error || 'Kaydedilemedi' })
+    } finally {
+      setDbSaving(false)
+    }
+  }
+
   const handleAvatarChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (!file) return
@@ -798,10 +972,95 @@ export default function Settings() {
     reader.readAsDataURL(file)
   }
 
-  const openChannelModal = (channelKey: string) => {
+  const openChannelModal = async (channelKey: string) => {
+    if (channelKey === 'email') {
+      // Load dedicated email config
+      try {
+        const r = await api.get('/tenants/email-config')
+        const c = r.data.config
+        if (c) {
+          setEmailConfig({
+            fromName: c.fromName ?? '', fromEmail: c.fromEmail ?? '',
+            smtpHost: c.smtp?.host ?? '', smtpPort: String(c.smtp?.port ?? '587'),
+            smtpSecure: c.smtp?.secure ?? false, smtpUser: c.smtp?.user ?? '',
+            smtpPassword: '', hasSmtpPassword: c.smtp?.hasPassword ?? false,
+            imapHost: c.imap?.host ?? '', imapPort: String(c.imap?.port ?? '993'),
+            imapSecure: c.imap?.secure ?? true, imapUser: c.imap?.user ?? '',
+            imapPassword: '', hasImapPassword: c.imap?.hasPassword ?? false,
+            inboxFolder: c.imap?.inboxFolder ?? 'INBOX',
+            checkIntervalMinutes: c.imap?.checkIntervalMinutes ?? 5,
+            autoReply: c.imap?.autoReply ?? false,
+          })
+        }
+      } catch { /* use defaults */ }
+      setEmailTestStatus({ smtp: 'idle', imap: 'idle' })
+      setEmailTestMsg({ smtp: '', imap: '' })
+      setShowEmailModal(true)
+      return
+    }
     setEditingChannel(channelKey)
     setChannelForm(channelConfigs[channelKey] ?? {})
     setShowChannelModal(true)
+  }
+
+  const testSmtp = async () => {
+    setEmailTestStatus(s => ({ ...s, smtp: 'testing' }))
+    try {
+      await api.post('/tenants/channels/email/test-smtp', {
+        host: emailConfig.smtpHost, port: Number(emailConfig.smtpPort),
+        secure: emailConfig.smtpSecure, user: emailConfig.smtpUser,
+        password: emailConfig.smtpPassword,
+      })
+      setEmailTestStatus(s => ({ ...s, smtp: 'ok' }))
+      setEmailTestMsg(s => ({ ...s, smtp: 'Bağlantı başarılı ✓' }))
+    } catch (e: any) {
+      setEmailTestStatus(s => ({ ...s, smtp: 'error' }))
+      setEmailTestMsg(s => ({ ...s, smtp: e.response?.data?.error ?? 'Bağlantı hatası' }))
+    }
+  }
+
+  const testImap = async () => {
+    setEmailTestStatus(s => ({ ...s, imap: 'testing' }))
+    try {
+      const r = await api.post('/tenants/channels/email/test-imap', {
+        host: emailConfig.imapHost, port: Number(emailConfig.imapPort),
+        secure: emailConfig.imapSecure, user: emailConfig.imapUser,
+        password: emailConfig.imapPassword,
+      })
+      setEmailTestStatus(s => ({ ...s, imap: 'ok' }))
+      setEmailTestMsg(s => ({ ...s, imap: `Bağlantı başarılı ✓ (${r.data.folders?.slice(0,3).join(', ')})` }))
+    } catch (e: any) {
+      setEmailTestStatus(s => ({ ...s, imap: 'error' }))
+      setEmailTestMsg(s => ({ ...s, imap: e.response?.data?.error ?? 'Bağlantı hatası' }))
+    }
+  }
+
+  const saveEmailConfig = async () => {
+    setSavingEmail(true)
+    try {
+      await api.put('/tenants/email-config', {
+        fromName: emailConfig.fromName, fromEmail: emailConfig.fromEmail,
+        smtp: {
+          host: emailConfig.smtpHost, port: Number(emailConfig.smtpPort),
+          secure: emailConfig.smtpSecure, user: emailConfig.smtpUser,
+          ...(emailConfig.smtpPassword ? { password: emailConfig.smtpPassword } : {}),
+        },
+        imap: {
+          host: emailConfig.imapHost, port: Number(emailConfig.imapPort),
+          secure: emailConfig.imapSecure, user: emailConfig.imapUser,
+          ...(emailConfig.imapPassword ? { password: emailConfig.imapPassword } : {}),
+          inboxFolder: emailConfig.inboxFolder,
+          checkIntervalMinutes: emailConfig.checkIntervalMinutes,
+          autoReply: emailConfig.autoReply,
+        },
+      })
+      setShowEmailModal(false)
+      showSuccess('E-posta konfigürasyonu kaydedildi.')
+    } catch (e: any) {
+      setError(e.response?.data?.error || 'Kaydedilemedi')
+    } finally {
+      setSavingEmail(false)
+    }
   }
 
   const saveChannelConfig = async () => {
@@ -1037,6 +1296,7 @@ export default function Settings() {
     { id: 'crm',        label: 'CRM / ERP',        icon: Database },
     { id: 'accounting', label: 'Muhasebe',         icon: CreditCard },
     { id: 'channels',   label: 'Kanallar',         icon: MessageSquare },
+    { id: 'team',       label: 'Ekip',             icon: Users },
     { id: 'security',   label: '2FA & Güvenlik',   icon: Shield },
   ]
 
@@ -1377,15 +1637,27 @@ export default function Settings() {
       {/* ── CRM / ERP tab ── */}
       {activeTab === 'crm' && (
         <div className="space-y-4">
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between flex-wrap gap-2">
             <h3 className="text-lg font-semibold text-white">CRM / ERP Bağlantıları</h3>
-            <button
-              onClick={() => setShowCrmModal(true)}
-              className="flex items-center gap-2 px-4 py-2 bg-[#6366f1] hover:bg-[#4f46e5] text-white rounded-lg text-sm"
-            >
-              <Plus size={16} />
-              Yeni Bağlantı Ekle
-            </button>
+            <div className="flex items-center gap-2 flex-wrap">
+              <button onClick={() => { setShowOAuthModal(true); setOauthMsg('') }}
+                className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-all"
+                style={{ background: 'rgba(45,138,107,0.12)', color: 'var(--forest)', border: '1px solid rgba(45,138,107,0.25)' }}>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 14H9V8h2v8zm4 0h-2V8h2v8z"/></svg>
+                OAuth ile Bağla
+              </button>
+              <button onClick={() => { setDbTarget('crm'); setShowDbModal(true); setDbTestResult(null) }}
+                className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-all"
+                style={{ background: 'rgba(99,102,241,0.12)', color: '#818cf8', border: '1px solid rgba(99,102,241,0.25)' }}>
+                <Database size={14} />
+                DB ile Bağla
+              </button>
+              <button onClick={() => setShowCrmModal(true)}
+                className="flex items-center gap-2 px-3 py-2 bg-[#6366f1] hover:bg-[#4f46e5] text-white rounded-lg text-sm">
+                <Plus size={14} />
+                API Key ile Ekle
+              </button>
+            </div>
           </div>
 
           {crmConnections.length === 0 ? (
@@ -1439,15 +1711,27 @@ export default function Settings() {
       {/* ── Accounting tab ── */}
       {activeTab === 'accounting' && (
         <div className="space-y-4">
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between flex-wrap gap-2">
             <h3 className="text-lg font-semibold text-white">Muhasebe Bağlantıları</h3>
-            <button
-              onClick={() => setShowAccountingModal(true)}
-              className="flex items-center gap-2 px-4 py-2 bg-[#6366f1] hover:bg-[#4f46e5] text-white rounded-lg text-sm"
-            >
-              <Plus size={16} />
-              Yeni Ekle
-            </button>
+            <div className="flex items-center gap-2 flex-wrap">
+              <button onClick={() => { setShowAccOAuthModal(true); setAccOAuthMsg('') }}
+                className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-all"
+                style={{ background: 'rgba(45,138,107,0.12)', color: 'var(--forest)', border: '1px solid rgba(45,138,107,0.25)' }}>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 14H9V8h2v8zm4 0h-2V8h2v8z"/></svg>
+                OAuth ile Bağla
+              </button>
+              <button onClick={() => { setDbTarget('accounting'); setShowDbModal(true); setDbTestResult(null) }}
+                className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-all"
+                style={{ background: 'rgba(99,102,241,0.12)', color: '#818cf8', border: '1px solid rgba(99,102,241,0.25)' }}>
+                <Database size={14} />
+                DB ile Bağla
+              </button>
+              <button onClick={() => setShowAccountingModal(true)}
+                className="flex items-center gap-2 px-3 py-2 bg-[#6366f1] hover:bg-[#4f46e5] text-white rounded-lg text-sm">
+                <Plus size={14} />
+                API Key ile Ekle
+              </button>
+            </div>
           </div>
 
           {accountingConnections.length === 0 ? (
@@ -1538,6 +1822,78 @@ export default function Settings() {
         </div>
       )}
 
+      {/* ── Team tab ── */}
+      {activeTab === 'team' && (
+        <div className="space-y-6">
+          {/* Invite form */}
+          <div className="p-5 rounded-2xl" style={{ background: 'var(--surface-modal)', border: '1px solid var(--border)' }}>
+            <h3 className="font-semibold text-sm mb-4" style={{ color: 'var(--text-1)' }}>Ekip Üyesi Davet Et</h3>
+            <div className="flex gap-3 flex-wrap">
+              <div className="relative flex-1 min-w-[200px]">
+                <Mail size={13} className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: 'var(--text-3)' }} />
+                <input
+                  type="email" value={inviteEmail} onChange={e => setInviteEmail(e.target.value)}
+                  placeholder="e-posta adresi"
+                  className="w-full pl-8 pr-3 py-2 rounded-xl text-sm outline-none"
+                  style={{ background: 'var(--surface-2)', color: 'var(--text-1)', border: '1px solid var(--border)' }}
+                  onKeyDown={e => e.key === 'Enter' && sendInvite()}
+                />
+              </div>
+              <select value={inviteRole} onChange={e => setInviteRole(e.target.value)}
+                className="px-3 py-2 rounded-xl text-sm outline-none"
+                style={{ background: 'var(--surface-2)', color: 'var(--text-1)', border: '1px solid var(--border)' }}>
+                <option value="entity_sub">Standart Kullanıcı</option>
+                <option value="entity_supervisor">Süpervizör</option>
+                <option value="entity_main">Yönetici</option>
+              </select>
+              <button onClick={sendInvite} disabled={inviting || !inviteEmail.trim()}
+                className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium disabled:opacity-40 transition-all"
+                style={{ background: 'rgba(45,138,107,0.85)', color: '#fff' }}>
+                <UserPlus size={14} />
+                {inviting ? 'Gönderiliyor…' : 'Davet Et'}
+              </button>
+            </div>
+            {inviteMsg && (
+              <p className="text-xs mt-2" style={{ color: inviteMsg.includes('gönderildi') || inviteMsg.includes('eklendi') ? 'var(--forest)' : '#f87171' }}>
+                {inviteMsg}
+              </p>
+            )}
+          </div>
+
+          {/* Members list */}
+          <div className="p-5 rounded-2xl" style={{ background: 'var(--surface-modal)', border: '1px solid var(--border)' }}>
+            <h3 className="font-semibold text-sm mb-4" style={{ color: 'var(--text-1)' }}>
+              Ekip Üyeleri ({teamMembers.length})
+            </h3>
+            {teamMembers.length === 0 ? (
+              <p className="text-sm text-center py-6" style={{ color: 'var(--text-3)' }}>Henüz ekip üyesi yok</p>
+            ) : (
+              <div className="space-y-2">
+                {teamMembers.map((m: any) => (
+                  <div key={m.userId ?? m.id} className="flex items-center justify-between px-4 py-3 rounded-xl"
+                    style={{ background: 'var(--surface-2)', border: '1px solid var(--border)' }}>
+                    <div className="flex items-center gap-3">
+                      <div className="w-8 h-8 rounded-full flex items-center justify-center text-sm font-semibold"
+                        style={{ background: 'rgba(45,138,107,0.15)', color: 'var(--forest)' }}>
+                        {(m.name ?? m.email ?? '?')[0].toUpperCase()}
+                      </div>
+                      <div>
+                        <p className="text-sm font-medium" style={{ color: 'var(--text-1)' }}>{m.name || m.email}</p>
+                        {m.name && <p className="text-xs" style={{ color: 'var(--text-3)' }}>{m.email}</p>}
+                      </div>
+                    </div>
+                    <span className="px-2 py-1 rounded-lg text-xs capitalize"
+                      style={{ background: 'var(--surface-modal)', color: 'var(--text-3)', border: '1px solid var(--border)' }}>
+                      {m.role?.replace('entity_', '') ?? 'üye'}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* ── Security tab ── */}
       {activeTab === 'security' && (
         <div className="space-y-4">
@@ -1583,6 +1939,232 @@ export default function Settings() {
       {/* ════════════════════════════════════════════════════════════════════════
           MODALS
           ════════════════════════════════════════════════════════════════════ */}
+
+      {/* ── OAuth modal ── */}
+      {showOAuthModal && (
+        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
+          <div className="w-full max-w-md rounded-2xl flex flex-col"
+            style={{ background: 'var(--surface-modal)', border: '1px solid var(--border)' }}>
+            <div className="flex items-center justify-between px-5 py-4" style={{ borderBottom: '1px solid var(--border)' }}>
+              <div>
+                <h3 className="font-semibold text-sm" style={{ color: 'var(--text-1)' }}>OAuth ile CRM Bağla</h3>
+                <p className="text-xs mt-0.5" style={{ color: 'var(--text-3)' }}>Zoho, HubSpot veya Salesforce hesabınızı bağlayın</p>
+              </div>
+              <button onClick={() => setShowOAuthModal(false)} style={{ color: 'var(--text-3)' }}><X size={18} /></button>
+            </div>
+            <div className="p-5 space-y-4">
+              {/* Provider seçimi */}
+              <div className="flex gap-2">
+                {(['zoho', 'hubspot', 'salesforce'] as const).map(p => (
+                  <button key={p} onClick={() => setOauthProvider(p)}
+                    className="flex-1 py-2 rounded-xl text-xs font-medium capitalize transition-all"
+                    style={oauthProvider === p
+                      ? { background: 'rgba(45,138,107,0.85)', color: '#fff' }
+                      : { background: 'var(--surface-2)', color: 'var(--text-2)', border: '1px solid var(--border)' }}>
+                    {p.charAt(0).toUpperCase() + p.slice(1)}
+                  </button>
+                ))}
+              </div>
+              {/* Form */}
+              {[
+                { key: 'name', label: 'Bağlantı Adı', placeholder: 'Ör: Şirket Zoho CRM' },
+                { key: 'clientId', label: 'Client ID', placeholder: 'OAuth Client ID' },
+                { key: 'clientSecret', label: 'Client Secret', placeholder: 'OAuth Client Secret' },
+              ].map(f => (
+                <div key={f.key}>
+                  <label className="block text-xs font-medium mb-1.5" style={{ color: 'var(--text-2)' }}>{f.label}</label>
+                  <input value={(oauthForm as any)[f.key]}
+                    onChange={e => setOauthForm(o => ({ ...o, [f.key]: e.target.value }))}
+                    placeholder={f.placeholder}
+                    className="w-full px-3 py-2 rounded-xl text-sm outline-none"
+                    style={{ background: 'var(--surface-2)', color: 'var(--text-1)', border: '1px solid var(--border)' }} />
+                </div>
+              ))}
+              {oauthProvider === 'zoho' && (
+                <div>
+                  <label className="block text-xs font-medium mb-1.5" style={{ color: 'var(--text-2)' }}>Bölge</label>
+                  <select value={oauthForm.region} onChange={e => setOauthForm(o => ({ ...o, region: e.target.value }))}
+                    className="w-full px-3 py-2 rounded-xl text-sm outline-none"
+                    style={{ background: 'var(--surface-2)', color: 'var(--text-1)', border: '1px solid var(--border)' }}>
+                    {[['com','Global (com)'],['eu','Avrupa (eu)'],['in','Hindistan (in)'],['com.au','Avustralya (com.au)'],['jp','Japonya (jp)']].map(([v,l]) => (
+                      <option key={v} value={v}>{l}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
+              <p className="text-xs p-3 rounded-xl" style={{ background: 'rgba(251,191,36,0.07)', color: '#fbbf24' }}>
+                Yetkilendirme popup'ı açılacak. Popup'ı tamamladıktan sonra bağlantı otomatik eklenir.
+              </p>
+              {oauthMsg && <p className="text-xs text-red-400">{oauthMsg}</p>}
+            </div>
+            <div className="flex justify-end gap-3 px-5 py-4" style={{ borderTop: '1px solid var(--border)' }}>
+              <button onClick={() => setShowOAuthModal(false)}
+                className="px-4 py-2 rounded-xl text-sm" style={{ background: 'var(--surface-2)', color: 'var(--text-2)' }}>
+                İptal
+              </button>
+              <button onClick={startOAuth} disabled={oauthLoading}
+                className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium disabled:opacity-50"
+                style={{ background: 'rgba(45,138,107,0.85)', color: '#fff' }}>
+                {oauthLoading ? 'Bağlanıyor...' : 'Yetkilendir'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Accounting OAuth modal ── */}
+      {showAccOAuthModal && (
+        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
+          <div className="w-full max-w-md rounded-2xl flex flex-col"
+            style={{ background: 'var(--surface-modal)', border: '1px solid var(--border)' }}>
+            <div className="flex items-center justify-between px-5 py-4" style={{ borderBottom: '1px solid var(--border)' }}>
+              <div>
+                <h3 className="font-semibold text-sm" style={{ color: 'var(--text-1)' }}>OAuth ile Muhasebe Bağla</h3>
+                <p className="text-xs mt-0.5" style={{ color: 'var(--text-3)' }}>Zoho Books, QuickBooks veya Xero hesabınızı bağlayın</p>
+              </div>
+              <button onClick={() => setShowAccOAuthModal(false)} style={{ color: 'var(--text-3)' }}><X size={18} /></button>
+            </div>
+            <div className="p-5 space-y-4">
+              <div className="flex gap-2">
+                {(['zoho_books', 'quickbooks', 'xero'] as const).map(p => (
+                  <button key={p} onClick={() => setAccOAuthProvider(p)}
+                    className="flex-1 py-2 rounded-xl text-xs font-medium transition-all"
+                    style={accOAuthProvider === p
+                      ? { background: 'rgba(45,138,107,0.85)', color: '#fff' }
+                      : { background: 'var(--surface-2)', color: 'var(--text-2)', border: '1px solid var(--border)' }}>
+                    {p === 'zoho_books' ? 'Zoho Books' : p === 'quickbooks' ? 'QuickBooks' : 'Xero'}
+                  </button>
+                ))}
+              </div>
+              {[
+                { key: 'name', label: 'Bağlantı Adı', placeholder: 'Ör: Şirket Muhasebe' },
+                { key: 'clientId', label: 'Client ID', placeholder: 'OAuth Client ID' },
+                { key: 'clientSecret', label: 'Client Secret', placeholder: 'OAuth Client Secret' },
+              ].map(f => (
+                <div key={f.key}>
+                  <label className="block text-xs font-medium mb-1.5" style={{ color: 'var(--text-2)' }}>{f.label}</label>
+                  <input value={(accOAuthForm as any)[f.key]}
+                    onChange={e => setAccOAuthForm(o => ({ ...o, [f.key]: e.target.value }))}
+                    placeholder={f.placeholder}
+                    className="w-full px-3 py-2 rounded-xl text-sm outline-none"
+                    style={{ background: 'var(--surface-2)', color: 'var(--text-1)', border: '1px solid var(--border)' }} />
+                </div>
+              ))}
+              {accOAuthProvider === 'zoho_books' && (
+                <>
+                  <div>
+                    <label className="block text-xs font-medium mb-1.5" style={{ color: 'var(--text-2)' }}>Organization ID</label>
+                    <input value={accOAuthForm.organizationId}
+                      onChange={e => setAccOAuthForm(o => ({ ...o, organizationId: e.target.value }))}
+                      placeholder="Zoho Books Organization ID"
+                      className="w-full px-3 py-2 rounded-xl text-sm outline-none"
+                      style={{ background: 'var(--surface-2)', color: 'var(--text-1)', border: '1px solid var(--border)' }} />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium mb-1.5" style={{ color: 'var(--text-2)' }}>Bölge</label>
+                    <select value={accOAuthForm.region} onChange={e => setAccOAuthForm(o => ({ ...o, region: e.target.value }))}
+                      className="w-full px-3 py-2 rounded-xl text-sm outline-none"
+                      style={{ background: 'var(--surface-2)', color: 'var(--text-1)', border: '1px solid var(--border)' }}>
+                      {[['com','Global (com)'],['eu','Avrupa (eu)'],['in','Hindistan (in)'],['com.au','Avustralya (com.au)']].map(([v,l]) => (
+                        <option key={v} value={v}>{l}</option>
+                      ))}
+                    </select>
+                  </div>
+                </>
+              )}
+              <p className="text-xs p-3 rounded-xl" style={{ background: 'rgba(251,191,36,0.07)', color: '#fbbf24' }}>
+                Yetkilendirme popup'ı açılacak. Popup'ı tamamladıktan sonra bağlantı otomatik eklenir.
+              </p>
+              {accOAuthMsg && <p className="text-xs text-red-400">{accOAuthMsg}</p>}
+            </div>
+            <div className="flex justify-end gap-3 px-5 py-4" style={{ borderTop: '1px solid var(--border)' }}>
+              <button onClick={() => setShowAccOAuthModal(false)}
+                className="px-4 py-2 rounded-xl text-sm" style={{ background: 'var(--surface-2)', color: 'var(--text-2)' }}>
+                İptal
+              </button>
+              <button onClick={startAccOAuth} disabled={accOAuthLoading}
+                className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium disabled:opacity-50"
+                style={{ background: 'rgba(45,138,107,0.85)', color: '#fff' }}>
+                {accOAuthLoading ? 'Bağlanıyor...' : 'Yetkilendir'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── DB connection modal ── */}
+      {showDbModal && (
+        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
+          <div className="w-full max-w-md rounded-2xl flex flex-col max-h-[90vh]"
+            style={{ background: 'var(--surface-modal)', border: '1px solid var(--border)' }}>
+            <div className="flex items-center justify-between px-5 py-4" style={{ borderBottom: '1px solid var(--border)' }}>
+              <div>
+                <h3 className="font-semibold text-sm" style={{ color: 'var(--text-1)' }}>PostgreSQL DB Bağla</h3>
+                <p className="text-xs mt-0.5" style={{ color: 'var(--text-3)' }}>Sadece okuma yetkisi olan bir kullanıcı kullanın</p>
+              </div>
+              <button onClick={() => setShowDbModal(false)} style={{ color: 'var(--text-3)' }}><X size={18} /></button>
+            </div>
+            <div className="p-5 space-y-3 overflow-y-auto">
+              {[
+                { key: 'name',     label: 'Bağlantı Adı', placeholder: 'Ör: Şirket Veritabanı', full: true },
+                { key: 'host',     label: 'Host',          placeholder: 'ki-postgres veya IP', full: true },
+                { key: 'database', label: 'Veritabanı',    placeholder: 'kibusiness', full: false },
+                { key: 'port',     label: 'Port',          placeholder: '5432',       full: false },
+                { key: 'username', label: 'Kullanıcı',     placeholder: 'kibi_bi_user', full: false },
+                { key: 'password', label: 'Şifre',         placeholder: '••••••••',   full: false },
+              ].map(f => (
+                <div key={f.key} className={f.full ? '' : 'inline-block w-[calc(50%-6px)] ' + (f.key === 'database' || f.key === 'username' ? 'mr-3' : '')}>
+                  <label className="block text-xs font-medium mb-1.5" style={{ color: 'var(--text-2)' }}>{f.label}</label>
+                  <input
+                    type={f.key === 'password' ? 'password' : 'text'}
+                    value={(dbForm as any)[f.key]}
+                    onChange={e => setDbForm(d => ({ ...d, [f.key]: e.target.value }))}
+                    placeholder={f.placeholder}
+                    className="w-full px-3 py-2 rounded-xl text-sm outline-none"
+                    style={{ background: 'var(--surface-2)', color: 'var(--text-1)', border: '1px solid var(--border)' }}
+                  />
+                </div>
+              ))}
+              <div className="flex items-center gap-2 pt-1">
+                <input type="checkbox" id="db-ssl" checked={dbForm.ssl}
+                  onChange={e => setDbForm(d => ({ ...d, ssl: e.target.checked }))} className="rounded" />
+                <label htmlFor="db-ssl" className="text-xs" style={{ color: 'var(--text-2)' }}>SSL kullan</label>
+              </div>
+              {/* Test sonucu */}
+              {dbTestResult && (
+                <div className={`p-3 rounded-xl text-xs`}
+                  style={{ background: dbTestResult.ok ? 'rgba(45,138,107,0.08)' : 'rgba(239,68,68,0.08)', color: dbTestResult.ok ? 'var(--forest)' : '#f87171' }}>
+                  {dbTestResult.ok ? (
+                    <>
+                      <p className="font-medium">✓ Bağlantı başarılı</p>
+                      <p className="mt-1">Salt okunur: {dbTestResult.isReadOnly ? '✓ Evet' : '⚠ Hayır (yazma yetkisi var!)'}</p>
+                      {dbTestResult.tables && <p className="mt-1">{dbTestResult.tables.length} tablo bulundu: {dbTestResult.tables.slice(0,5).join(', ')}{dbTestResult.tables.length > 5 ? '...' : ''}</p>}
+                    </>
+                  ) : (
+                    <p>✗ {dbTestResult.error}</p>
+                  )}
+                </div>
+              )}
+            </div>
+            <div className="flex justify-end gap-3 px-5 py-4" style={{ borderTop: '1px solid var(--border)' }}>
+              <button onClick={() => setShowDbModal(false)}
+                className="px-4 py-2 rounded-xl text-sm" style={{ background: 'var(--surface-2)', color: 'var(--text-2)' }}>
+                İptal
+              </button>
+              <button onClick={testDbConnection} disabled={dbTesting}
+                className="px-4 py-2 rounded-xl text-sm disabled:opacity-50"
+                style={{ background: 'var(--surface-2)', color: 'var(--text-2)', border: '1px solid var(--border)' }}>
+                {dbTesting ? 'Test ediliyor...' : 'Bağlantıyı Test Et'}
+              </button>
+              <button onClick={saveDbConnection} disabled={dbSaving || !dbTestResult?.ok}
+                className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium disabled:opacity-50"
+                style={{ background: 'rgba(45,138,107,0.85)', color: '#fff' }}>
+                {dbSaving ? 'Kaydediliyor...' : 'Kaydet'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ── CRM / ERP add modal ── */}
       {showCrmModal && (
@@ -1866,6 +2448,150 @@ export default function Settings() {
               <button onClick={saveChannelConfig} disabled={savingChannel}
                 className="flex items-center gap-2 px-5 py-2 bg-[#6366f1] hover:bg-[#4f46e5] text-white rounded-lg text-sm disabled:opacity-50">
                 <Save size={14} /> {savingChannel ? 'Kaydediliyor...' : 'Kaydet'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Email SMTP+IMAP modal ── */}
+      {showEmailModal && (
+        <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4">
+          <div className="bg-[#111111] border border-[#2a2a2a] rounded-xl w-full max-w-2xl max-h-[90vh] flex flex-col shadow-2xl">
+            <div className="flex items-center justify-between p-5 border-b border-[#2a2a2a]">
+              <div className="flex items-center gap-3">
+                <span className="text-xl">📧</span>
+                <div>
+                  <h3 className="text-white font-semibold text-sm">E-posta Konfigürasyonu</h3>
+                  <p className="text-gray-500 text-xs">SMTP (gönderici) ve IMAP (alıcı) ayarları</p>
+                </div>
+              </div>
+              <button onClick={() => setShowEmailModal(false)} className="text-gray-400 hover:text-white"><X size={18} /></button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-5 space-y-6">
+              {/* Gönderici info */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs text-gray-400 block mb-1">Gönderici Adı</label>
+                  <input value={emailConfig.fromName} onChange={e => setEmailConfig(c => ({ ...c, fromName: e.target.value }))}
+                    placeholder="Ki Business Destek" className="w-full bg-[#1a1a1a] border border-[#333] rounded-lg px-3 py-2 text-sm text-white outline-none" />
+                </div>
+                <div>
+                  <label className="text-xs text-gray-400 block mb-1">Gönderici E-posta</label>
+                  <input value={emailConfig.fromEmail} onChange={e => setEmailConfig(c => ({ ...c, fromEmail: e.target.value }))}
+                    placeholder="destek@sirketi.com" className="w-full bg-[#1a1a1a] border border-[#333] rounded-lg px-3 py-2 text-sm text-white outline-none" />
+                </div>
+              </div>
+
+              {/* SMTP section */}
+              <div>
+                <h4 className="text-xs font-semibold text-gray-300 uppercase tracking-wider mb-3">📤 Gönderici (SMTP)</h4>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-xs text-gray-400 block mb-1">SMTP Sunucusu</label>
+                    <input value={emailConfig.smtpHost} onChange={e => setEmailConfig(c => ({ ...c, smtpHost: e.target.value }))}
+                      placeholder="smtp.gmail.com" className="w-full bg-[#1a1a1a] border border-[#333] rounded-lg px-3 py-2 text-sm text-white outline-none" />
+                  </div>
+                  <div>
+                    <label className="text-xs text-gray-400 block mb-1">Port</label>
+                    <input value={emailConfig.smtpPort} onChange={e => setEmailConfig(c => ({ ...c, smtpPort: e.target.value }))}
+                      placeholder="587" className="w-full bg-[#1a1a1a] border border-[#333] rounded-lg px-3 py-2 text-sm text-white outline-none" />
+                  </div>
+                  <div>
+                    <label className="text-xs text-gray-400 block mb-1">Kullanıcı Adı</label>
+                    <input value={emailConfig.smtpUser} onChange={e => setEmailConfig(c => ({ ...c, smtpUser: e.target.value }))}
+                      placeholder="user@gmail.com" className="w-full bg-[#1a1a1a] border border-[#333] rounded-lg px-3 py-2 text-sm text-white outline-none" />
+                  </div>
+                  <div>
+                    <label className="text-xs text-gray-400 block mb-1">Şifre</label>
+                    <input type="password" value={emailConfig.smtpPassword} onChange={e => setEmailConfig(c => ({ ...c, smtpPassword: e.target.value }))}
+                      placeholder={emailConfig.hasSmtpPassword ? 'Kayıtlı şifre mevcut' : 'Şifre girin'}
+                      className="w-full bg-[#1a1a1a] border border-[#333] rounded-lg px-3 py-2 text-sm text-white outline-none" />
+                  </div>
+                </div>
+                <label className="flex items-center gap-2 mt-2 text-xs text-gray-400 cursor-pointer">
+                  <input type="checkbox" checked={emailConfig.smtpSecure} onChange={e => setEmailConfig(c => ({ ...c, smtpSecure: e.target.checked }))} className="accent-teal-500" />
+                  SSL/TLS (port 465)
+                </label>
+                <div className="flex items-center gap-2 mt-2">
+                  <button onClick={testSmtp} disabled={emailTestStatus.smtp === 'testing'}
+                    className="px-3 py-1.5 rounded-lg text-xs font-medium disabled:opacity-50 transition-all"
+                    style={{ background: 'rgba(38,166,154,0.12)', color: '#26a69a', border: '1px solid rgba(38,166,154,0.25)' }}>
+                    {emailTestStatus.smtp === 'testing' ? 'Test ediliyor...' : 'SMTP Test Et'}
+                  </button>
+                  {emailTestMsg.smtp && (
+                    <span className={`text-xs ${emailTestStatus.smtp === 'ok' ? 'text-green-400' : 'text-red-400'}`}>{emailTestMsg.smtp}</span>
+                  )}
+                </div>
+              </div>
+
+              {/* IMAP section */}
+              <div>
+                <h4 className="text-xs font-semibold text-gray-300 uppercase tracking-wider mb-3">📥 Alıcı (IMAP)</h4>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-xs text-gray-400 block mb-1">IMAP Sunucusu</label>
+                    <input value={emailConfig.imapHost} onChange={e => setEmailConfig(c => ({ ...c, imapHost: e.target.value }))}
+                      placeholder="imap.gmail.com" className="w-full bg-[#1a1a1a] border border-[#333] rounded-lg px-3 py-2 text-sm text-white outline-none" />
+                  </div>
+                  <div>
+                    <label className="text-xs text-gray-400 block mb-1">Port</label>
+                    <input value={emailConfig.imapPort} onChange={e => setEmailConfig(c => ({ ...c, imapPort: e.target.value }))}
+                      placeholder="993" className="w-full bg-[#1a1a1a] border border-[#333] rounded-lg px-3 py-2 text-sm text-white outline-none" />
+                  </div>
+                  <div>
+                    <label className="text-xs text-gray-400 block mb-1">Kullanıcı Adı</label>
+                    <input value={emailConfig.imapUser} onChange={e => setEmailConfig(c => ({ ...c, imapUser: e.target.value }))}
+                      placeholder="user@gmail.com" className="w-full bg-[#1a1a1a] border border-[#333] rounded-lg px-3 py-2 text-sm text-white outline-none" />
+                  </div>
+                  <div>
+                    <label className="text-xs text-gray-400 block mb-1">Şifre</label>
+                    <input type="password" value={emailConfig.imapPassword} onChange={e => setEmailConfig(c => ({ ...c, imapPassword: e.target.value }))}
+                      placeholder={emailConfig.hasImapPassword ? 'Kayıtlı şifre mevcut' : 'Şifre girin'}
+                      className="w-full bg-[#1a1a1a] border border-[#333] rounded-lg px-3 py-2 text-sm text-white outline-none" />
+                  </div>
+                  <div>
+                    <label className="text-xs text-gray-400 block mb-1">Inbox Klasörü</label>
+                    <input value={emailConfig.inboxFolder} onChange={e => setEmailConfig(c => ({ ...c, inboxFolder: e.target.value }))}
+                      placeholder="INBOX" className="w-full bg-[#1a1a1a] border border-[#333] rounded-lg px-3 py-2 text-sm text-white outline-none" />
+                  </div>
+                  <div>
+                    <label className="text-xs text-gray-400 block mb-1">Kontrol Sıklığı (dakika)</label>
+                    <input type="number" value={emailConfig.checkIntervalMinutes}
+                      onChange={e => setEmailConfig(c => ({ ...c, checkIntervalMinutes: Number(e.target.value) }))}
+                      min={1} max={60} className="w-full bg-[#1a1a1a] border border-[#333] rounded-lg px-3 py-2 text-sm text-white outline-none" />
+                  </div>
+                </div>
+                <div className="flex items-center gap-4 mt-2">
+                  <label className="flex items-center gap-2 text-xs text-gray-400 cursor-pointer">
+                    <input type="checkbox" checked={emailConfig.imapSecure} onChange={e => setEmailConfig(c => ({ ...c, imapSecure: e.target.checked }))} className="accent-teal-500" />
+                    SSL/TLS (port 993)
+                  </label>
+                  <label className="flex items-center gap-2 text-xs text-gray-400 cursor-pointer">
+                    <input type="checkbox" checked={emailConfig.autoReply} onChange={e => setEmailConfig(c => ({ ...c, autoReply: e.target.checked }))} className="accent-teal-500" />
+                    Otomatik AI yanıtı
+                  </label>
+                </div>
+                <div className="flex items-center gap-2 mt-2">
+                  <button onClick={testImap} disabled={emailTestStatus.imap === 'testing'}
+                    className="px-3 py-1.5 rounded-lg text-xs font-medium disabled:opacity-50 transition-all"
+                    style={{ background: 'rgba(38,166,154,0.12)', color: '#26a69a', border: '1px solid rgba(38,166,154,0.25)' }}>
+                    {emailTestStatus.imap === 'testing' ? 'Test ediliyor...' : 'IMAP Test Et'}
+                  </button>
+                  {emailTestMsg.imap && (
+                    <span className={`text-xs ${emailTestStatus.imap === 'ok' ? 'text-green-400' : 'text-red-400'}`}>{emailTestMsg.imap}</span>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-3 p-5 border-t border-[#2a2a2a]">
+              <button onClick={() => setShowEmailModal(false)} className="px-4 py-2 rounded-xl text-sm text-gray-400 hover:text-white">İptal</button>
+              <button onClick={saveEmailConfig} disabled={savingEmail}
+                className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium disabled:opacity-50"
+                style={{ background: 'linear-gradient(135deg, var(--accent), var(--forest))', color: '#fff' }}>
+                <Save size={14} />{savingEmail ? 'Kaydediliyor...' : 'Kaydet'}
               </button>
             </div>
           </div>

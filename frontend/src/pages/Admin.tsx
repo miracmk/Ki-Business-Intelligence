@@ -128,7 +128,7 @@ export default function Admin() {
     <div className="p-8 space-y-8">
       <div className="flex items-center justify-between gap-4">
         <div>
-          <h1 className="text-3xl font-bold text-white">Admin Panel</h1>
+          <h1 className="text-3xl font-bold text-white">Platform Management</h1>
           <p className="text-gray-400">Ki Business Intelligence — KIBI AI Platform Yönetimi</p>
         </div>
         <button onClick={() => window.location.reload()} className="flex items-center gap-2 px-4 py-2 rounded-xl bg-[#6366f1] hover:bg-[#4f46e5] text-white">

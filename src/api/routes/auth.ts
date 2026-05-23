@@ -3,7 +3,7 @@ import type { FastifyPluginAsync } from 'fastify'
 import { z } from 'zod'
 import { db } from '../../lib/db.js'
 import { redis, redisKeys } from '../../lib/redis.js'
-import { users, tenants, tenantMemberships, aiConfigs } from '../../../db/schema.js'
+import { users, tenants, tenantMemberships, aiConfigs, kibiEntities } from '../../../db/schema.js'
 import { env } from '../../../config/env.js'
 import * as argon2 from 'argon2'
 import { authenticator } from 'otplib'
@@ -74,6 +74,58 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
     }
   })
 
+  // POST /api/v1/auth/register-entity — public self-service entity registration
+  app.post('/register-entity', async (req, reply) => {
+    const { email, password, name, companyName, industry } = req.body as {
+      email: string; password: string; name: string; companyName: string; industry?: string
+    }
+    if (!email || !password || !name || !companyName) {
+      return reply.status(400).send({ error: 'email, password, name ve companyName zorunlu' })
+    }
+    if (password.length < 8) return reply.status(400).send({ error: 'Şifre en az 8 karakter olmalı' })
+
+    const existing = await db.query.users.findFirst({ where: (t, { eq }) => eq(t.email, email.toLowerCase()) })
+    if (existing) return reply.status(409).send({ error: 'Bu e-posta zaten kayıtlı' })
+
+    try {
+      const hash = await argon2.hash(password, { type: argon2.argon2id })
+      const slug = companyName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
+
+      const [user] = await db.insert(users).values({
+        email: email.toLowerCase(), name, passwordHash: hash, role: 'entity_main', isActive: true,
+      }).returning()
+
+      const [tenant] = await db.insert(tenants).values({ name: companyName, slug: `${slug}-${nanoid(4)}` }).returning()
+
+      await Promise.all([
+        db.insert(tenantMemberships).values({ userId: user.id, tenantId: tenant.id, role: 'entity_main' }),
+        db.insert(aiConfigs).values({ tenantId: tenant.id, provider: 'openrouter', model: 'google/gemini-2.0-flash-exp:free' }),
+        db.insert(kibiEntities).values({
+          entityId: tenant.id,
+          clientId: `KBI-${nanoid(6).toUpperCase()}`,
+          companyName,
+          industry: industry ?? null,
+          mainUserId: user.id,
+        }),
+      ])
+
+      // Send welcome email (non-fatal)
+      try {
+        const t = nodemailer.createTransport({ host: env.SMTP_HOST, port: env.SMTP_PORT, secure: env.SMTP_PORT === 465, auth: { user: env.SMTP_USER, pass: env.SMTP_PASS } })
+        await t.sendMail({
+          from: env.SMTP_FROM, to: email,
+          subject: 'Ki Business Intelligence\'e Hoş Geldiniz!',
+          html: `<div style="font-family:Arial;max-width:480px;margin:0 auto;padding:24px"><h2 style="color:#2d8a6b">Ki Business Intelligence</h2><p>Merhaba ${name},</p><p><strong>${companyName}</strong> için hesabınız başarıyla oluşturuldu.</p><p>Şimdi giriş yaparak CRM, muhasebe ve yapay zeka özelliklerinizi kullanmaya başlayabilirsiniz.</p><p style="color:#888;font-size:13px">Ki Business Intelligence ekibi</p></div>`,
+        })
+      } catch { /* non-fatal */ }
+
+      return reply.status(201).send({ ok: true, userId: user.id, tenantId: tenant.id })
+    } catch (e: any) {
+      console.error('[REGISTER-ENTITY]', e)
+      return reply.status(500).send({ error: 'Kayıt sırasında hata oluştu' })
+    }
+  })
+
   // POST /api/v1/auth/login
   app.post('/login', async (req, reply) => {
     const { email, password } = req.body as { email: string; password: string }
@@ -85,7 +137,11 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
     const membership = await db.query.tenantMemberships.findFirst({ where: (t: any, { eq }: any) => eq(t.userId, user.id) })
     const tenantId = membership?.tenantId ?? null
     const role = user.role ?? membership?.role ?? 'member'
-    const accessToken = app.jwt.sign({ sub: user.id, tenantId, role }, { expiresIn: env.JWT_EXPIRES_IN })
+    const scope = role === 'entity_external' ? 'external' : undefined
+    const jwtPayload = scope
+      ? { sub: user.id, tenantId, role, scope }
+      : { sub: user.id, tenantId, role }
+    const accessToken = app.jwt.sign(jwtPayload, { expiresIn: env.JWT_EXPIRES_IN })
     const refreshToken = nanoid(64)
     await redis.setex(redisKeys.refreshToken(refreshToken), 60 * 60 * 24 * 30, JSON.stringify({ userId: user.id, tenantId, role }))
     await db.update(users).set({ lastLoginAt: new Date() }).where(eq(users.id, user.id))

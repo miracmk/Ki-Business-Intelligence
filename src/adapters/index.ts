@@ -1,4 +1,5 @@
 import { ZohoAdapter } from './zoho.js'
+import { PostgreSqlAdapter } from './postgresql.js'
 import { CrmAdapter, type CrmCredentials } from './base.js'
 import { QuickBooksAdapter } from './quickbooks.js'
 import { XeroAdapter } from './xero.js'
@@ -88,6 +89,9 @@ export function createAdapter(creds: CrmCredentials): CrmAdapter {
     case 'infor':          return new NotImplementedAdapter(creds, 'infor')
     case 'sage_intacct':   return new NotImplementedAdapter(creds, 'sage_intacct')
     case 'acumatica':      return new NotImplementedAdapter(creds, 'acumatica')
+    // ── Direct DB types ──
+    case 'postgresql':     return new PostgreSqlAdapter(creds)
+    case 'mysql':          return new NotImplementedAdapter(creds, 'mysql')
     default: throw new Error(`Unknown CRM type: ${creds.type}`)
   }
 }

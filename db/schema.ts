@@ -25,11 +25,13 @@ export const userRoleEnum   = pgEnum('user_role',   [
   'entity_main',       // Entity birincil kontağı - CRM/ERP/entegrasyon yetkisi
   'entity_supervisor', // Entity verisi erişim, sync talebi, entegrasyon denetim
   'entity_sub',        // Entity AI chat, KIBI AI, kendi alanı
+  'entity_external',   // Dış müşteri — sadece external-chat endpoint'ine erişim
 ])
 export const crmTypeEnum    = pgEnum('crm_type',    [
   'zoho', 'salesforce', 'hubspot', 'sap', 'oracle_netsuite', 'dynamics365', 'odoo', 'erpnext', 'custom',
   'pipedrive', 'freshsales', 'monday', 'bitrix24', 'sugarcrm',
   'dynamics_bc', 'oracle_fusion', 'odoo_erp', 'epicor', 'infor', 'sage_intacct', 'acumatica',
+  'postgresql', 'mysql',
 ])
 export const erpTypeEnum    = pgEnum('erp_type',    [
   'sap', 'oracle_netsuite', 'dynamics_bc', 'oracle_fusion', 'odoo_erp',

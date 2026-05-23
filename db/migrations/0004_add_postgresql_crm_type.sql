@@ -1,0 +1,2 @@
+ALTER TYPE crm_type ADD VALUE IF NOT EXISTS 'postgresql';
+ALTER TYPE crm_type ADD VALUE IF NOT EXISTS 'mysql';

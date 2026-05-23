@@ -6,6 +6,8 @@
         - subnet: 172.30.0.0/24
   npm_default:
     external: true
+  n8n_n8n-net:
+    external: true
 
 volumes:
   ki_pg_data:
@@ -60,7 +62,7 @@ services:
     container_name: ki_api
     restart: unless-stopped
     working_dir: /app
-    networks: [ki_net, npm_default]
+    networks: [ki_net, npm_default, n8n_n8n-net]
     ports:
       - "3001:3001"
     volumes:

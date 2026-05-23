@@ -1,14 +1,18 @@
 import type { FastifyPluginAsync } from 'fastify'
 import { z } from 'zod'
 import { db } from '../../lib/db.js'
-import { crmConnections, crmBulkJobs, crmSyncState, crmRecords, crmModules, crmFields } from '../../../db/schema.js'
+import { redis } from '../../lib/redis.js'
+import { crmConnections, crmBulkJobs, crmSyncState, crmRecords, crmModules, crmFields, kibiEntities } from '../../../db/schema.js'
 import { encryptJson, decryptJson } from '../../lib/crypto.js'
 import { createAdapter } from '../../adapters/index.js'
 import { runMetadataSync } from '../../engine/crm-sync/metadata-sync.js'
 import { startBulkSync } from '../../engine/crm-sync/bulk-sync.js'
 import { setupNotifications } from '../../engine/crm-sync/notification.js'
+import { runEntityEtl } from '../../engine/crm-sync/entity-etl.js'
+import { PostgreSqlAdapter } from '../../adapters/postgresql.js'
 import { eq, and, asc } from 'drizzle-orm'
 import { env } from '../../../config/env.js'
+import { nanoid } from 'nanoid'
 
 const ALL_CRM_TYPES = [
   // CRM
@@ -17,6 +21,8 @@ const ALL_CRM_TYPES = [
   // ERP
   'sap', 'oracle_netsuite', 'dynamics_bc', 'oracle_fusion', 'odoo_erp',
   'erpnext', 'epicor', 'infor', 'sage_intacct', 'acumatica',
+  // Direct DB
+  'postgresql', 'mysql',
   'custom',
 ] as const
 
@@ -207,6 +213,82 @@ export const crmRoutes: FastifyPluginAsync = async (app) => {
     return { modules }
   })
 
+  // ── POST /api/v1/crm/connections/:id/sync/entity ─────────────────────────
+  // Trigger ETL: mirror all source data → AI normalize → entity schema tables
+  app.post('/connections/:id/sync/entity', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const { id }  = req.params as { id: string }
+    const user    = req.user as { sub: string; tenantId: string; role: string }
+
+    // Verify ownership
+    const conn = await db.query.crmConnections.findFirst({
+      where: (t, { and, eq }) => and(eq(t.id, id), eq(t.tenantId, user.tenantId)),
+    })
+    if (!conn) return reply.status(404).send({ error: 'Bağlantı bulunamadı' })
+
+    // Fire-and-forget ETL
+    runEntityEtl(id).then(r => {
+      console.log(`[ETL] Done for ${id}: ${r.mirrored} mirrored, ${r.rows} normalized, tables=[${r.tables.join(',')}]`)
+    }).catch(err => console.error(`[ETL] Failed for ${id}:`, err))
+
+    return reply.status(202).send({
+      message: 'ETL başlatıldı — tüm veriler aynalalanıyor ve AI ile normalize ediliyor',
+      connectionId: id,
+    })
+  })
+
+  // ── POST /api/v1/crm/connections/:id/sync/pg-direct ──────────────────────
+  // For PostgreSQL sources: read tables + sync directly to entity schema
+  // (also triggered automatically via sync/entity for crmType=postgresql)
+  app.post('/connections/:id/sync/pg-direct', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const { id } = req.params as { id: string }
+    const user   = req.user as { sub: string; tenantId: string; role: string }
+
+    const conn = await db.query.crmConnections.findFirst({
+      where: (t, { and, eq }) => and(eq(t.id, id), eq(t.tenantId, user.tenantId)),
+    })
+    if (!conn) return reply.status(404).send({ error: 'Bağlantı bulunamadı' })
+    if (conn.crmType !== 'postgresql') return reply.status(400).send({ error: 'Bu endpoint sadece PostgreSQL bağlantıları için' })
+
+    // Metadata sync first: discover tables + columns
+    runMetadataSync(id).then(() => runEntityEtl(id))
+      .then(r => console.log(`[PG-ETL] Done for ${id}: ${r?.mirrored} rows mirrored`))
+      .catch(err => console.error(`[PG-ETL] Failed for ${id}:`, err))
+
+    return reply.status(202).send({ message: 'PostgreSQL tablo tarama ve ETL başlatıldı', connectionId: id })
+  })
+
+  // ── GET /api/v1/crm/connections/:id/entity-data ───────────────────────────
+  // Preview data in entity schema after ETL
+  app.get('/connections/:id/entity-data', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const { id }   = req.params as { id: string }
+    const { table = 'crm_contacts', limit = '20' } = req.query as Record<string, string>
+    const user = req.user as { sub: string; tenantId: string }
+
+    const entity = await db.query.kibiEntities.findFirst({
+      where: (t, { eq }) => eq(t.entityId, user.tenantId),
+    })
+    if (!entity?.entityDbSchema) return reply.status(400).send({ error: 'Entity schema oluşturulmamış' })
+
+    const { Pool } = await import('pg')
+    const pool = new Pool({ connectionString: env.DATABASE_URL, max: 1 })
+    try {
+      const { rows } = await pool.query(
+        `SELECT * FROM "${entity.entityDbSchema}"."${table}" ORDER BY created_at DESC LIMIT $1`,
+        [Math.min(Number(limit), 200)]
+      )
+      const { rows: countRows } = await pool.query(
+        `SELECT COUNT(*) AS n FROM "${entity.entityDbSchema}"."${table}"`
+      )
+      const mirrored = await pool.query(
+        `SELECT COUNT(*) AS n FROM "${entity.entityDbSchema}".crm_raw_mirror WHERE connection_id = $1`,
+        [id]
+      ).catch(() => ({ rows: [{ n: 0 }] }))
+      return { table, total: parseInt(countRows[0].n), mirrored: parseInt(mirrored.rows[0].n), rows }
+    } finally {
+      await pool.end()
+    }
+  })
+
   // GET /api/v1/crm/connections/:id/modules/:module/fields
   app.get('/connections/:id/modules/:module/fields', { onRequest: [app.authenticate] }, async (req) => {
     const { id, module } = req.params as { id: string; module: string }
@@ -214,6 +296,122 @@ export const crmRoutes: FastifyPluginAsync = async (app) => {
       where: (t, { and, eq }) => and(eq(t.connectionId, id), eq(t.moduleApiName, module)),
     })
     return { fields }
+  })
+
+  // ── POST /api/v1/crm/oauth/start — start OAuth authorization flow ─────────
+  app.post('/oauth/start', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = req.user as { sub: string; tenantId: string }
+    const { provider, name, clientId, clientSecret, region } = req.body as {
+      provider: 'zoho' | 'hubspot' | 'salesforce'
+      name: string
+      clientId: string
+      clientSecret: string
+      region?: string
+    }
+    if (!provider || !name || !clientId || !clientSecret) {
+      return reply.status(400).send({ error: 'provider, name, clientId, clientSecret zorunlu' })
+    }
+
+    const state = nanoid(32)
+    const callbackBase = `${env.APP_URL}/webhooks/crm/${provider}/callback`
+
+    // Store OAuth state in Redis (10 min)
+    await redis.setex(`ki:oauth:state:${state}`, 600, JSON.stringify({
+      tenantId: user.tenantId, userId: user.sub,
+      provider, name, clientId, clientSecret, region: region ?? 'com',
+    }))
+
+    let authUrl = ''
+    if (provider === 'zoho') {
+      const reg = region ?? 'com'
+      const scopes = 'ZohoCRM.modules.all,ZohoCRM.settings.all,ZohoCRM.bulk.all,ZohoCRM.notifications.all'
+      authUrl = `https://accounts.zoho.${reg}/oauth/v2/auth?response_type=code&client_id=${encodeURIComponent(clientId)}&scope=${encodeURIComponent(scopes)}&redirect_uri=${encodeURIComponent(callbackBase)}&access_type=offline&state=${state}`
+    } else if (provider === 'hubspot') {
+      const scopes = 'crm.objects.contacts.read crm.objects.companies.read crm.objects.deals.read crm.objects.custom.read'
+      authUrl = `https://app.hubspot.com/oauth/authorize?client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(callbackBase)}&scope=${encodeURIComponent(scopes)}&state=${state}`
+    } else if (provider === 'salesforce') {
+      authUrl = `https://login.salesforce.com/services/oauth2/authorize?response_type=code&client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(callbackBase)}&scope=api+refresh_token&state=${state}`
+    } else {
+      return reply.status(400).send({ error: 'Desteklenmeyen provider' })
+    }
+
+    return reply.send({ authUrl, state })
+  })
+
+  // ── POST /api/v1/crm/db-test — test external PostgreSQL/MySQL connection ──
+  app.post('/db-test', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const { dbType = 'postgresql', host, port = 5432, database, username, password, ssl = false } = req.body as {
+      dbType?: string; host: string; port?: number; database: string; username: string; password: string; ssl?: boolean
+    }
+    if (!host || !database || !username) {
+      return reply.status(400).send({ error: 'host, database, username zorunlu' })
+    }
+
+    try {
+      const { Client } = await import('pg')
+      const client = new Client({
+        host, port: Number(port), database, user: username, password,
+        ssl: ssl ? { rejectUnauthorized: false } : false,
+        connectionTimeoutMillis: 5000,
+      })
+      await client.connect()
+
+      // Verify read-only: check for SELECT privilege, reject if has INSERT/UPDATE/DELETE
+      const roCheck = await client.query<{ has_insert: boolean }>(
+        `SELECT has_table_privilege($1, 'information_schema.tables', 'INSERT') AS has_insert`,
+        [username]
+      )
+      const isReadOnly = !roCheck.rows[0]?.has_insert
+
+      // Get list of tables
+      const tables = await client.query<{ table_name: string }>(
+        `SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' ORDER BY table_name LIMIT 50`
+      )
+      await client.end()
+
+      return reply.send({ ok: true, isReadOnly, tables: tables.rows.map(r => r.table_name) })
+    } catch (e: any) {
+      return reply.status(400).send({ ok: false, error: e.message })
+    }
+  })
+
+  // ── POST /api/v1/crm/db-connect — save a read-only DB connection ──────────
+  app.post('/db-connect', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = req.user as { sub: string; tenantId: string }
+    if (!user.tenantId) return reply.status(400).send({ error: 'Entity bağlantısı gerekli' })
+
+    const { name, dbType = 'postgresql', host, port = 5432, database, username, password, ssl = false } = req.body as {
+      name: string; dbType?: string; host: string; port?: number
+      database: string; username: string; password: string; ssl?: boolean
+    }
+    if (!name || !host || !database || !username) {
+      return reply.status(400).send({ error: 'name, host, database, username zorunlu' })
+    }
+
+    // Quick connectivity test before saving
+    try {
+      const { Client } = await import('pg')
+      const client = new Client({
+        host, port: Number(port), database, user: username, password,
+        ssl: ssl ? { rejectUnauthorized: false } : false,
+        connectionTimeoutMillis: 5000,
+      })
+      await client.connect()
+      await client.end()
+    } catch (e: any) {
+      return reply.status(422).send({ error: `Bağlantı başarısız: ${e.message}` })
+    }
+
+    const crmType = dbType === 'mysql' ? 'mysql' : 'postgresql'
+    const [conn] = await db.insert(crmConnections).values({
+      tenantId:    user.tenantId,
+      name,
+      crmType:     crmType as any,
+      credentials: encryptJson({ dbType, host, port, database, username, password, ssl }),
+      syncStatus:  'idle',
+    }).returning()
+
+    return reply.status(201).send({ connection: { id: conn!.id, name, crmType } })
   })
 
   // PUT /api/v1/crm/connections/:id — update connection

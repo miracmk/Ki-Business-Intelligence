@@ -1,14 +1,59 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { useAuth } from '../store/auth'
 import {
   LayoutDashboard, FolderOpen, LifeBuoy, Settings, LogOut,
   Sun, Moon, Menu, X, ChevronDown, ChevronRight,
-  MessageSquare, Bot, ShieldCheck, BarChart3, Database,
+  MessageSquare, Bot, Settings2, BarChart3, Database,
+  Bell, CheckCheck,
 } from 'lucide-react'
 import api from '../lib/api'
 
 interface CrmModule { apiName: string; pluralLabel: string }
+
+const TYPE_LABEL: Record<string, string> = {
+  info: 'Bilgi', warning: 'Uyarı', error: 'Hata', success: 'Başarı',
+  invoice_due: 'Fatura', payment_received: 'Ödeme', stock_low: 'Stok',
+  ticket_update: 'Destek', ai_insight: 'AI', usage_limit: 'Limit', subscription_expiry: 'Abonelik',
+}
+
+function NotifDropdown({ notifications, onRead, onReadAll }: {
+  notifications: any[]
+  onRead: (id: string) => void
+  onReadAll: () => void
+}) {
+  return (
+    <div className="absolute right-0 top-full mt-1 w-80 rounded-2xl shadow-2xl z-50 overflow-hidden"
+      style={{ background: 'var(--surface-modal)', border: '1px solid var(--border)' }}>
+      <div className="flex items-center justify-between px-4 py-3" style={{ borderBottom: '1px solid var(--border)' }}>
+        <span className="text-sm font-semibold" style={{ color: 'var(--text-1)' }}>Bildirimler</span>
+        {notifications.length > 0 && (
+          <button onClick={onReadAll} className="flex items-center gap-1 text-xs" style={{ color: 'var(--accent)' }}>
+            <CheckCheck size={12} /> Tümünü okundu say
+          </button>
+        )}
+      </div>
+      <div className="max-h-80 overflow-y-auto">
+        {notifications.length === 0 ? (
+          <p className="text-xs text-center py-8" style={{ color: 'var(--text-3)' }}>Yeni bildirim yok</p>
+        ) : notifications.map(n => (
+          <div key={n.id} className="flex items-start gap-3 px-4 py-3 cursor-pointer hover:bg-white/5 transition-all"
+            style={{ borderBottom: '1px solid var(--border)' }}
+            onClick={() => onRead(n.id)}>
+            <div className="flex-1 min-w-0">
+              <p className="text-xs font-medium truncate" style={{ color: 'var(--text-1)' }}>{n.title}</p>
+              {n.body && <p className="text-xs mt-0.5 line-clamp-2" style={{ color: 'var(--text-3)' }}>{n.body}</p>}
+              <span className="text-[10px] mt-1" style={{ color: 'var(--text-3)' }}>
+                {TYPE_LABEL[n.type] ?? n.type} · {new Date(n.createdAt).toLocaleDateString('tr-TR')}
+              </span>
+            </div>
+            <X size={12} className="flex-shrink-0 mt-0.5" style={{ color: 'var(--text-3)' }} />
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
 
 const ACCOUNTING_TABS = [
   { key: 'summary',        label: 'Özet' },
@@ -31,6 +76,9 @@ export default function Layout() {
   const [adminOpen,    setAdminOpen]    = useState(false)
   const [crmModules,   setCrmModules]   = useState<CrmModule[]>([])
   const [crmLoaded,    setCrmLoaded]    = useState(false)
+  const [notifications, setNotifications] = useState<any[]>([])
+  const [notifOpen,    setNotifOpen]    = useState(false)
+  const notifRef = useRef<HTMLDivElement>(null)
 
   const [dark, setDark] = useState(() => {
     const saved = localStorage.getItem('ki-theme')
@@ -51,6 +99,26 @@ export default function Layout() {
     setSidebarOpen(false)
   }, [location.pathname])
 
+  // notification polling
+  useEffect(() => {
+    if (!user) return
+    const load = () => {
+      api.get('/notifications').then(r => setNotifications(r.data.notifications ?? [])).catch(() => {})
+    }
+    load()
+    const iv = setInterval(load, 30000)
+    return () => clearInterval(iv)
+  }, [user])
+
+  // close notif dropdown on outside click
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (notifRef.current && !notifRef.current.contains(e.target as Node)) setNotifOpen(false)
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [])
+
   // lazy load CRM modules
   useEffect(() => {
     if (!crmOpen || crmLoaded) return
@@ -63,7 +131,7 @@ export default function Layout() {
     }).catch(() => setCrmLoaded(true))
   }, [crmOpen, crmLoaded])
 
-  const isSuperAdmin = user?.role === 'admin' || user?.role === 'supervisor'
+  const isAdminOrSupervisor = user?.role === 'admin' || user?.role === 'supervisor'
   const initials     = user?.name ? user.name.charAt(0).toUpperCase() : 'U'
 
   const activeLink = (path: string) => location.pathname === path || location.pathname.startsWith(path + '/') || location.pathname.startsWith(path + '?')
@@ -229,30 +297,64 @@ export default function Layout() {
           <Settings size={17} /><span className="text-sm font-medium">Ayarlar</span>
         </Link>
 
-        {/* Admin section — admin + supervisor */}
-        {isSuperAdmin && (
+        {/* Platform section — admin + supervisor only */}
+        {isAdminOrSupervisor && (
           <div>
             <button
               onClick={() => setAdminOpen(o => !o)}
               className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all duration-200"
               style={linkStyle(activeLink('/app/admin'))}
               onMouseEnter={hoverIn} onMouseLeave={e => hoverOut(e, activeLink('/app/admin'))}>
-              <ShieldCheck size={17} />
-              <span className="text-sm font-medium flex-1 text-left">Admin</span>
+              <Settings2 size={17} />
+              <span className="text-sm font-medium flex-1 text-left">Platform</span>
               {adminOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
             </button>
             {adminOpen && (
               <div className="mt-0.5 space-y-0.5">
-                <SubItem to="/app/admin" label="Panel" />
-                <SubItem to="/app/admin/settings" label="Platform Ayarları" />
+                <SubItem to="/app/admin" label="Platform Management" />
+                <SubItem to="/app/admin/settings" label="Platform Settings" />
+                <SubItem to="/app/admin/kibi-chat" label="KIBI Chat" />
               </div>
             )}
           </div>
         )}
       </nav>
 
-      {/* Bottom: theme + user + logout */}
+      {/* Bottom: notifications + theme + user + logout */}
       <div className="px-3 py-4 space-y-2" style={{ borderTop: '1px solid var(--border)' }}>
+        <div className="relative" ref={notifRef}>
+          <button onClick={() => setNotifOpen(o => !o)}
+            className="w-full flex items-center gap-3 px-3 py-2 rounded-xl text-sm transition-all duration-200"
+            style={{ color: 'var(--text-2)' }}
+            onMouseEnter={hoverIn} onMouseLeave={e => hoverOut(e, false)}>
+            <div className="relative">
+              <Bell size={16} style={{ color: 'var(--accent)' }} />
+              {notifications.length > 0 && (
+                <span className="absolute -top-1 -right-1 w-3.5 h-3.5 rounded-full text-[8px] font-bold flex items-center justify-center text-white"
+                  style={{ background: 'var(--accent)' }}>
+                  {notifications.length > 9 ? '9+' : notifications.length}
+                </span>
+              )}
+            </div>
+            <span>Bildirimler</span>
+            {notifications.length > 0 && (
+              <span className="ml-auto text-xs px-1.5 py-0.5 rounded-full font-bold text-white"
+                style={{ background: 'var(--accent)' }}>
+                {notifications.length}
+              </span>
+            )}
+          </button>
+          {notifOpen && (
+            <div className="absolute bottom-full left-0 mb-1 w-80">
+              <NotifDropdown notifications={notifications} onRead={(id) => {
+                api.put(`/notifications/${id}/read`).then(() => setNotifications(n => n.filter(x => x.id !== id))).catch(() => {})
+              }} onReadAll={() => {
+                api.put('/notifications/read-all').then(() => setNotifications([])).catch(() => {})
+              }} />
+            </div>
+          )}
+        </div>
+
         <button onClick={() => setDark(d => !d)}
           className="w-full flex items-center gap-3 px-3 py-2 rounded-xl text-sm transition-all duration-200"
           style={{ color: 'var(--text-2)' }}
@@ -302,6 +404,22 @@ export default function Layout() {
           <img src="/ki-icon.png" alt="Ki" className="w-6 h-6 object-contain" />
           <span className="text-sm font-bold" style={{ color: 'var(--accent)' }}>Ki</span>
           <span className="text-xs" style={{ color: 'var(--text-3)' }}>Business Intelligence</span>
+          <div className="ml-auto relative" ref={notifRef}>
+            <button onClick={() => setNotifOpen(o => !o)} className="relative p-1.5 rounded-lg" style={{ color: 'var(--text-2)' }}>
+              <Bell size={18} />
+              {notifications.length > 0 && (
+                <span className="absolute -top-0.5 -right-0.5 w-4 h-4 rounded-full text-[9px] font-bold flex items-center justify-center text-white"
+                  style={{ background: 'var(--accent)' }}>
+                  {notifications.length > 9 ? '9+' : notifications.length}
+                </span>
+              )}
+            </button>
+            {notifOpen && <NotifDropdown notifications={notifications} onRead={(id) => {
+              api.put(`/notifications/${id}/read`).then(() => setNotifications(n => n.filter(x => x.id !== id))).catch(() => {})
+            }} onReadAll={() => {
+              api.put('/notifications/read-all').then(() => setNotifications([])).catch(() => {})
+            }} />}
+          </div>
         </div>
         <div className="flex-1">
           <Outlet />

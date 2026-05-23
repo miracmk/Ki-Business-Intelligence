@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts'
+import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Legend } from 'recharts'
 import {
   Plus, Trash2, Edit2, X, RefreshCw, Send, FileText,
-  TrendingUp, CreditCard, Wallet, Check, AlertCircle,
+  TrendingUp, CreditCard, Check, AlertCircle,
+  ArrowUpRight, ArrowDownRight, Link2,
 } from 'lucide-react'
 import api from '../lib/api'
 
@@ -398,10 +399,19 @@ export default function Accounting() {
   }, [searchParams])
 
   // Derived stats
-  const totalRevenue = invoices.filter(i => i.invoiceType === 'sale').reduce((s, i) => s + (i.total ?? 0), 0)
-  const totalExpenses = expenses.reduce((s, e) => s + (e.amount ?? 0), 0)
-  const receivables = invoices.filter(i => i.status !== 'paid' && i.status !== 'cancelled').reduce((s, i) => s + ((i.total ?? 0) - (i.paidAmount ?? 0)), 0)
-  const paidPayments = payments.filter(p => p.paymentType === 'received').reduce((s, p) => s + (p.amount ?? 0), 0)
+  const now = new Date()
+  const thisMonth = now.toISOString().slice(0, 7)
+  const lastMonthDate = new Date(now.getFullYear(), now.getMonth() - 1, 1)
+  const lastMonth = lastMonthDate.toISOString().slice(0, 7)
+
+  const thisMonthRevenue  = invoices.filter(i => i.invoiceType === 'sale' && i.issueDate?.startsWith(thisMonth)).reduce((s, i) => s + (i.total ?? 0), 0)
+  const lastMonthRevenue  = invoices.filter(i => i.invoiceType === 'sale' && i.issueDate?.startsWith(lastMonth)).reduce((s, i) => s + (i.total ?? 0), 0)
+  const totalRevenue      = invoices.filter(i => i.invoiceType === 'sale').reduce((s, i) => s + (i.total ?? 0), 0)
+  const totalExpenses     = expenses.reduce((s, e) => s + (e.amount ?? 0), 0)
+  const receivables       = invoices.filter(i => i.status !== 'paid' && i.status !== 'cancelled').reduce((s, i) => s + ((i.total ?? 0) - (i.paidAmount ?? 0)), 0)
+  const unpaidInvoices    = invoices.filter(i => i.status !== 'paid' && i.status !== 'cancelled' && i.status !== 'draft')
+
+  const revenueDelta = lastMonthRevenue > 0 ? ((thisMonthRevenue - lastMonthRevenue) / lastMonthRevenue) * 100 : 0
 
   const monthlyData = (() => {
     const months: Record<string, { month: string; revenue: number; expenses: number }> = {}
@@ -570,25 +580,60 @@ export default function Accounting() {
       {/* ── Overview ── */}
       {tab === 'overview' && (
         <div className="space-y-6">
+          {/* CTA — no connections */}
+          {accountingConns.length === 0 && (
+            <div className="p-6 rounded-3xl border border-dashed border-[#3a3a3a] flex flex-col sm:flex-row items-center gap-4 bg-[#111111]">
+              <Link2 size={32} className="text-[#6366f1] flex-shrink-0" />
+              <div className="flex-1 text-center sm:text-left">
+                <p className="text-white font-semibold">Muhasebe Yazılımı Bağla</p>
+                <p className="text-gray-400 text-sm mt-0.5">Zoho Books, QuickBooks, Xero veya diğerlerini bağlayarak muhasebe verilerinizi buraya çekin.</p>
+              </div>
+              <button onClick={() => setTab('integrations')}
+                className="px-5 py-2.5 rounded-2xl text-sm font-medium flex-shrink-0"
+                style={{ background: '#6366f1', color: '#fff' }}>
+                Bağlantı Ekle
+              </button>
+            </div>
+          )}
+
+          {/* KPI cards */}
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="p-5 bg-[#111111] rounded-3xl border border-[#2a2a2a]">
+              <div className="flex items-center gap-2 mb-2">
+                <div className="p-1.5 rounded-xl bg-gradient-to-br from-green-600 to-emerald-600"><TrendingUp size={14} className="text-white" /></div>
+                <p className="text-xs text-gray-400">Bu Ay Gelir</p>
+              </div>
+              <p className="text-xl font-bold text-white">{fmt(thisMonthRevenue)}</p>
+              {lastMonthRevenue > 0 && (
+                <div className="flex items-center gap-1 mt-1">
+                  {revenueDelta >= 0
+                    ? <ArrowUpRight size={12} className="text-green-400" />
+                    : <ArrowDownRight size={12} className="text-red-400" />}
+                  <span className={`text-xs ${revenueDelta >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                    {Math.abs(revenueDelta).toFixed(1)}% geçen aya göre
+                  </span>
+                </div>
+              )}
+              <p className="text-xs text-gray-500 mt-1">Geçen ay: {fmt(lastMonthRevenue)}</p>
+            </div>
             {[
               { label: 'Toplam Gelir', value: fmt(totalRevenue), icon: TrendingUp, color: 'from-green-600 to-emerald-600' },
               { label: 'Toplam Gider', value: fmt(totalExpenses), icon: CreditCard, color: 'from-red-600 to-rose-600' },
               { label: 'Alacaklar', value: fmt(receivables), icon: FileText, color: 'from-amber-600 to-orange-600' },
-              { label: 'Tahsilat', value: fmt(paidPayments), icon: Wallet, color: 'from-blue-600 to-indigo-600' },
             ].map(card => (
-              <div key={card.label} className="p-6 bg-[#111111] rounded-3xl border border-[#2a2a2a]">
-                <div className="flex items-center gap-3 mb-3">
-                  <div className={`p-2 rounded-xl bg-gradient-to-br ${card.color}`}><card.icon size={18} className="text-white" /></div>
-                  <p className="text-sm text-gray-400">{card.label}</p>
+              <div key={card.label} className="p-5 bg-[#111111] rounded-3xl border border-[#2a2a2a]">
+                <div className="flex items-center gap-2 mb-2">
+                  <div className={`p-1.5 rounded-xl bg-gradient-to-br ${card.color}`}><card.icon size={14} className="text-white" /></div>
+                  <p className="text-xs text-gray-400">{card.label}</p>
                 </div>
-                <p className="text-2xl font-semibold text-white">{card.value}</p>
+                <p className="text-xl font-bold text-white">{card.value}</p>
               </div>
             ))}
           </div>
 
+          {/* Chart */}
           <div className="p-6 bg-[#111111] rounded-3xl border border-[#2a2a2a]">
-            <h3 className="text-lg font-semibold text-white mb-4">Aylık Gelir / Gider</h3>
+            <h3 className="text-base font-semibold text-white mb-4">Aylık Gelir / Gider</h3>
             {monthlyData.length === 0 ? (
               <p className="text-gray-500 text-sm">Henüz kayıt yok.</p>
             ) : (
@@ -597,6 +642,7 @@ export default function Accounting() {
                   <XAxis dataKey="month" stroke="#555" tick={{ fill: '#9ca3af', fontSize: 12 }} />
                   <YAxis stroke="#555" tick={{ fill: '#9ca3af', fontSize: 12 }} />
                   <Tooltip contentStyle={{ background: '#111', border: '1px solid #2a2a2a', borderRadius: 12 }} />
+                  <Legend wrapperStyle={{ color: '#9ca3af', fontSize: 12 }} />
                   <Bar dataKey="revenue" name="Gelir" fill="#6366f1" radius={[4, 4, 0, 0]} />
                   <Bar dataKey="expenses" name="Gider" fill="#ef4444" radius={[4, 4, 0, 0]} />
                 </BarChart>
@@ -605,28 +651,35 @@ export default function Accounting() {
           </div>
 
           <div className="grid gap-4 lg:grid-cols-2">
+            {/* Unpaid invoices */}
             <div className="p-6 bg-[#111111] rounded-3xl border border-[#2a2a2a]">
-              <h3 className="text-base font-semibold text-white mb-3">Son Faturalar</h3>
+              <h3 className="text-base font-semibold text-white mb-3">Ödenmemiş Faturalar</h3>
               <div className="space-y-2">
-                {invoices.slice(0, 5).map(inv => (
+                {unpaidInvoices.slice(0, 5).map(inv => (
                   <div key={inv.id} className="flex items-center justify-between gap-3 py-2 border-b border-[#1a1a1a] last:border-0">
-                    <div><p className="text-sm text-white font-mono">{inv.invoiceNumber}</p><p className="text-xs text-gray-500">{inv.issueDate?.slice(0, 10)}</p></div>
-                    <div className="flex items-center gap-2"><StatusBadge s={inv.status} /><span className="text-sm text-white">{fmt(inv.total ?? 0)}</span></div>
+                    <div><p className="text-sm text-white font-mono">{inv.invoiceNumber}</p><p className="text-xs text-gray-500">Vade: {inv.dueDate?.slice(0, 10) ?? '-'}</p></div>
+                    <div className="flex items-center gap-2"><StatusBadge s={inv.status} /><span className="text-sm text-white">{fmt((inv.total ?? 0) - (inv.paidAmount ?? 0))}</span></div>
                   </div>
                 ))}
-                {invoices.length === 0 && <p className="text-gray-500 text-sm">Fatura yok.</p>}
+                {unpaidInvoices.length === 0 && <p className="text-gray-500 text-sm">Ödenmemiş fatura yok.</p>}
               </div>
             </div>
+            {/* Recent payments */}
             <div className="p-6 bg-[#111111] rounded-3xl border border-[#2a2a2a]">
-              <h3 className="text-base font-semibold text-white mb-3">Son Giderler</h3>
+              <h3 className="text-base font-semibold text-white mb-3">Son İşlemler</h3>
               <div className="space-y-2">
-                {expenses.slice(0, 5).map(exp => (
-                  <div key={exp.id} className="flex items-center justify-between gap-3 py-2 border-b border-[#1a1a1a] last:border-0">
-                    <div><p className="text-sm text-white">{exp.description || exp.category}</p><p className="text-xs text-gray-500">{exp.expenseDate?.slice(0, 10)}</p></div>
-                    <div className="flex items-center gap-2"><StatusBadge s={exp.status} /><span className="text-sm text-white">{fmt(exp.amount ?? 0)}</span></div>
+                {payments.slice(0, 5).map(p => (
+                  <div key={p.id} className="flex items-center justify-between gap-3 py-2 border-b border-[#1a1a1a] last:border-0">
+                    <div>
+                      <p className="text-sm text-white">{p.paymentType === 'received' ? 'Alınan Ödeme' : 'Gönderilen Ödeme'}</p>
+                      <p className="text-xs text-gray-500">{p.paymentMethod ?? '-'} · {p.reference ?? ''}</p>
+                    </div>
+                    <span className={`text-sm font-semibold ${p.paymentType === 'received' ? 'text-green-400' : 'text-red-400'}`}>
+                      {p.paymentType === 'received' ? '+' : '-'}{fmt(p.amount ?? 0)}
+                    </span>
                   </div>
                 ))}
-                {expenses.length === 0 && <p className="text-gray-500 text-sm">Gider yok.</p>}
+                {payments.length === 0 && <p className="text-gray-500 text-sm">Ödeme yok.</p>}
               </div>
             </div>
           </div>

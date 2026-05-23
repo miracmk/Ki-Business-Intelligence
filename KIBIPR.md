@@ -157,6 +157,8 @@ Gradient: `linear-gradient(135deg, var(--accent), var(--forest))`.
 /app/settings → Settings
 /app/admin → Admin (AdminRoute)
 /app/admin/settings → PlatformSettings (AdminRoute)
+/app/admin/kibi-chat → AiChat (isAdminMode, AdminRoute)
+/app/register → Register (public, self-service entity kayıt)
 ```
 
 ### server.ts Routing
@@ -184,8 +186,9 @@ is_active bool, is_verified bool, last_login_at timestamp
 
 ### user_role enum
 ```
-admin, supervisor, entity_main, entity_supervisor, entity_sub
+admin, supervisor, entity_main, entity_supervisor, entity_sub, entity_external
 (eski: member, viewer — DB'de var, kaldırma)
+entity_external: sadece /ai/external-chat erişebilir (JWT scope='external')
 ```
 
 ### tenants
@@ -255,9 +258,29 @@ POST /api/v1/auth/totp/confirm → [auth] { code }
 ```
 POST /api/v1/ai/chat            → KIBI AI (admin/supervisor → isAdmin=true)
 POST /api/v1/ai/entity-chat     → Entity AI (UUID tenantId zorunlu)
+POST /api/v1/ai/external-chat   → External AI (entity_external role + scope=external JWT only)
 GET  /api/v1/ai/config          → { config: { kibiInstructions, entityInstructions, models... } }
 GET  /api/v1/ai/openrouter-models → (Redis 6h cache)
 POST /api/v1/ai/openrouter-models/refresh
+```
+
+### Auth
+```
+POST /api/v1/auth/register-entity → public self-service kayıt (email, password, name, companyName, industry?)
+  → user (role=entity_main) + tenant + tenantMembership + kibiEntities + aiConfigs + welcome email
+```
+
+### CRM
+```
+GET  /api/v1/crm/connections             → bağlantı listesi (credentials hariç)
+POST /api/v1/crm/connections             → API key ile yeni bağlantı
+POST /api/v1/crm/oauth/start             → { provider, name, clientId, clientSecret, region? } → { authUrl }
+POST /api/v1/crm/db-test                 → { host, port, database, username, password, ssl } → { ok, isReadOnly, tables }
+POST /api/v1/crm/db-connect              → test + kaydet (crmType: 'postgresql')
+GET  /api/v1/crm/connections/:id/sync-status → { syncState[], recentJobs[] }
+POST /api/v1/crm/connections/:id/sync/metadata → metadata sync (background)
+POST /api/v1/crm/connections/:id/sync/full     → bulk sync (background)
+GET  /webhooks/crm/:provider/callback    → OAuth code exchange + DB kayıt + redirect
 ```
 
 ### Tenants
@@ -265,6 +288,14 @@ POST /api/v1/ai/openrouter-models/refresh
 GET  /api/v1/tenants/me
 PUT  /api/v1/tenants/me/profile   → { name?, phone?, address?, avatar? }
 PUT  /api/v1/tenants/me/company   → { name } (entity_main/admin only)
+GET  /api/v1/tenants/me/members   → { members: [{userId, role, email, name, isActive}] }
+POST /api/v1/tenants/me/invites   → { email, role? } → mevcut user: direkt ekle; yeni user: tenant.settings.invites + email
+GET  /api/v1/tenants/email-config → { config: { smtp, imap, fromName, fromEmail } }
+PUT  /api/v1/tenants/email-config → save SMTP+IMAP config (passwords AES-256-GCM)
+POST /api/v1/tenants/channels/email/test-smtp → verify SMTP connection
+POST /api/v1/tenants/channels/email/test-imap → verify IMAP + list folders
+POST /api/v1/tenants/external-users → create entity_external user (entity_main/admin)
+GET  /api/v1/tenants/external-users → list external users for entity
 GET  /api/v1/tenants/channels/:ch → entity kanal config
 PUT  /api/v1/tenants/channels/:ch
 DELETE /api/v1/tenants/channels/:ch
@@ -388,11 +419,246 @@ Free tier'da zaman zaman 503. Gateway'de 3'lü fallback zinciri var.
 | `frontend/src/lib/api.ts` | Axios (401 → /app/login) |
 | `frontend/src/pages/AiChat.tsx` | KIBI AI + Instructions modal |
 | `frontend/src/pages/EntityAI.tsx` | Entity AI + Instructions modal |
-| `frontend/src/pages/Settings.tsx` | 5-tab settings (Hesap/AI/Kanallar/Güvenlik) |
+| `frontend/src/pages/Settings.tsx` | 7-tab settings (Hesap/AI/CRM/Muhasebe/Kanallar/Ekip/Güvenlik) |
+| `frontend/src/pages/Register.tsx` | Entity self-service kayıt (design system, industry dropdown) |
+| `frontend/src/pages/Dashboard.tsx` | Dashboard + onboarding banner (4 adım, localStorage dismiss) |
 | `frontend/src/pages/PlatformSettings.tsx` | Admin connection manager |
 | `docker-compose.yml` | Stack tanımı |
 | `.env` | Secrets (ASLA DEĞİŞTİRME) |
 
 ---
 
-*Son güncelleme: FAZ 6 tamamlandı — Bug fixes (AI hataları, dashboard redirect, destek talebi), AI Instructions (KIBI AI + Entity AI), Profile/Company editing, Channels tab, Platform Settings modal opacity fix. Build ve deploy yapıldı.*
+## Yeni Fazlar (23 Mayıs 2026 — Sprint 2)
+
+### ✅ Tamamlanan Yeni Fazlar
+
+#### YFZ 1 — Veritabanı ve Rol Sistemi
+- [x] `entity_external` user_role enum'a eklendi (DB + schema.ts)
+- [x] `mirac@kibusiness.co` → `superadmin` → `admin` migration
+- [x] Ki Business Solutions entity doğrulandı (enterprise, is_provisioned=true)
+- [x] JWT'de `scope: 'external'` → entity_external tokenlar için
+- [x] Global `onRequest` hook: external tokenlar /ai/external-chat dışındaki tüm route'larda reddedilir
+- [x] `requireFullAccess` Fastify decorator eklendi
+- [x] Admin JWT'si KBS entity tenantId'sini taşır (membership üzerinden)
+
+#### YFZ 2 — Navigasyon
+- [x] "Admin" → "Platform" olarak yeniden adlandırıldı (ikon: Settings2)
+- [x] Alt menü: Platform Management + Platform Settings + KIBI Chat
+- [x] `isSuperAdmin` → `isAdminOrSupervisor` (admin + supervisor)
+- [x] `/app/admin/kibi-chat` route eklendi (AiChat isAdminMode prop ile)
+
+#### YFZ 3 — Email SMTP + IMAP
+- [x] `imapflow` paketi eklendi
+- [x] `GET/PUT /api/v1/tenants/email-config` — SMTP+IMAP config (AES-256-GCM şifreli)
+- [x] `POST /tenants/channels/email/test-smtp` — SMTP bağlantı testi
+- [x] `POST /tenants/channels/email/test-imap` — IMAP bağlantı testi + folder listesi
+- [x] IMAP polling service (`src/engine/imap-poller.ts`) — her entity için bağımsız döngü
+- [x] Auto-reply: IMAP'tan gelen email → destek bileti → KIBI AI yanıt → SMTP ile gönder
+- [x] Server startup'ta `startImapPollers()` çağrılıyor
+
+#### YFZ 4 — Destek Sistemi Düzeltmeleri
+- [x] Admin tickets endpoint SQL injection düzeltildi → Drizzle ORM sorgusu
+- [x] Admin tickets: pagination (page, limit), entityName enrichment
+- [x] support-pipeline.ts SMTP hataları try-catch içinde (non-fatal)
+
+#### YFZ 5 — External Chat + Kullanıcı Oluşturma
+- [x] `POST /api/v1/ai/external-chat` — entity_external scope zorunlu
+- [x] Vektör arama (Qdrant) context için kullanılıyor
+- [x] Açık destek biletleri context'e ekleniyor
+- [x] `POST /api/v1/tenants/external-users` — entity_external kullanıcı oluşturma
+- [x] `GET /api/v1/tenants/external-users` — external kullanıcı listesi
+
+#### YFZ 6 — Platform Management
+- [x] Admin.tsx başlığı "Admin Panel" → "Platform Management"
+
+#### YFZ 7 — AI Modlar
+- [x] AiChat.tsx `isAdminMode` prop kabul ediyor → farklı başlık "KIBI Chat — Platform Yönetim AI"
+- [x] EntityAI.tsx admin/supervisor için sarı info banner (KIBI Chat'i kullanmalarını hatırlatır)
+
+#### YFZ 8 — Settings Email SMTP+IMAP UI
+- [x] Settings.tsx → Kanallar tab'ında email kanalı özel modal (`showEmailModal`)
+- [x] SMTP bölümü: host, port, secure, user, password + test butonu
+- [x] IMAP bölümü: host, port, secure, user, password, inboxFolder, checkIntervalMinutes, autoReply + test butonu
+- [x] Kayıtlı şifre: placeholder "Kayıtlı şifre mevcut" (şifre güvenli, gösterilmez)
+- [x] `saveEmailConfig()` → PUT /tenants/email-config
+
+#### YFZ 9 — Entity Onboarding
+- [x] `POST /api/v1/auth/register-entity` — public self-service kayıt endpoint'i
+  - Kullanıcı (role=entity_main) + tenant + tenantMembership + kibiEntities (clientId: KBI-XXXXXX) + aiConfigs oluşturur
+  - Hoş geldin emaili gönderilir (non-fatal)
+- [x] `GET /api/v1/tenants/me/members` — entity üyelerini listele
+- [x] `POST /api/v1/tenants/me/invites` — kayıtlı kullanıcı: direkt ekle; yeni: settings.invites + email
+- [x] Register.tsx yeniden tasarlandı (design system, industry dropdown, 13 sektör seçeneği)
+- [x] App.tsx → `/app/register` route eklendi
+- [x] Dashboard.tsx:
+  - Aurora Glass design system'e geçiş (var(--*) CSS variables)
+  - Onboarding banner (4 adım: CRM / Email / Ekip / Entity AI)
+  - Adım tamamlanma: connections.length>0, emailConfig.smtp.host, members>1, (ai her zaman false)
+  - localStorage'da dismiss ("ki-onboarding-dismissed")
+- [x] Settings.tsx → "Ekip" tab eklendi:
+  - Üye davet formu (email + rol seçici + davet gönder)
+  - Üye listesi (avatar baş harf, rol badge)
+
+#### YFZ 10 — CRM Entegrasyon Akışı
+
+**10.1 + 10.3 — OAuth (Zoho / HubSpot / Salesforce)**
+- [x] `POST /api/v1/crm/oauth/start` — state'i Redis'te (10dk TTL) saklar, authUrl döner
+- [x] `GET /webhooks/crm/:provider/callback` — code exchange, crmConnections tablosuna kaydeder
+  - Zoho: `accounts.zoho.{region}/oauth/v2/token`
+  - HubSpot: `api.hubapi.com/oauth/v1/token`
+  - Salesforce: `login.salesforce.com/services/oauth2/token`
+- [x] Başarı/hata sonrası `/app/settings?tab=crm&oauth_success=1` redirect
+- [x] Settings.tsx → CRM tab'ında "OAuth ile Bağla" butonu (popup penceresi açar)
+  - Provider seçimi: Zoho / HubSpot / Salesforce
+  - Zoho için region seçimi (com/eu/in/com.au/jp)
+  - Popup kapandığında `loadData()` otomatik çağrılır
+
+**10.2 — Modules.tsx Sync Akışı**
+- [x] Modules.tsx tamamen yeniden yazıldı
+- [x] Modül sidebar: `totalRecords` + `lastFullSync` + `status` ikonu (crmSyncState'ten)
+- [x] "Sync Başlat" butonu → `POST /crm/connections/:id/sync/full`
+- [x] 5 saniyede bir polling (`/crm/connections/:id/sync-status`)
+- [x] Sync tamamlanınca polling durur, sync durumu banner'da gösterilir
+- [x] "Modüller" butonu → metadata sync + modül listesini yeniler
+
+**10.4 — DB Bağlantısı (PostgreSQL)**
+- [x] `POST /api/v1/crm/db-test` — pg bağlantısı test + read-only kontrolü + tablo listesi
+- [x] `POST /api/v1/crm/db-connect` — bağlantıyı crmConnections'a kaydeder (credentials AES-256-GCM)
+- [x] db/migrations/0004_add_postgresql_crm_type.sql → `ALTER TYPE crm_type ADD VALUE 'postgresql'`
+- [x] schema.ts → crmTypeEnum'e 'postgresql' + 'mysql' eklendi
+- [x] docker-compose.yml → ki_api servisine `n8n_n8n-net` network eklendi (ki-postgres erişimi)
+- [x] Settings.tsx → CRM ve Muhasebe tab'larında "DB ile Bağla" butonu
+  - Host, port, database, username, password, SSL alanları
+  - "Bağlantıyı Test Et" butonu → read-only kontrolü + tablo listesi gösterir
+  - Test geçtikten sonra "Kaydet" aktif olur
+
+#### YFZ 11 — Muhasebe OAuth + Dashboard
+
+**11.1 — Zoho Books / QuickBooks / Xero OAuth**
+- [x] `POST /api/v1/accounting/oauth/start` — state Redis'e (10dk TTL `ki:acc:oauth:state:{state}`), authUrl döner
+  - Zoho Books: `accounts.zoho.{region}/oauth/v2/auth`
+  - QuickBooks: `appcenter.intuit.com/connect/oauth2`
+  - Xero: `login.xero.com/identity/connect/authorize`
+- [x] `GET /webhooks/accounting/:provider/callback` — token exchange, `accountingConnections` tablosuna kaydeder (AES-256-GCM)
+- [x] Settings.tsx → Muhasebe tab'ında "OAuth ile Bağla" butonu
+  - Provider seçimi: Zoho Books / QuickBooks / Xero
+  - Zoho Books için Organization ID + region seçimi
+  - Popup penceresi, kapanınca `loadData()` otomatik
+
+**11.2 — Accounting.tsx Dashboard Güncelleme**
+- [x] Bu ay gelir vs geçen ay gelir kıyaslaması (delta %  + ok ikonu)
+- [x] "Muhasebe Bağlantısı Yok" CTA (Link2 + "Muhasebe Yazılımı Bağla" butonu → entegrasyon tabına)
+- [x] Ödenmemiş faturalar listesi (dueDate, kalan bakiye)
+- [x] Son işlemler bölümü (+ / - renk kodlu ödemeler)
+- [x] Recharts Legend eklendi
+
+#### YFZ 12 — WhatsApp Webhook
+
+**12.1 — WhatsApp CRM entegrasyonu**
+- [x] `GET /webhooks/whatsapp` — verify_token kontrolü
+- [x] `POST /webhooks/whatsapp` — gelen mesajı destekten geçirir, yanıt gönderir
+
+**12.2 — WhatsApp Kanalı**
+- [x] Settings.tsx → Kanallar tab'ında WhatsApp: Phone Number ID + Access Token + WABA ID + verify_token
+- [x] `PUT /api/v1/tenants/channels/whatsapp` — kaydeder
+
+#### YFZ 13 — Telegram + Instagram
+
+**13.1 — Per-entity Telegram Bot**
+- [x] `POST /webhooks/telegram/:entityId` — entity'nin bot_token'ı kibiEntities üzerinden okunur
+- [x] Gelen mesaj `runAgent()` üzerinden işlenir, yanıt `sendTelegramMessageWithToken()` ile iletilir
+- [x] Settings.tsx → Telegram: bot_token + bot_username + webhook secret
+
+**13.2 — Instagram DM**
+- [x] `GET /webhooks/instagram` — WA_WEBHOOK_VERIFY_TOKEN doğrulaması
+- [x] `POST /webhooks/instagram` — entry.messaging[0] işlenir, `sendInstagramMessage()` ile yanıt
+
+#### YFZ 14 — Bildirimler
+
+**14.1 — In-app Bildirimler**
+- [x] `GET /api/v1/notifications` — entityId'ye göre okunmamış bildirimleri döner
+- [x] `PUT /api/v1/notifications/:id/read` — tekil bildirim okundu işaretle
+- [x] `PUT /api/v1/notifications/read-all` — tüm bildirimleri okundu yap
+- [x] `createEntityNotification(entityId, type, title, body?, data?)` — yardımcı fonksiyon (notifications.ts)
+- [x] Layout.tsx → header'a zil ikonu (Bell) + unread badge + dropdown
+  - 30 sn polling, dışarı tıklayınca kapanır
+  - var(--surface-modal) arka plan, notif tipi etiketleri
+
+**14.2 — Email Bildirimler (Temel)**
+- [x] Yeni destek bileti → SMTP ile bildirim (support-pipeline.ts entegre)
+- [x] E-posta kanalı SMTP config → tenant settings üzerinden okunur
+
+#### YFZ 15 — Plan Limitleri + Token Takibi
+
+**15.1 — Plan Limit Kontrolü**
+- [x] `POST /api/v1/ai/chat` — entity'nin planına göre aylık mesaj limiti kontrolü
+  - Planlar: free=100, starter=500, growth=2000, enterprise=999999
+  - Limit aşılınca 429 + "Plan limitinize ulaştınız" döner
+  - `entity_metrics.current_month_messages` ↑ (raw SQL ON CONFLICT DO UPDATE)
+
+**15.2 — Token Kullanım Takibi**
+- [x] AI yanıtı sonrası `kibi_token_usage` tablosuna kayıt
+  - promptTokens = `message.length/4` (tahmin), completionTokens = `response.length/4`
+  - modelName, costUsd (0 — gerçek maliyet için gateway değişikliği gerekir)
+
+**15.3 — Admin Plan Yönetimi**
+- [x] `PUT /api/v1/admin/entities/:entityId/plan` — planName güncelleme
+- [x] `GET /api/v1/admin/plans` — plan limitleri ve özellik listesi
+
+### ✅ Tümü Tamamlandı (YFZ 1–15)
+
+---
+
+#### YFZ 16 — CRM Veri Aynalama + AI ETL
+
+**16.1 — PostgreSQL Adapter**
+- [x] `src/adapters/postgresql.ts` — dış PG DB'yi CRM olarak adapte eder
+  - `getModules()` → `information_schema.tables` → tablo listesi
+  - `getModuleFields()` → `information_schema.columns` → kolon listesi
+  - `getRelatedLists()` → foreign key ilişkileri
+  - `streamTable()` → batch olarak satır akışı (ETL için)
+  - `getTableCount()` → toplam kayıt sayısı
+- [x] `src/adapters/index.ts` → `postgresql` ve `mysql` case'leri eklendi
+- [x] `crm_type` enum DB'ye migrasyon uygulandı (`postgresql`, `mysql`)
+
+**16.2 — Entity ETL (Extract → AI Normalize → Load)**
+- [x] `src/engine/crm-sync/entity-etl.ts`
+  - **Tam Ayna:** Her kaynak kayıt `entity_{slug}.crm_raw_mirror` tablosuna yazılır (hiç veri atlanmaz)
+  - **Metadata Aynalama:** Modül/kolon bilgileri `entity_settings`'e `crm_source_metadata` anahtarıyla kaydedilir
+  - **AI Normalizasyon Ajanı:** Her 20 kayıt batch'te OpenRouter (Nemotron) çağrılır:
+    - Telefon: E.164 formatı
+    - Ülke: 2 harfli ISO kodu
+    - İsim: Büyük/küçük harf düzeltme
+    - Email: küçük harf, boşluk temizle
+    - Para: Sembol kaldırma, ondalık normalleştirme
+    - Şirket tipi: A.Ş./Ltd./GmbH tespiti
+  - **Zoho CRM mapping:** Contacts→crm_contacts, Leads→crm_contacts(contact_type=lead), Accounts→crm_companies, Deals/Potentials→crm_deals, Products→erp_products
+  - **PostgreSQL mapping:** Kolon ismine göre regex eşleştirme (Türkçe+İngilizce), bilinmeyenler→custom_fields
+  - **Bulk sync sonrası otomatik tetikleme:** `processBulkCallback()` tamamlanınca ETL fire-and-forget başlar
+
+**16.3 — Yeni API Endpoint'leri**
+- [x] `POST /api/v1/crm/connections/:id/sync/entity` — ETL manuel tetikleme (202 Accepted)
+- [x] `POST /api/v1/crm/connections/:id/sync/pg-direct` — PostgreSQL için metadata+ETL zinciri
+- [x] `GET /api/v1/crm/connections/:id/entity-data` — Entity schema preview (normalized data)
+
+**16.4 — Frontend (Modules.tsx)**
+- [x] "AI Aynala + Entity DB'ye Yaz" butonu → `POST .../sync/entity`
+- [x] "Ham Sync" butonu (eski Sync Başlat) — sadece crm_records'a yazar
+- [x] "Modüller" butonu → metadata sync (tablo/kolon yapısını tarar)
+
+**Akış:**
+```
+Kaynak (CRM API / PG DB)
+  ↓ Ham Sync / Metadata Sync
+crm_records (public schema — ham JSON)
+  ↓ AI Aynala butonu
+entity_{slug}.crm_raw_mirror (tam ayna — hiç kayıt atlanmaz)
+entity_{slug}.entity_settings → crm_source_metadata
+  ↓ AI Normalizasyon (batch 20, Nemotron)
+entity_{slug}.crm_contacts / crm_companies / crm_deals / erp_products
+  ↓ Entity AI okur
+```
+
+---
+
+*Son güncelleme: YFZ 1-15 tamamlandı. Muhasebe OAuth (Zoho Books/QuickBooks/Xero), per-entity Telegram/Instagram webhook, in-app bildirim sistemi (zil dropdown), plan limit kontrolü (429), token kullanım takibi, admin plan yönetimi. Build ve deploy yapıldı. 23 Mayıs 2026.*

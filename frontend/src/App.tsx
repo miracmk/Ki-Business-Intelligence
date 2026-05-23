@@ -15,6 +15,7 @@ import Support from './pages/Support'
 import Settings from './pages/Settings'
 import Admin from './pages/Admin'
 import PlatformSettings from './pages/PlatformSettings'
+import Register from './pages/Register'
 function PrivateRoute({ children }: { children: React.ReactNode }) {
   const { accessToken } = useAuth()
   if (!accessToken) return <Navigate to="/app/login" replace />
@@ -36,6 +37,7 @@ function AppShell() {
         <Route path="/" element={<Landing />} />
         <Route path="/app/login" element={<Login />} />
         <Route path="/app/login/2fa" element={<TwoFactor />} />
+        <Route path="/app/register" element={<Register />} />
         <Route path="/app" element={<PrivateRoute><Layout /></PrivateRoute>}>
           <Route index element={<Navigate to="/app/dashboard" replace />} />
           <Route path="dashboard"  element={<Dashboard />} />
@@ -47,8 +49,9 @@ function AppShell() {
           <Route path="entity-ai"  element={<EntityAI />} />
           <Route path="support"    element={<Support />} />
           <Route path="settings"   element={<Settings />} />
-          <Route path="admin"          element={<AdminRoute><Admin /></AdminRoute>} />
-          <Route path="admin/settings" element={<AdminRoute><PlatformSettings /></AdminRoute>} />
+          <Route path="admin"             element={<AdminRoute><Admin /></AdminRoute>} />
+          <Route path="admin/settings"   element={<AdminRoute><PlatformSettings /></AdminRoute>} />
+          <Route path="admin/kibi-chat"  element={<AdminRoute><AiChat isAdminMode /></AdminRoute>} />
         </Route>
       </Routes>
     </div>

@@ -18,6 +18,7 @@ import { crmBulkJobs, crmRecords, crmSyncState, crmSyncLog, crmFields, crmModule
 import { createAdapter } from '../../adapters/index.js'
 import { decryptJson } from '../../lib/crypto.js'
 import { eq, and } from 'drizzle-orm'
+import { runEntityEtl } from './entity-etl.js'
 import type { CrmCredentials } from '../../adapters/base.js'
 
 const BETWEEN_MODULES_DELAY_MS = 2_000  // n8n "Wait Between Modules" = 2s
@@ -181,6 +182,11 @@ export async function processBulkCallback(
 
     // Release sync lock
     await redis.del(redisKeys.syncLock(connectionId, moduleApiName))
+
+    // Run ETL: mirror + AI normalize → entity schema (fire-and-forget, don't block callback)
+    runEntityEtl(connectionId).catch(err =>
+      console.error(`[ETL] entity-etl failed for ${connectionId}:`, err)
+    )
 
   } catch (err) {
     await db.update(crmBulkJobs)

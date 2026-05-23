@@ -83,14 +83,35 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
   })
 
   app.get('/support/tickets', async (req) => {
-    const { status, priority, entityId } = req.query as Record<string, string>
-    const conditions: string[] = []
-    if (status) conditions.push(`status = '${status}'`)
-    if (priority) conditions.push(`priority = '${priority}'`)
-    if (entityId) conditions.push(`entity_id = '${entityId}'`)
-    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''
-    const rows = await db.execute(sql.raw(`SELECT * FROM kibi_support_tickets ${where} ORDER BY opened_at DESC LIMIT 200`))
-    return { tickets: rows.rows }
+    const q = req.query as Record<string, string>
+    const page     = Math.max(1, Number(q.page) || 1)
+    const limit    = Math.min(100, Number(q.limit) || 50)
+    const offset   = (page - 1) * limit
+
+    const tickets = await db.query.kibiSupportTickets.findMany({
+      where: (t, { and, eq }) => {
+        const conds: any[] = []
+        if (q.status)   conds.push(eq(t.status,   q.status as any))
+        if (q.priority) conds.push(eq(t.priority, q.priority as any))
+        if (q.entityId) conds.push(eq(t.entityId, q.entityId))
+        return conds.length ? and(...conds) : undefined
+      },
+      orderBy: (t, { desc }) => [desc(t.openedAt)],
+      limit,
+      offset,
+    })
+
+    // Enrich with entity name
+    const entityIds = [...new Set(tickets.map(t => t.entityId))]
+    const entities = entityIds.length
+      ? await db.query.kibiEntities.findMany({ where: (t, { inArray }) => inArray(t.id, entityIds) })
+      : []
+    const entityMap = Object.fromEntries(entities.map(e => [e.id, e.companyName]))
+
+    return {
+      tickets: tickets.map(t => ({ ...t, entityName: entityMap[t.entityId] ?? '-' })),
+      page, limit,
+    }
   })
 
   app.put('/support/tickets/:id/assign', async (req, reply) => {
@@ -252,6 +273,38 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
     const { channel } = req.params as { channel: string }
     await db.delete(platformConfigs).where(eq(platformConfigs.key, `platform_comms_${channel}`))
     return reply.send({ ok: true })
+  })
+
+  // PUT /admin/entities/:entityId/plan — change plan for an entity
+  app.put('/entities/:entityId/plan', async (req, reply) => {
+    const { entityId } = req.params as { entityId: string }
+    const { planName } = req.body as { planName: string }
+
+    const validPlans = ['free', 'starter', 'growth', 'enterprise']
+    if (!validPlans.includes(planName)) {
+      return reply.status(400).send({ error: 'Geçersiz plan. Geçerli değerler: free, starter, growth, enterprise' })
+    }
+
+    const entity = await db.query.kibiEntities.findFirst({ where: (t, { eq }) => eq(t.id, entityId) })
+    if (!entity) return reply.status(404).send({ error: 'Entity bulunamadı' })
+
+    await db.update(kibiEntities)
+      .set({ planName: planName as any, updatedAt: new Date() })
+      .where(eq(kibiEntities.id, entityId))
+
+    return reply.send({ ok: true, entityId, planName })
+  })
+
+  // GET /admin/plans — list plan definitions (hardcoded limits)
+  app.get('/plans', async (_req, reply) => {
+    return reply.send({
+      plans: [
+        { name: 'free',       displayName: 'Ücretsiz',     maxMonthlyAiMessages: 100,  maxCrmRecords: 1000,  monthlyPriceUsd: 0 },
+        { name: 'starter',    displayName: 'Başlangıç',    maxMonthlyAiMessages: 500,  maxCrmRecords: 10000, monthlyPriceUsd: 29 },
+        { name: 'growth',     displayName: 'Büyüme',       maxMonthlyAiMessages: 2000, maxCrmRecords: 50000, monthlyPriceUsd: 79 },
+        { name: 'enterprise', displayName: 'Kurumsal',     maxMonthlyAiMessages: -1,   maxCrmRecords: -1,    monthlyPriceUsd: 199 },
+      ],
+    })
   })
 
   app.post('/seed', async (req, reply) => {

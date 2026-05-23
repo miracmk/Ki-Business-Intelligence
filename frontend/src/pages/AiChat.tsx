@@ -5,7 +5,7 @@ import api from '../lib/api'
 interface Msg { role: 'user' | 'assistant'; content: string }
 interface Session { id: string; title: string; messages: Msg[] }
 
-export default function AiChat() {
+export default function AiChat({ isAdminMode = false }: { isAdminMode?: boolean }) {
   const [sessions, setSessions]       = useState<Session[]>([])
   const [activeId, setActiveId]       = useState<string | null>(null)
   const [input,    setInput]          = useState('')
@@ -139,8 +139,12 @@ export default function AiChat() {
             <MessageSquare size={18} style={{ color: 'var(--accent)' }} />
           </div>
           <div className="flex-1">
-            <h2 className="text-sm font-semibold" style={{ color: 'var(--text-1)' }}>KIBI AI</h2>
-            <p className="text-xs" style={{ color: 'var(--text-3)' }}>İş rehberi · Sektörel analiz · Büyüme asistanı</p>
+            <h2 className="text-sm font-semibold" style={{ color: 'var(--text-1)' }}>
+              {isAdminMode ? 'KIBI Chat — Platform Yönetim AI' : 'KIBI AI'}
+            </h2>
+            <p className="text-xs" style={{ color: 'var(--text-3)' }}>
+              {isAdminMode ? 'Platform verileri · Tüm entity erişimi · Yönetim asistanı' : 'İş rehberi · Sektörel analiz · Büyüme asistanı'}
+            </p>
           </div>
           <button
             onClick={() => setShowInstructions(true)}

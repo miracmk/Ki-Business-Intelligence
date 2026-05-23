@@ -15,15 +15,17 @@ import { ensureRedisConnection, closeRedis } from './lib/redis.js'
 import { ensureQdrantConnection } from './lib/qdrant.js'
 
 import { authRoutes }       from './api/routes/auth.js'
+import { startImapPollers } from './engine/imap-poller.js'
 import { crmRoutes }        from './api/routes/crm.js'
 import { aiRoutes }         from './api/routes/ai.js'
 import { tenantRoutes }     from './api/routes/tenant.js'
 import { accountingRoutes } from './api/routes/accounting.js'
 import { supportRoutes }    from './api/routes/support.js'
-import { adminRoutes }      from './api/routes/admin.js'
-import { kibiRoutes }       from './api/routes/kibi.js'
-import { fileRoutes }       from './api/routes/files.js'
-import { webhookRoutes }    from './api/webhooks/index.js'
+import { adminRoutes }         from './api/routes/admin.js'
+import { kibiRoutes }         from './api/routes/kibi.js'
+import { fileRoutes }         from './api/routes/files.js'
+import { notificationRoutes } from './api/routes/notifications.js'
+import { webhookRoutes }      from './api/webhooks/index.js'
 
 const FRONTEND_DIST = process.env['FRONTEND_DIST'] ?? '/app/frontend/dist'
 
@@ -57,6 +59,35 @@ app.decorate('authenticate', async (req: any, reply: any) => {
   catch { reply.status(401).send({ error: 'Unauthorized' }) }
 })
 
+// Rejects entity_external tokens — use on all routes except /ai/external-chat
+app.decorate('requireFullAccess', async (req: any, reply: any) => {
+  try   { await req.jwtVerify() }
+  catch { return reply.status(401).send({ error: 'Unauthorized' }) }
+  if (req.user?.scope === 'external') {
+    return reply.status(403).send({ error: 'Bu işlem için yetkiniz yok' })
+  }
+})
+
+// Paths that entity_external tokens may access (besides /auth/*)
+const EXTERNAL_ALLOWED_PATHS = new Set([
+  '/api/v1/ai/external-chat',
+])
+
+// Global hook: block external-scoped JWTs from all routes except allowed list
+app.addHook('onRequest', async (req, reply) => {
+  const path = req.url.split('?')[0]
+  if (!path.startsWith('/api/v1/')) return
+  if (path.startsWith('/api/v1/auth/')) return
+  if (EXTERNAL_ALLOWED_PATHS.has(path)) return
+
+  try {
+    const payload: any = await req.jwtDecode()
+    if (payload?.scope === 'external') {
+      return reply.status(403).send({ error: 'Bu işlem için yetkiniz yok' })
+    }
+  } catch { /* unauthenticated — let route handler deal with it */ }
+})
+
 await app.register(async (api) => {
   await api.register(authRoutes,       { prefix: '/auth' })
   await api.register(tenantRoutes,     { prefix: '/tenants' })
@@ -65,8 +96,9 @@ await app.register(async (api) => {
   await api.register(accountingRoutes, { prefix: '/accounting' })
   await api.register(supportRoutes,    { prefix: '/support' })
   await api.register(adminRoutes,      { prefix: '/admin' })
-  await api.register(kibiRoutes,       { prefix: '/kibi' })
-  await api.register(fileRoutes,       { prefix: '/files' })
+  await api.register(kibiRoutes,          { prefix: '/kibi' })
+  await api.register(fileRoutes,          { prefix: '/files' })
+  await api.register(notificationRoutes,  { prefix: '/notifications' })
 }, { prefix: '/api/v1' })
 
 await app.register(webhookRoutes, { prefix: '/webhooks' })
@@ -134,6 +166,7 @@ async function start() {
     await ensureQdrantConnection()
     await app.listen({ port: env.PORT, host: env.HOST })
     console.log('\n🚀 Ki Platform running on ' + env.HOST + ':' + env.PORT + '\n')
+    startImapPollers().catch(e => console.error('[IMAP] Poller start failed:', e))
   } catch (err) {
     app.log.error(err)
     process.exit(1)

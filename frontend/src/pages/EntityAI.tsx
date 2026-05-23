@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from 'react'
-import { Send, Bot, Settings2, X, Save } from 'lucide-react'
+import { Send, Bot, Settings2, X, Save, Info } from 'lucide-react'
 import api from '../lib/api'
+import { useAuth } from '../store/auth'
 
 interface Msg { role: 'user' | 'assistant'; content: string }
 
@@ -10,6 +11,8 @@ export default function EntityAI() {
   const [loading,      setLoading]      = useState(false)
   const [error,        setError]        = useState('')
   const [companyName,  setCompanyName]  = useState<string>('')
+  const { user } = useAuth()
+  const isAdmin = (user as any)?.role === 'admin' || (user as any)?.role === 'supervisor'
   const [showInstructions, setShowInstructions] = useState(false)
   const [instructions, setInstructions]         = useState('')
   const [savingInstructions, setSavingInstructions] = useState(false)
@@ -91,6 +94,18 @@ export default function EntityAI() {
           Talimatlar
         </button>
       </div>
+
+      {/* Admin info banner */}
+      {isAdmin && (
+        <div className="mx-6 mt-4 flex items-start gap-3 px-4 py-3 rounded-xl text-xs"
+          style={{ background: 'rgba(251,191,36,0.08)', border: '1px solid rgba(251,191,36,0.20)', color: '#fbbf24' }}>
+          <Info size={14} className="flex-shrink-0 mt-0.5" />
+          <div>
+            <strong>Platform Yöneticisi:</strong> Entity AI yalnızca bu entity'nin CRM/ERP/Muhasebe verilerine erişir.
+            Platform genelinde yönetim için <strong>KIBI Chat</strong> (Platform menüsü) kullanın.
+          </div>
+        </div>
+      )}
 
       {/* Messages */}
       <div className="flex-1 overflow-y-auto px-6 py-4 space-y-4">

@@ -5,6 +5,10 @@ import { processNotification }  from '../../engine/crm-sync/notification.js'
 import { runAgent }             from '../../engine/ai/agent.js'
 import type { BulkCallbackPayload } from '../../engine/crm-sync/bulk-sync.js'
 import type { NotificationPayload } from '../../engine/crm-sync/notification.js'
+import { redis } from '../../lib/redis.js'
+import { db } from '../../lib/db.js'
+import { crmConnections, accountingConnections, kibiEntities, tenants } from '../../../db/schema.js'
+import { encryptJson } from '../../lib/crypto.js'
 
 export const webhookRoutes: FastifyPluginAsync = async (app) => {
 
@@ -42,6 +46,180 @@ export const webhookRoutes: FastifyPluginAsync = async (app) => {
     processNotification(connectionId, payload)
       .then((r) => app.log.info({ r }, 'Notification processed'))
       .catch((e) => app.log.error({ e }, 'Notification error'))
+  })
+
+  // ── CRM OAuth callbacks — Zoho / HubSpot / Salesforce ────────────────────
+  app.get('/crm/:provider/callback', async (req, reply) => {
+    const { provider } = req.params as { provider: string }
+    const { code, state, error } = req.query as Record<string, string>
+    const frontendBase = `${env.APP_URL}/app/settings?tab=crm`
+
+    if (error || !code || !state) {
+      return reply.redirect(`${frontendBase}&oauth_error=${encodeURIComponent(error ?? 'cancelled')}`)
+    }
+
+    // Load state from Redis
+    const raw = await redis.get(`ki:oauth:state:${state}`)
+    if (!raw) return reply.redirect(`${frontendBase}&oauth_error=expired`)
+    await redis.del(`ki:oauth:state:${state}`)
+
+    const ctx = JSON.parse(raw) as {
+      tenantId: string; userId: string; provider: string
+      name: string; clientId: string; clientSecret: string; region: string
+    }
+    if (ctx.provider !== provider) return reply.redirect(`${frontendBase}&oauth_error=mismatch`)
+
+    try {
+      const callbackUrl = `${env.APP_URL}/webhooks/crm/${provider}/callback`
+      let accessToken = '', refreshToken = '', instanceUrl = ''
+
+      if (provider === 'zoho') {
+        const res = await fetch(`https://accounts.zoho.${ctx.region}/oauth/v2/token`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({
+            grant_type: 'authorization_code', code,
+            client_id: ctx.clientId, client_secret: ctx.clientSecret,
+            redirect_uri: callbackUrl,
+          }),
+        })
+        const data: any = await res.json()
+        if (data.error) throw new Error(data.error)
+        accessToken  = data.access_token
+        refreshToken = data.refresh_token
+      } else if (provider === 'hubspot') {
+        const res = await fetch('https://api.hubapi.com/oauth/v1/token', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({
+            grant_type: 'authorization_code', code,
+            client_id: ctx.clientId, client_secret: ctx.clientSecret,
+            redirect_uri: callbackUrl,
+          }),
+        })
+        const data: any = await res.json()
+        if (data.error) throw new Error(data.error ?? JSON.stringify(data))
+        accessToken  = data.access_token
+        refreshToken = data.refresh_token
+      } else if (provider === 'salesforce') {
+        const res = await fetch('https://login.salesforce.com/services/oauth2/token', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({
+            grant_type: 'authorization_code', code,
+            client_id: ctx.clientId, client_secret: ctx.clientSecret,
+            redirect_uri: callbackUrl,
+          }),
+        })
+        const data: any = await res.json()
+        if (data.error) throw new Error(data.error_description ?? data.error)
+        accessToken  = data.access_token
+        refreshToken = data.refresh_token
+        instanceUrl  = data.instance_url ?? ''
+      }
+
+      // Save connection to DB
+      const creds: Record<string, string> = {
+        type: provider, clientId: ctx.clientId, clientSecret: ctx.clientSecret,
+        refreshToken, ...(ctx.region ? { region: ctx.region } : {}),
+        ...(instanceUrl ? { instanceUrl } : {}),
+      }
+      await db.insert(crmConnections).values({
+        tenantId:    ctx.tenantId,
+        name:        ctx.name,
+        crmType:     provider as any,
+        credentials: encryptJson(creds),
+        syncStatus:  'idle',
+      })
+
+      return reply.redirect(`${frontendBase}&oauth_success=1&provider=${provider}`)
+    } catch (e: any) {
+      console.error(`[OAuth ${provider}] Error:`, e)
+      return reply.redirect(`${frontendBase}&oauth_error=${encodeURIComponent(e.message)}`)
+    }
+  })
+
+  // ── Accounting OAuth callbacks — Zoho Books / QuickBooks / Xero ──────────
+  app.get('/accounting/:provider/callback', async (req, reply) => {
+    const { provider } = req.params as { provider: string }
+    const { code, state, error } = req.query as Record<string, string>
+    const frontendBase = `${env.APP_URL}/app/settings?tab=accounting`
+
+    if (error || !code || !state) {
+      return reply.redirect(`${frontendBase}&oauth_error=${encodeURIComponent(error ?? 'cancelled')}`)
+    }
+
+    const raw = await redis.get(`ki:acc:oauth:state:${state}`)
+    if (!raw) return reply.redirect(`${frontendBase}&oauth_error=expired`)
+    await redis.del(`ki:acc:oauth:state:${state}`)
+
+    const ctx = JSON.parse(raw) as {
+      tenantId: string; userId: string; provider: string
+      name: string; clientId: string; clientSecret: string; region: string; organizationId: string
+    }
+    if (ctx.provider !== provider) return reply.redirect(`${frontendBase}&oauth_error=mismatch`)
+
+    try {
+      const callbackUrl = `${env.APP_URL}/webhooks/accounting/${provider}/callback`
+      let accessToken = '', refreshToken = ''
+
+      if (provider === 'zoho_books') {
+        const res = await fetch(`https://accounts.zoho.${ctx.region}/oauth/v2/token`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({
+            grant_type: 'authorization_code', code,
+            client_id: ctx.clientId, client_secret: ctx.clientSecret,
+            redirect_uri: callbackUrl,
+          }),
+        })
+        const data: any = await res.json()
+        if (data.error) throw new Error(data.error)
+        accessToken  = data.access_token
+        refreshToken = data.refresh_token
+      } else if (provider === 'quickbooks') {
+        const creds = Buffer.from(`${ctx.clientId}:${ctx.clientSecret}`).toString('base64')
+        const res = await fetch('https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer', {
+          method: 'POST',
+          headers: { Authorization: `Basic ${creds}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({ grant_type: 'authorization_code', code, redirect_uri: callbackUrl }),
+        })
+        const data: any = await res.json()
+        if (data.error) throw new Error(data.error_description ?? data.error)
+        accessToken  = data.access_token
+        refreshToken = data.refresh_token
+      } else if (provider === 'xero') {
+        const creds = Buffer.from(`${ctx.clientId}:${ctx.clientSecret}`).toString('base64')
+        const res = await fetch('https://identity.xero.com/connect/token', {
+          method: 'POST',
+          headers: { Authorization: `Basic ${creds}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({ grant_type: 'authorization_code', code, redirect_uri: callbackUrl }),
+        })
+        const data: any = await res.json()
+        if (data.error) throw new Error(data.error_description ?? data.error)
+        accessToken  = data.access_token
+        refreshToken = data.refresh_token
+      } else {
+        throw new Error('Unsupported provider')
+      }
+
+      const creds: Record<string, string> = {
+        type: provider, clientId: ctx.clientId, clientSecret: ctx.clientSecret,
+        refreshToken, ...(ctx.region ? { region: ctx.region } : {}),
+        ...(ctx.organizationId ? { organizationId: ctx.organizationId } : {}),
+      }
+      await db.insert(accountingConnections).values({
+        tenantId:       ctx.tenantId,
+        name:           ctx.name,
+        accountingType: provider as any,
+        credentials:    encryptJson(creds),
+      })
+
+      return reply.redirect(`${frontendBase}&oauth_success=1&provider=${provider}`)
+    } catch (e: any) {
+      console.error(`[Accounting OAuth ${provider}] Error:`, e)
+      return reply.redirect(`${frontendBase}&oauth_error=${encodeURIComponent(e.message)}`)
+    }
   })
 
   // ── WhatsApp Cloud API — webhook verification (GET) ───────────────────────
@@ -83,6 +261,75 @@ export const webhookRoutes: FastifyPluginAsync = async (app) => {
         sendWhatsAppMessage(from, out.response).catch(console.error)
       }).catch(console.error)
     }
+  })
+
+  // ── Per-entity Telegram webhook ────────────────────────────────────────────
+  app.post('/telegram/:entityId', async (req, reply) => {
+    reply.status(200).send('OK')
+    const { entityId } = req.params as { entityId: string }
+
+    const entity = await db.query.kibiEntities.findFirst({
+      where: (t, { eq }) => eq(t.id, entityId),
+    }).catch(() => null)
+    if (!entity) return
+
+    const tenant = await db.query.tenants.findFirst({
+      where: (t, { eq }) => eq(t.id, entity.entityId),
+    }).catch(() => null)
+    const settings = (tenant?.settings ?? {}) as Record<string, any>
+    const telegramCfg = settings?.channels?.telegram
+    if (!telegramCfg?.bot_token) return
+
+    const update = req.body as any
+    const msg = update?.message
+    if (!msg?.text) return
+
+    const chatId    = String(msg.chat?.id ?? '')
+    const text      = String(msg.text ?? '')
+    const firstName = msg.from?.first_name ?? null
+
+    runAgent({
+      tenantId:    entity.entityId,
+      sessionId:   `tg_${entityId}_${chatId}`,
+      userMessage: text,
+      channel:     'telegram',
+      firstName,
+    }).then((out) => {
+      sendTelegramMessageWithToken(chatId, out.response, telegramCfg.bot_token).catch(console.error)
+    }).catch(console.error)
+  })
+
+  // ── Instagram Messaging — webhook verification (GET) ──────────────────────
+  app.get('/instagram', async (req, reply) => {
+    const q = req.query as Record<string, string>
+    if (q['hub.mode'] === 'subscribe' && q['hub.verify_token'] === env.WA_WEBHOOK_VERIFY_TOKEN) {
+      return reply.send(q['hub.challenge'])
+    }
+    return reply.status(403).send('Forbidden')
+  })
+
+  // ── Instagram Messaging — incoming DMs (POST) ─────────────────────────────
+  app.post('/instagram', async (req, reply) => {
+    reply.status(200).send('OK')
+
+    const body  = req.body as any
+    const entry = body?.entry?.[0]?.messaging?.[0]
+    if (!entry?.message?.text) return
+
+    const senderId = String(entry.sender?.id ?? '')
+    const text     = String(entry.message.text ?? '')
+
+    const tenantId = await resolveTenantByChannel('instagram', senderId)
+    if (!tenantId) return
+
+    runAgent({
+      tenantId,
+      sessionId:   `ig_${senderId}`,
+      userMessage: text,
+      channel:     'instagram',
+    }).then((out) => {
+      sendInstagramMessage(senderId, out.response).catch(console.error)
+    }).catch(console.error)
   })
 
   // ── Telegram bot webhook ───────────────────────────────────────────────────
@@ -138,10 +385,32 @@ async function sendTelegramMessage(chatId: string, text: string) {
   })
 }
 
+async function sendTelegramMessageWithToken(chatId: string, text: string, botToken: string) {
+  await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ chat_id: chatId, text }),
+  })
+}
+
+async function sendInstagramMessage(recipientId: string, text: string) {
+  const cfg = await db.query.tenants.findFirst({
+    where: (t, { eq }) => eq(t.isActive, true),
+  }).catch(() => null)
+  const settings = (cfg?.settings ?? {}) as Record<string, any>
+  const token = settings?.channels?.instagram?.access_token
+  if (!token) return
+
+  await fetch('https://graph.facebook.com/v19.0/me/messages', {
+    method:  'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ recipient: { id: recipientId }, message: { text } }),
+  })
+}
+
 // ── Tenant resolution ─────────────────────────────────────────────────────────
 // In MVP: returns first active tenant. In production: lookup by channel config.
 async function resolveTenantByChannel(_channel: string, _id: string): Promise<string | null> {
-  const { db } = await import('../../lib/db.js')
   const tenant = await db.query.tenants.findFirst({
     where: (t, { eq }) => eq(t.isActive, true),
   })

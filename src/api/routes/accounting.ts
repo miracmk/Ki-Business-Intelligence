@@ -9,6 +9,8 @@ import { encryptJson } from '../../lib/crypto.js'
 import { createAccountingAdapter } from '../../adapters/index.js'
 import { syncAccounting } from '../../engine/accounting-sync/sync.js'
 import { eq, and, or, desc, asc, sql } from 'drizzle-orm'
+import { redis } from '../../lib/redis.js'
+import { env } from '../../../config/env.js'
 
 const connectSchema = z.object({
   name: z.string().min(1),
@@ -84,6 +86,54 @@ const integrationSchema = z.object({
 })
 
 export const accountingRoutes: FastifyPluginAsync = async (app) => {
+
+  // ── OAuth start — Zoho Books / QuickBooks / Xero ──────────────────────────
+  app.post('/oauth/start', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = req.user as { sub: string; tenantId: string; role: string }
+    const isUUID = (s: string | null | undefined) => !!s && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)
+    if (!isUUID(user.tenantId)) return reply.status(400).send({ error: 'Entity bağlantısı gerekli' })
+    if (!['entity_main', 'admin', 'supervisor'].includes(user.role)) return reply.status(403).send({ error: 'Yetkisiz' })
+
+    const { provider, name, clientId, clientSecret, region = 'com', organizationId = '' } = req.body as {
+      provider: string; name?: string; clientId: string; clientSecret: string; region?: string; organizationId?: string
+    }
+    if (!provider || !clientId || !clientSecret) {
+      return reply.status(400).send({ error: 'provider, clientId, clientSecret gerekli' })
+    }
+
+    const state = nanoid(32)
+    await redis.setex(`ki:acc:oauth:state:${state}`, 600, JSON.stringify({
+      tenantId: user.tenantId, userId: user.sub,
+      provider, name: name || provider, clientId, clientSecret, region, organizationId,
+    }))
+
+    const callbackUrl = `${env.APP_URL}/webhooks/accounting/${provider}/callback`
+    let authUrl = ''
+
+    if (provider === 'zoho_books') {
+      authUrl = `https://accounts.zoho.${region}/oauth/v2/auth?` + new URLSearchParams({
+        response_type: 'code', client_id: clientId,
+        scope: 'ZohoBooks.fullaccess.all', redirect_uri: callbackUrl,
+        state, access_type: 'offline', prompt: 'consent',
+      })
+    } else if (provider === 'quickbooks') {
+      authUrl = `https://appcenter.intuit.com/connect/oauth2?` + new URLSearchParams({
+        client_id: clientId, scope: 'com.intuit.quickbooks.accounting',
+        redirect_uri: callbackUrl, response_type: 'code', state,
+      })
+    } else if (provider === 'xero') {
+      authUrl = `https://login.xero.com/identity/connect/authorize?` + new URLSearchParams({
+        response_type: 'code', client_id: clientId, redirect_uri: callbackUrl,
+        scope: 'openid profile email accounting.transactions accounting.contacts offline_access',
+        state,
+      })
+    } else {
+      return reply.status(400).send({ error: 'Bu provider OAuth ile desteklenmiyor' })
+    }
+
+    return reply.send({ authUrl, state })
+  })
+
   app.get('/connections', { onRequest: [app.authenticate] }, async (req) => {
     const user = req.user as { sub: string; tenantId: string }
     const conns = await db.query.accountingConnections.findMany({

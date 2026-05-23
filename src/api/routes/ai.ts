@@ -3,11 +3,47 @@ import { z } from 'zod'
 import { runAgent } from '../../engine/ai/agent.js'
 import { AiGateway, ANALYSIS_MODELS, CONVERSATION_MODELS } from '../../engine/ai/gateway.js'
 import { redis } from '../../lib/redis.js'
+import { vectorSearch } from '../../lib/qdrant.js'
 import { db } from '../../lib/db.js'
-import { kibiEntities } from '../../../db/schema.js'
-import { eq } from 'drizzle-orm'
+import { kibiEntities, kibiSupportTickets, kibiTokenUsage, entityMetrics } from '../../../db/schema.js'
+import { eq, sql } from 'drizzle-orm'
 import { getEntitySchema, queryEntitySchema, getEntityDataSummary } from '../../lib/entity-provisioner.js'
 import { env } from '../../../config/env.js'
+
+// Plan limits per plan name
+const PLAN_MSG_LIMITS: Record<string, number> = {
+  free: 100, starter: 500, growth: 2000, enterprise: 999999,
+}
+
+async function getEntityWithPlan(tenantId: string) {
+  return db.query.kibiEntities.findFirst({
+    where: (t, { eq }) => eq(t.entityId, tenantId),
+    columns: { id: true, planName: true },
+  }).catch(() => null)
+}
+
+async function trackTokenUsage(entityId: string, userId: string, modelName: string, promptTokens: number, completionTokens: number) {
+  const total = promptTokens + completionTokens
+  const costUsd = String((total * 0.000001).toFixed(6)) // rough estimate
+  try {
+    await db.insert(kibiTokenUsage).values({
+      entityId, userId, modelName,
+      provider: 'openrouter',
+      promptTokens, completionTokens, totalTokens: total,
+      costUsd: costUsd as any,
+      modelRole: 'conversation',
+    })
+    // Update monthly message count in entityMetrics
+    await db.execute(sql`
+      INSERT INTO entity_metrics (id, entity_id, current_month_messages, updated_at)
+      VALUES (gen_random_uuid(), ${entityId}, 1, now())
+      ON CONFLICT (entity_id)
+      DO UPDATE SET
+        current_month_messages = entity_metrics.current_month_messages + 1,
+        updated_at = now()
+    `)
+  } catch { /* non-fatal */ }
+}
 
 const chatSchema = z.object({
   message:      z.string().min(1),
@@ -52,6 +88,24 @@ export const aiRoutes: FastifyPluginAsync = async (app) => {
       } catch { /* non-fatal */ }
     }
 
+    // ── FAZ 15: Plan limit check (entity users only) ──────────────────────────
+    if (!isAdmin && isUUIDCheck(user.tenantId)) {
+      try {
+        const entity = await getEntityWithPlan(user.tenantId!)
+        if (entity) {
+          const limit = PLAN_MSG_LIMITS[entity.planName ?? 'free'] ?? 100
+          const metrics = await db.query.entityMetrics.findFirst({
+            where: (t, { eq }) => eq(t.entityId, entity.id),
+            columns: { currentMonthMessages: true },
+          })
+          const used = metrics?.currentMonthMessages ?? 0
+          if (used >= limit) {
+            return reply.status(429).send({ error: `Plan limitinize ulaştınız (${limit} mesaj/ay). Planınızı yükseltin.` })
+          }
+        }
+      } catch { /* non-fatal — don't block if check fails */ }
+    }
+
     try {
       const result = await runAgent({
         tenantId:     user.tenantId ?? 'platform',
@@ -61,6 +115,18 @@ export const aiRoutes: FastifyPluginAsync = async (app) => {
         instructions: kibiInstructions,
         ...rest,
       })
+
+      // ── FAZ 15: Token usage tracking ─────────────────────────────────────────
+      if (isUUIDCheck(user.tenantId) && !isAdmin) {
+        const entity = await getEntityWithPlan(user.tenantId!).catch(() => null)
+        if (entity) {
+          const msgLen = message.length + (result.response?.length ?? 0)
+          const estimatedPrompt = Math.ceil(message.length / 4)
+          const estimatedCompletion = Math.ceil((result.response?.length ?? 0) / 4)
+          trackTokenUsage(entity.id, user.sub, result.usedModel ?? 'unknown', estimatedPrompt, estimatedCompletion)
+        }
+      }
+
       return reply.send({
         response:   result.response,
         department: result.department,
@@ -285,6 +351,68 @@ Kullanıcı sorusu:`
     } catch (e: any) {
       console.error('[PROVISION] Error:', e)
       return reply.status(500).send({ error: String(e.message) })
+    }
+  })
+
+  // ── POST /api/v1/ai/external-chat ─────────────────────────────────────────────
+  // entity_external role only — limited to entity's knowledge base + own CRM record
+  app.post('/external-chat', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = req.user as { sub: string; tenantId: string | null; role?: string; scope?: string }
+
+    // Only entity_external tokens accepted
+    if (user.scope !== 'external' || user.role !== 'entity_external') {
+      return reply.status(403).send({ error: 'Bu endpoint yalnızca harici kullanıcılar için' })
+    }
+
+    const body = z.object({ message: z.string().min(1), sessionId: z.string().optional() }).safeParse(req.body)
+    if (!body.success) return reply.status(400).send({ error: body.error.flatten() })
+
+    const { message } = body.data
+    const sid = body.data.sessionId ?? `ext_${user.sub}_${Date.now()}`
+
+    const isUUID = (s: string | null | undefined) => !!s && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)
+    if (!isUUID(user.tenantId)) {
+      return reply.send({ response: 'Bağlantı kurulu değil. Lütfen yetkili iletişim kanallarını kullanın.', sessionId: sid })
+    }
+
+    try {
+      // Build context: user's own CRM record via vector search
+      let crmContext = ''
+      try {
+        const vsResults = await vectorSearch('ki_knowledge_base', message, 3).catch(() => [])
+        if (vsResults.length) {
+          crmContext = vsResults.map(r => String(r.payload?.content ?? '')).filter(Boolean).join('\n')
+        }
+      } catch { /* non-fatal */ }
+
+      // Check for open support tickets
+      let ticketContext = ''
+      try {
+        const entity = await db.query.kibiEntities.findFirst({ where: (t, { eq }) => eq(t.entityId, user.tenantId!) })
+        if (entity) {
+          const tickets = await db.query.kibiSupportTickets.findMany({
+            where: (t, { and, eq }) => and(eq(t.entityId, entity.id), eq(t.userId, user.sub), eq(t.status, 'open')),
+            limit: 3,
+            orderBy: (t, { desc }) => [desc(t.openedAt)],
+          })
+          if (tickets.length) {
+            ticketContext = `\n\nAçık Destek Talepleri:\n${tickets.map(t => `- ${t.subject} (${t.status})`).join('\n')}`
+          }
+        }
+      } catch { /* non-fatal */ }
+
+      const result = await runAgent({
+        tenantId:    user.tenantId ?? 'unknown',
+        sessionId:   sid,
+        userMessage: message,
+        channel:     'web',
+        instructions: `Sen harici müşteri asistanısın. Sadece bu müşterinin bilgilerine ve şirketin genel bilgi tabanına erişebilirsin.${crmContext ? `\n\nMüşteri Bağlamı:\n${crmContext}` : ''}${ticketContext}`,
+      })
+
+      return reply.send({ response: result.response, sessionId: sid })
+    } catch (e: any) {
+      console.error('[EXTERNAL CHAT] Error:', e)
+      return reply.status(500).send({ error: 'Şu anda yanıt veremiyorum, lütfen tekrar deneyin.' })
     }
   })
 }

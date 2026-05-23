@@ -11,19 +11,22 @@ import { kibiSupportTickets, kibiSupportMessages, kibiSupportKnowledge, kibiInte
 import { eq, and } from 'drizzle-orm'
 
 async function sendSupportEmail(to: string, subject: string, body: string) {
-  const transporter = nodemailer.createTransport({
-    host: env.SMTP_HOST,
-    port: Number(env.SMTP_PORT),
-    secure: Number(env.SMTP_PORT) === 465,
-    auth: { user: env.SMTP_USER, pass: env.SMTP_PASS },
-  })
-
-  return transporter.sendMail({
-    from: env.SMTP_FROM,
-    to,
-    subject,
-    html: `<div>${body.replace(/\n/g, '<br/>')}</div>`,
-  })
+  try {
+    const transporter = nodemailer.createTransport({
+      host: env.SMTP_HOST,
+      port: Number(env.SMTP_PORT),
+      secure: Number(env.SMTP_PORT) === 465,
+      auth: { user: env.SMTP_USER, pass: env.SMTP_PASS },
+    })
+    await transporter.sendMail({
+      from: env.SMTP_FROM,
+      to,
+      subject,
+      html: `<div>${body.replace(/\n/g, '<br/>')}</div>`,
+    })
+  } catch (e) {
+    console.error('[Support Pipeline] SMTP error (non-fatal):', e)
+  }
 }
 
 export async function processNewTicket(params: { ticketId: string; message: string; entityId: string; userId: string }): Promise<void> {

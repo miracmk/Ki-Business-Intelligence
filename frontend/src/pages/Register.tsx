@@ -1,36 +1,31 @@
 import { useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import api from '../api'
+import { Building2, User, Mail, Lock, Briefcase, ArrowRight, Check } from 'lucide-react'
+import api from '../lib/api'
+
+const INDUSTRIES = [
+  'Perakende', 'Toptan Ticaret', 'Üretim', 'İnşaat', 'Teknoloji',
+  'Sağlık', 'Eğitim', 'Finans & Sigorta', 'Lojistik & Taşımacılık',
+  'Turizm & Otelcilik', 'Gıda & Restoran', 'Hizmet Sektörü', 'Diğer',
+]
 
 export default function Register() {
-  const [form, setForm] = useState({
-    name: '',
-    email: '',
-    password: '',
-    tenantName: '',
-    phone: '',
-    birthDate: '',
-    otpPreference: 'email' as 'email' | 'whatsapp',
-    enable2fa: true,
-  })
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState('')
-  const [success, setSuccess] = useState(false)
+  const [form, setForm] = useState({ name: '', email: '', password: '', companyName: '', industry: '' })
+  const [loading, setLoading]   = useState(false)
+  const [error, setError]       = useState('')
+  const [success, setSuccess]   = useState(false)
   const navigate = useNavigate()
+
+  const set = (k: string, v: string) => setForm(f => ({ ...f, [k]: v }))
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    setLoading(true)
-    setError('')
+    if (form.password.length < 8) { setError('Şifre en az 8 karakter olmalı'); return }
+    setLoading(true); setError('')
     try {
-      await api.post('/auth/register', {
-        name: form.name,
-        email: form.email,
-        password: form.password,
-        tenantName: form.tenantName,
-      })
+      await api.post('/auth/register-entity', form)
       setSuccess(true)
-      setTimeout(() => navigate('/login'), 2000)
+      setTimeout(() => navigate('/app/login'), 2500)
     } catch (err: any) {
       setError(err.response?.data?.error || 'Kayıt başarısız')
     } finally {
@@ -39,132 +34,121 @@ export default function Register() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-[#0f0f0f] py-12">
-      <div className="w-full max-w-lg p-8 bg-[#1a1a1a] rounded-2xl shadow-xl">
-        <h1 className="text-3xl font-bold mb-8 text-center text-white">Hesap Oluştur</h1>
-        {success ? (
-          <div className="text-center py-8">
-            <div className="text-green-400 text-xl mb-4">Kayıt başarılı!</div>
-            <div className="text-gray-400">Giriş sayfasına yönlendiriliyorsunuz...</div>
+    <div className="min-h-screen flex items-center justify-center p-4" style={{ background: 'var(--bg)' }}>
+      <div className="w-full max-w-md">
+        {/* Logo */}
+        <div className="text-center mb-8">
+          <div className="w-12 h-12 rounded-2xl mx-auto mb-4 flex items-center justify-center"
+            style={{ background: 'rgba(45,138,107,0.15)' }}>
+            <Building2 size={24} style={{ color: 'var(--forest)' }} />
           </div>
-        ) : (
-          <form onSubmit={handleSubmit} className="space-y-6">
-            <div className="grid grid-cols-2 gap-4">
-              <div className="col-span-2">
-                <label className="block text-sm font-medium text-gray-300 mb-2">Ad Soyad *</label>
-                <input
-                  type="text"
-                  required
-                  value={form.name}
-                  onChange={(e) => setForm({ ...form, name: e.target.value })}
-                  className="w-full px-4 py-3 bg-[#0f0f0f] border border-gray-700 rounded-lg focus:ring-2 focus:ring-[#6366f1] focus:border-transparent text-white"
-                />
+          <h1 className="text-2xl font-bold" style={{ color: 'var(--text-1)' }}>Ki Business Intelligence</h1>
+          <p className="text-sm mt-1" style={{ color: 'var(--text-3)' }}>Şirketiniz için hesap oluşturun</p>
+        </div>
+
+        <div className="rounded-2xl p-8" style={{ background: 'var(--surface-modal)', border: '1px solid var(--border)' }}>
+          {success ? (
+            <div className="text-center py-6">
+              <div className="w-14 h-14 rounded-full mx-auto mb-4 flex items-center justify-center"
+                style={{ background: 'rgba(45,138,107,0.15)' }}>
+                <Check size={28} style={{ color: 'var(--forest)' }} />
               </div>
-              <div className="col-span-2">
-                <label className="block text-sm font-medium text-gray-300 mb-2">E-posta *</label>
-                <input
-                  type="email"
-                  required
-                  value={form.email}
-                  onChange={(e) => setForm({ ...form, email: e.target.value })}
-                  className="w-full px-4 py-3 bg-[#0f0f0f] border border-gray-700 rounded-lg focus:ring-2 focus:ring-[#6366f1] focus:border-transparent text-white"
-                />
-              </div>
-              <div className="col-span-2">
-                <label className="block text-sm font-medium text-gray-300 mb-2">Şifre *</label>
-                <input
-                  type="password"
-                  required
-                  minLength={8}
-                  value={form.password}
-                  onChange={(e) => setForm({ ...form, password: e.target.value })}
-                  className="w-full px-4 py-3 bg-[#0f0f0f] border border-gray-700 rounded-lg focus:ring-2 focus:ring-[#6366f1] focus:border-transparent text-white"
-                />
-              </div>
-              <div className="col-span-2">
-                <label className="block text-sm font-medium text-gray-300 mb-2">Şirket Adı *</label>
-                <input
-                  type="text"
-                  required
-                  value={form.tenantName}
-                  onChange={(e) => setForm({ ...form, tenantName: e.target.value })}
-                  className="w-full px-4 py-3 bg-[#0f0f0f] border border-gray-700 rounded-lg focus:ring-2 focus:ring-[#6366f1] focus:border-transparent text-white"
-                />
-              </div>
+              <h3 className="font-semibold text-lg mb-2" style={{ color: 'var(--text-1)' }}>Kayıt Başarılı!</h3>
+              <p className="text-sm" style={{ color: 'var(--text-3)' }}>Giriş sayfasına yönlendiriliyorsunuz…</p>
+            </div>
+          ) : (
+            <form onSubmit={handleSubmit} className="space-y-4">
+              {/* Name */}
               <div>
-                <label className="block text-sm font-medium text-gray-300 mb-2">Telefon (Önerilir)</label>
-                <input
-                  type="tel"
-                  value={form.phone}
-                  onChange={(e) => setForm({ ...form, phone: e.target.value })}
-                  className="w-full px-4 py-3 bg-[#0f0f0f] border border-gray-700 rounded-lg focus:ring-2 focus:ring-[#6366f1] focus:border-transparent text-white"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-300 mb-2">Doğum Tarihi (Önerilir)</label>
-                <input
-                  type="date"
-                  value={form.birthDate}
-                  onChange={(e) => setForm({ ...form, birthDate: e.target.value })}
-                  className="w-full px-4 py-3 bg-[#0f0f0f] border border-gray-700 rounded-lg focus:ring-2 focus:ring-[#6366f1] focus:border-transparent text-white"
-                />
-              </div>
-              <div className="col-span-2">
-                <label className="block text-sm font-medium text-gray-300 mb-2">OTP Tercihi (Önerilir)</label>
-                <div className="flex gap-4">
-                  <label className="flex items-center gap-2 cursor-pointer">
-                    <input
-                      type="radio"
-                      name="otpPreference"
-                      value="email"
-                      checked={form.otpPreference === 'email'}
-                      onChange={(e) => setForm({ ...form, otpPreference: e.target.value as 'email' | 'whatsapp' })}
-                      className="text-[#6366f1]"
-                    />
-                    E-posta
-                  </label>
-                  <label className="flex items-center gap-2 cursor-pointer">
-                    <input
-                      type="radio"
-                      name="otpPreference"
-                      value="whatsapp"
-                      checked={form.otpPreference === 'whatsapp'}
-                      onChange={(e) => setForm({ ...form, otpPreference: e.target.value as 'email' | 'whatsapp' })}
-                      className="text-[#6366f1]"
-                    />
-                    WhatsApp
-                  </label>
+                <label className="block text-xs font-medium mb-1.5" style={{ color: 'var(--text-2)' }}>Ad Soyad</label>
+                <div className="relative">
+                  <User size={14} className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: 'var(--text-3)' }} />
+                  <input
+                    required value={form.name} onChange={e => set('name', e.target.value)}
+                    placeholder="Ad Soyad"
+                    className="w-full pl-9 pr-3 py-2.5 rounded-xl text-sm outline-none"
+                    style={{ background: 'var(--surface-2)', color: 'var(--text-1)', border: '1px solid var(--border)' }}
+                  />
                 </div>
               </div>
-              <div className="col-span-2">
-                <label className="flex items-center gap-3 cursor-pointer">
+
+              {/* Email */}
+              <div>
+                <label className="block text-xs font-medium mb-1.5" style={{ color: 'var(--text-2)' }}>E-posta</label>
+                <div className="relative">
+                  <Mail size={14} className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: 'var(--text-3)' }} />
                   <input
-                    type="checkbox"
-                    checked={form.enable2fa}
-                    onChange={(e) => setForm({ ...form, enable2fa: e.target.checked })}
-                    className="w-5 h-5 text-[#6366f1]"
+                    type="email" required value={form.email} onChange={e => set('email', e.target.value)}
+                    placeholder="ornek@sirket.com"
+                    className="w-full pl-9 pr-3 py-2.5 rounded-xl text-sm outline-none"
+                    style={{ background: 'var(--surface-2)', color: 'var(--text-1)', border: '1px solid var(--border)' }}
                   />
-                  <span className="text-gray-300">İki Faktörlü Doğrulama Açık (Önerilir)</span>
-                </label>
+                </div>
               </div>
-            </div>
 
-            {error && <div className="text-red-400 text-sm">{error}</div>}
+              {/* Password */}
+              <div>
+                <label className="block text-xs font-medium mb-1.5" style={{ color: 'var(--text-2)' }}>Şifre</label>
+                <div className="relative">
+                  <Lock size={14} className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: 'var(--text-3)' }} />
+                  <input
+                    type="password" required minLength={8} value={form.password} onChange={e => set('password', e.target.value)}
+                    placeholder="En az 8 karakter"
+                    className="w-full pl-9 pr-3 py-2.5 rounded-xl text-sm outline-none"
+                    style={{ background: 'var(--surface-2)', color: 'var(--text-1)', border: '1px solid var(--border)' }}
+                  />
+                </div>
+              </div>
 
-            <button
-              type="submit"
-              disabled={loading}
-              className="w-full py-3 bg-[#6366f1] hover:bg-[#4f46e5] text-white font-semibold rounded-lg transition-colors disabled:opacity-50"
-            >
-              {loading ? 'Kayıt yapılıyor...' : 'Kayıt Ol'}
-            </button>
+              {/* Company name */}
+              <div>
+                <label className="block text-xs font-medium mb-1.5" style={{ color: 'var(--text-2)' }}>Şirket Adı</label>
+                <div className="relative">
+                  <Building2 size={14} className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: 'var(--text-3)' }} />
+                  <input
+                    required value={form.companyName} onChange={e => set('companyName', e.target.value)}
+                    placeholder="Şirket Adı A.Ş."
+                    className="w-full pl-9 pr-3 py-2.5 rounded-xl text-sm outline-none"
+                    style={{ background: 'var(--surface-2)', color: 'var(--text-1)', border: '1px solid var(--border)' }}
+                  />
+                </div>
+              </div>
 
-            <div className="text-center text-gray-400">
-              Zaten hesabınız var mı?{' '}
-              <Link to="/login" className="text-[#6366f1] hover:underline">Giriş Yap</Link>
-            </div>
-          </form>
-        )}
+              {/* Industry */}
+              <div>
+                <label className="block text-xs font-medium mb-1.5" style={{ color: 'var(--text-2)' }}>Sektör</label>
+                <div className="relative">
+                  <Briefcase size={14} className="absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" style={{ color: 'var(--text-3)' }} />
+                  <select
+                    value={form.industry} onChange={e => set('industry', e.target.value)}
+                    className="w-full pl-9 pr-3 py-2.5 rounded-xl text-sm outline-none appearance-none"
+                    style={{ background: 'var(--surface-2)', color: form.industry ? 'var(--text-1)' : 'var(--text-3)', border: '1px solid var(--border)' }}
+                  >
+                    <option value="">Sektör seçin (isteğe bağlı)</option>
+                    {INDUSTRIES.map(i => <option key={i} value={i}>{i}</option>)}
+                  </select>
+                </div>
+              </div>
+
+              {error && (
+                <div className="px-3 py-2 rounded-xl text-xs" style={{ background: 'rgba(239,68,68,0.1)', color: '#f87171' }}>
+                  {error}
+                </div>
+              )}
+
+              <button type="submit" disabled={loading}
+                className="w-full flex items-center justify-center gap-2 py-3 rounded-xl font-medium text-sm transition-all disabled:opacity-50"
+                style={{ background: 'rgba(45,138,107,0.85)', color: '#fff' }}>
+                {loading ? 'Hesap oluşturuluyor…' : <><span>Hesap Oluştur</span><ArrowRight size={16} /></>}
+              </button>
+
+              <p className="text-center text-xs" style={{ color: 'var(--text-3)' }}>
+                Zaten hesabınız var mı?{' '}
+                <Link to="/app/login" style={{ color: 'var(--forest)' }}>Giriş Yap</Link>
+              </p>
+            </form>
+          )}
+        </div>
       </div>
     </div>
   )

@@ -1034,11 +1034,21 @@ Spec'in eski halini mevcut mimariye uyarlandı (çok-provider sistem korundu).
 
 ## YFZ 22-30 Geliştirme Yol Haritası
 
-### YFZ 22 — Entity AI Agent Pipeline
-- src/engine/ai/entity-agent.ts: Destek (E-2.1.1→2.1.2→2.1.3), Satış (E-2.2.1→2.2.2), Genel (E-3 direkt)
-- src/engine/ai/escalation-manager.ts: Escalation, ticket oluşturma, KB onay kuyruğu
-- DB: support_sessions, kb_approval_queue tabloları
-- Endpoint'ler: POST /entity-ai/chat, GET /entity-ai/session, POST /entity-ai/escalate, KB onay queue
+### YFZ 22 — Entity AI Agent Pipeline ✅ Tamamlandı
+
+**Tamamlanan (2026-06-16):**
+- [x] `src/engine/ai/entity-agent.ts`: Tam pipeline — E-1 intent_analysis → E-2.1.x support (problem/solution/generator) / E-2.2.x sales (intent/conversation) → E-3 master_conversation
+- [x] `src/engine/ai/escalation-manager.ts`: İnsan yönlendirme — düşük güven (<40) veya kullanıcı talebi → ticket oluşturma + agent atama
+- [x] `src/api/routes/entity-ai.ts`: POST /entity-ai/chat, GET /entity-ai/session, POST /entity-ai/escalate
+- [x] `src/server.ts`: /api/v1/entity-ai prefix ile kayıtlı
+- [x] Pipeline logs: ai_pipeline_logs tablosuna her E-2.x adımı kaydedilir
+- [x] TypeScript ✓, Frontend build ✓, API çalışır durumda
+- [x] Migration fix: 0004 Drizzle tablosuna hash eklendi, API boot loop çözüldü
+
+**Yapılmadı (sonraki iterasyon):**
+- kb_approval_queue tablosu (KB onay kuyruğu)
+- support_sessions (ai_sessions tablosu yeniden kullanıldı)
+
 - Bağımlılık: YFZ 19-21 ✓
 
 ### YFZ 23 — KIBI AI Agent Pipeline

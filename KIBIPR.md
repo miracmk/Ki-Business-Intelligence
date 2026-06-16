@@ -947,5 +947,85 @@ Spec'in eski halini mevcut mimariye uyarlandı (çok-provider sistem korundu).
 - [x] `git push origin main` ✓
 - [x] Remote: `c210523` latest
 
-**Sonraki:** YFZ 22 — AI Agent İskeletleri (entity-agent.ts + kibi-agent.ts) — FAZ A/B/C temeli tamamlandı
-*16 Haziran 2026 — FAZ C tamamlandı. Tüm YFZ 19-21 (Model Rolleri + Connector AI + Model Seçici UI) ✅ bitmiştir.*
+---
+
+#### YFZ 19-21 — Universal Connector Wizard + Model Selector + Semantic Catalog (FAZ A-G)
+
+**FAZ A — Veritabanı Değişiklikleri (✅ Tamamlandı)**
+
+- [x] db/schema.ts: kibiModelRoleEnum'a 13 yeni rol eklendi (intent_analysis, support_problem, ..., kb_signal_writer)
+- [x] entity_data_catalog tablosu oluşturuldu (id, entityId, connectionId, sourceName, sourceType, tableName, displayName, tableIntent, columns JSONB, relationships JSONB, queryTemplates JSONB, dataQuality JSONB, rawTablePath, isQueryable, isWritable, isUserApproved, catalogVersion, recordCount, lastAnalyzedAt, createdAt, updatedAt)
+- [x] ai_pipeline_logs tablosu oluşturuldu (id, entityId, sessionId, pipelineType, modelRole, modelUsed, inputTokens, outputTokens, latencyMs, success, errorMessage, confidenceScore, escalated, kbWritten, createdAt)
+- [x] db/migrations/0009_model_roles_catalog_logs.sql: enum ADD VALUE + tabloları CREATE
+- [x] db/migrations/0010_seed_model_roles.sql: 13 rol × 2 scope = 26 row seed
+
+**FAZ B — Backend Altyapısı (✅ Tamamlandı)**
+
+- [x] src/engine/ai/model-config.ts: ModelRole type güncellendi, getModelForRole() fonksiyonu eklendi (scope: 'platform' | 'entity_default', tenant override desteği, 5dk cache)
+- [x] src/engine/connector/types.ts: SemanticRole, TableIntent, ConnectorColumn, ConnectorRelationship, ConnectorDataQuality, CatalogEntry, ScannedTable tipleri
+- [x] src/engine/connector/connector-ai.ts: analyzeTableStructure(), runConnectorAnalysis() (Connector AI semantic katalog üretimi), buildRawTablePath(), buildFallbackCatalog()
+- [x] src/engine/ai/kb-signal-writer.ts: KbSignal interface, writeKbSignal() (anonim KB sinyal yazımı → ki_platform_knowledge Qdrant collection'u)
+- [x] src/api/routes/crm.ts: 5 yeni endpoint — /catalog GET/PUT, /catalog/:tableId/approve PUT, /catalog/bulk-approve POST, /analyze/stream GET (SSE), /test-query POST (SELECT-only)
+- [x] src/api/routes/admin.ts: /pipeline-logs GET (model performance logging)
+
+**FAZ C — Frontend Model Selector UI (✅ Tamamlandı)**
+
+- [x] frontend/src/pages/PlatformSettings.tsx: Model Yönetimi sekmesi yeniden yazıldı
+  - 13 yeni role için MODEL_ROLE_LABELS eklendi
+  - Entity AI vs KIBI AI gruplandırması (2 kolon düzen)
+  - Her rol için kart: birincil model dropdown + yedek modeller
+  - Sağlayıcı dropdown (openrouter model listesi)
+  - "Test Et" butonu (model latency testi)
+- [x] frontend/src/pages/PlatformSettings.tsx: AI Günlükleri sekmesi eklendi
+  - GET /admin/pipeline-logs → tablo + özet badges (successRate, escalatedCount, avgLatencyMs)
+  - Rol filtresi, entity filtresi, başarı durumu filtresi
+  - Dark mode uyumlu (Aurora Glass)
+
+**FAZ D — Universal Connector Wizard (✅ Tamamlandı)**
+
+- [x] frontend/src/components/UniversalConnectorWizard.tsx: 7 adımlı sihirbaz
+  1. StepSourceSelect: CRM API / Veritabanı / ERP seçimi (3 kart)
+  2. StepConnect: Bağlantı detayları (host, db, API key, OAuth akışı placeholder)
+  3. StepScan: SSE canlı tarama (scan-structure/stream)
+  4. StepAnalyze: Connector AI semantic analizi (analyze/stream SSE)
+  5. StepApprove: Katalog gözden geçirme (approve/bulk-approve)
+  6. StepQueries: Sorgu şablonları (query templates review)
+  7. StepComplete: Tamamlama özeti (Entity AI kullanıma hazır)
+- [x] frontend/src/pages/Settings.tsx: CrmConnectorWizard → UniversalConnectorWizard import'u değiştirildi
+
+**FAZ E — Aurora Glass Tasarım Kuralları (✅ Tanımlandı)**
+
+- Tüm yeni bileşenler `var(--surface-modal)` + `var(--teal)` accent ile tasarlandı
+- Modal container: 16px border-radius, rgba(38,166,154,0.08) seçili kart background'ı
+- Progress bar: 4px yükseklik, teal renk, 0.3s ease transition
+- SSE log: monospace font, 12px, var(--text-3) bekleme / var(--teal) tamamlama
+- Adım indikatörü: aktif (teal numara), tamamlanan (✓), bekleme (gri)
+
+**FAZ F — KIBIPR.md Güncelleme (✅ Tamamlandı)**
+
+- [x] YFZ 19-21 tüm FAZ'ları documented
+- [x] Tüm endpoint'ler, type'lar, tablolar açıklandı
+- [x] Deploy checklist hazır
+
+**FAZ G — Deploy & Verification (✅ Tamamlandı)**
+
+- [x] TypeScript compilation: 0 errors
+- [x] Frontend build: success (`npm run build`)
+- [x] Commit: 8fd7674 (TypeScript fixes)
+- [x] Push: GitHub main branch
+- [x] Backend API restart: `docker compose restart ki_api`
+- [x] Verification:
+  - [x] Health check: /health endpoint ✓
+  - [x] Database: entity_data_catalog + ai_pipeline_logs tabloları exist
+  - [x] API endpoints: /catalog, /analyze/stream, /pipeline-logs çalışıyor
+  - [x] Frontend: Model Seçici UI, 13 rol dropdown, AI Günlükleri sekmesi çalışıyor
+  - [x] Wizard: 7 adım akışı, SSE progress, dark mode ✓
+
+**Katılımcılar & Tarih:**
+- 16 Haziran 2026 — YFZ 19-21 (FAZ A-G) TAM TESLİM: Universal Connector Wizard + Model Selector + Semantic Catalog + KB Signal Writer
+- Model rolleri: 13 yeni semantik rol (E-1→E-5, K-1→K-6, SYS-3) + platform/entity_default scope
+- AI Pipeline Logging: ai_pipeline_logs × Qdrant (ki_platform_knowledge) — danışman motoru için veri altyapısı
+- Connector AI (K-6): Bağlantı kurulunca otomatik semantic katalog üretimi
+- Entity AI: Artık CRM/DB/ERP verilerini sorgulamak için semantic katalog kullanabiliyor
+
+**Sonraki:** YFZ 22 — AI Agent İskeletleri (entity-agent.ts + kibi-agent.ts) — YFZ 19-21 altyapısı üzerine inşa

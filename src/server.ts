@@ -28,6 +28,7 @@ import { fileRoutes }         from './api/routes/files.js'
 import { notificationRoutes } from './api/routes/notifications.js'
 import { walletRoutes }       from './api/routes/wallet.js'
 import { entityAiRoutes }     from './api/routes/entity-ai.js'
+import { dashboardRoutes }    from './api/routes/dashboard.js'
 import { webhookRoutes }      from './api/webhooks/index.js'
 
 const FRONTEND_DIST = process.env['FRONTEND_DIST'] ?? '/app/frontend/dist'
@@ -104,6 +105,7 @@ await app.register(async (api) => {
   await api.register(notificationRoutes,  { prefix: '/notifications' })
   await api.register(walletRoutes,        { prefix: '/wallet' })
   await api.register(entityAiRoutes,      { prefix: '/entity-ai' })
+  await api.register(dashboardRoutes,     { prefix: '/dashboard' })
 }, { prefix: '/api/v1' })
 
 await app.register(webhookRoutes, { prefix: '/webhooks' })

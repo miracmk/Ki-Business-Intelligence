@@ -60,6 +60,7 @@ export default function Dashboard() {
   const [emailDone,    setEmailDone]    = useState(false)
   const [memberCount,  setMemberCount]  = useState(0)
   const [dismissed,    setDismissed]    = useState(() => localStorage.getItem('ki-onboarding-dismissed') === '1')
+  const [aiStats,      setAiStats]      = useState<any>(null)
 
   // CRM Structure (modüller + field'lar)
   const [crmModuleList, setCrmModuleList] = useState<any[]>([])
@@ -68,6 +69,8 @@ export default function Dashboard() {
   const [expandedMod,   setExpandedMod]   = useState<string | null>(null)
 
   useEffect(() => {
+    api.get('/dashboard/summary').then(r => setAiStats(r.data)).catch(() => {})
+
     Promise.all([
       api.get('/crm/connections'),
       api.get('/support/tickets?status=open'),
@@ -121,7 +124,7 @@ export default function Dashboard() {
         {[
           { label: 'CRM Bağlantıları', value: connections.length, icon: Database },
           { label: 'Açık Destek',      value: tickets.length,     icon: LifeBuoy },
-          { label: 'AI Oturumu',       value: 0,                  icon: MessageSquare },
+          { label: 'AI Konuşma',       value: aiStats?.aiActivity?.monthConversations ?? 0,  icon: MessageSquare },
           { label: 'Depolama',         value: `${usedMB}/${limitMB} MB`, icon: HardDrive },
         ].map((card, i) => (
           <div key={i} className="p-5 rounded-xl" style={{ background: 'var(--surface-2)', border: '1px solid var(--border)' }}>

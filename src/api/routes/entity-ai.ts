@@ -12,7 +12,7 @@ import { db }                       from '../../lib/db.js'
 import {
   aiSessions, kibiEntities, kibiTokenUsage, entityMetrics,
 } from '../../../db/schema.js'
-import { eq, and, sql }             from 'drizzle-orm'
+import { eq, and, sql, desc }       from 'drizzle-orm'
 import { runEntityAgent }           from '../../engine/ai/entity-agent.js'
 import { escalateToHuman, shouldEscalate } from '../../engine/ai/escalation-manager.js'
 
@@ -191,5 +191,45 @@ export const entityAiRoutes: FastifyPluginAsync = async (app) => {
     })
 
     return result
+  })
+
+  // ── GET /entity-ai/kb-queue ────────────────────────────────────────────────
+  app.get('/kb-queue', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user   = req.user as { sub: string; tenantId: string; role?: string }
+    const entity = await resolveEntity(user.tenantId)
+    if (!entity) return reply.status(404).send({ error: 'Entity bulunamadı' })
+
+    const { status = 'pending' } = req.query as { status?: string }
+
+    const rows = await db.execute(
+      `SELECT * FROM kb_approval_queue WHERE entity_id = '${entity.id}' AND status = '${status}' ORDER BY created_at DESC LIMIT 50` as any
+    )
+    return { queue: Array.isArray(rows) ? rows : (rows as any).rows ?? [] }
+  })
+
+  // ── PUT /entity-ai/kb-queue/:id/approve ───────────────────────────────────
+  app.put('/kb-queue/:id/approve', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user   = req.user as { sub: string; tenantId: string }
+    const entity = await resolveEntity(user.tenantId)
+    if (!entity) return reply.status(404).send({ error: 'Entity bulunamadı' })
+
+    const { id } = req.params as { id: string }
+    await db.execute(
+      `UPDATE kb_approval_queue SET status='approved', reviewed_by='${user.sub}', reviewed_at=now() WHERE id='${id}' AND entity_id='${entity.id}'` as any
+    )
+    return { success: true }
+  })
+
+  // ── PUT /entity-ai/kb-queue/:id/reject ────────────────────────────────────
+  app.put('/kb-queue/:id/reject', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user   = req.user as { sub: string; tenantId: string }
+    const entity = await resolveEntity(user.tenantId)
+    if (!entity) return reply.status(404).send({ error: 'Entity bulunamadı' })
+
+    const { id } = req.params as { id: string }
+    await db.execute(
+      `UPDATE kb_approval_queue SET status='rejected', reviewed_by='${user.sub}', reviewed_at=now() WHERE id='${id}' AND entity_id='${entity.id}'` as any
+    )
+    return { success: true }
   })
 }

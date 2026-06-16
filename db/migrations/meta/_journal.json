@@ -29,6 +29,20 @@
       "when": 1779550224203,
       "tag": "0003_rainy_arclight",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1781638347652,
+      "tag": "0004_fast_vision",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1781641400000,
+      "tag": "0011_agent_sessions",
+      "breakpoints": true
     }
   ]
 }

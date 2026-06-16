@@ -1029,3 +1029,77 @@ Spec'in eski halini mevcut mimariye uyarlandı (çok-provider sistem korundu).
 - Entity AI: Artık CRM/DB/ERP verilerini sorgulamak için semantic katalog kullanabiliyor
 
 **Sonraki:** YFZ 22 — AI Agent İskeletleri (entity-agent.ts + kibi-agent.ts) — YFZ 19-21 altyapısı üzerine inşa
+
+---
+
+## YFZ 22-30 Geliştirme Yol Haritası
+
+### YFZ 22 — Entity AI Agent Pipeline
+- src/engine/ai/entity-agent.ts: Destek (E-2.1.1→2.1.2→2.1.3), Satış (E-2.2.1→2.2.2), Genel (E-3 direkt)
+- src/engine/ai/escalation-manager.ts: Escalation, ticket oluşturma, KB onay kuyruğu
+- DB: support_sessions, kb_approval_queue tabloları
+- Endpoint'ler: POST /entity-ai/chat, GET /entity-ai/session, POST /entity-ai/escalate, KB onay queue
+- Bağımlılık: YFZ 19-21 ✓
+
+### YFZ 23 — KIBI AI Agent Pipeline
+- src/engine/ai/kibi-agent.ts: Platform-level chat, danışman pipeline (K-2.3.1→K-2.3.2)
+- Endpoint'ler: POST /kibi-ai/chat, GET /kibi-ai/session
+- Bağımlılık: YFZ 22 ✓
+
+### YFZ 24 — ERP & Muhasebe Modülü
+- Agent tool'ları: stock_query, supplier_balance, customer_balance, invoice_*, accounting_entry_*
+- UI: Muhasebe Dashboard (özet, stok, vadesi geçmiş, hızlı işlemler)
+- Bağımlılık: YFZ 22 ✓
+
+### YFZ 25 — CRM Modülü Tamamlama
+- Agent tool'ları: contact_*, lead_*, deal_*, company_*, activity_log
+- UI: CRM Dashboard (pipeline kanban, kişi/firma listesi, detail view)
+- Bağımlılık: YFZ 22 ✓
+
+### YFZ 26 — Dashboard & Raporlama
+- Entity Dashboard: AI aktivite, CRM özeti, ERP özeti, kanal performansı
+- KIBI Admin Dashboard: Entity özeti, AI kullanım, pipeline logs, KB durumu
+- Endpoint'ler: GET /dashboard/* (tüm metrikleri real-time)
+- Bağımlılık: YFZ 22-25
+
+### YFZ 27 — Plan & Faturalama
+- Plan yapısı: Starter / Professional / Enterprise (mesaj limiti, kanal sayısı, user sayısı)
+- Limit kontrolü: checkPlanLimits() genişletme
+- UI: Plan & Faturalama ayarları (kullanım çubukları, yükseltme, fatura geçmişi)
+- Bağımlılık: YFZ 1-21 ✓
+
+### YFZ 28 — Üretim Hazırlığı & Güvenlik
+- Rate limiting (Redis), SQL injection koruması, KB yazma scope kontrolü
+- Webhook doğrulama (WA, TG, IG), PII temizleme
+- DB index'leri, Redis cache genişletme, Qdrant optimizasyon
+- Sentry/Prometheus entegrasyonu (monitoring)
+- Bağımlılık: Tümü
+
+### YFZ 29 — Entity AI Kanal Yönetimi UI
+- Merkezi kanal yönetim: WA, TG, IG, Email, Portal Chat ayarları
+- Webhook test, mesaj şablonları
+- Bağımlılık: YFZ 22 ✓
+
+### YFZ 30 — KIBI AI KB Yönetim Paneli
+- Admin KB yönetimi: döküman ekleme, sektör/bölge etiketleme
+- KB arama & test, sinyal istatistikleri
+- Bağımlılık: YFZ 23 ✓
+
+### Kritik Yol (MVP)
+```
+YFZ 19-21 ✓ → YFZ 22 → YFZ 23 → YFZ 27 → YFZ 28
+```
+
+### Paralel Yapılabilecekler (YFZ 22 sonrası)
+- YFZ 24 + YFZ 25 (bağımsız modüller)
+- YFZ 27 (altyapıdan bağımsız)
+- YFZ 29 (frontend-only)
+
+### Tahmini Zaman Çizelgesi
+- YFZ 22: 1-2 hafta (entity agent pipeline)
+- YFZ 23: 3-5 gün (KIBI pipeline, YFZ 22'nin çoğu kopyası)
+- YFZ 24-25: Paralel 1.5 hafta (ERP + CRM modülleri)
+- YFZ 26: 1 hafta (dashboard aggregation)
+- YFZ 27-28: Paralel 1 hafta (plan + prod güvenlik)
+- YFZ 29-30: Paralel 5 gün (UI'lar)
+- **TOPLAM: 4-5 hafta → Production Ready**

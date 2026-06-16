@@ -1045,32 +1045,56 @@ Spec'in eski halini mevcut mimariye uyarlandı (çok-provider sistem korundu).
 - [x] TypeScript ✓, Frontend build ✓, API çalışır durumda
 - [x] Migration fix: 0004 Drizzle tablosuna hash eklendi, API boot loop çözüldü
 
-**Yapılmadı (sonraki iterasyon):**
-- kb_approval_queue tablosu (KB onay kuyruğu)
-- support_sessions (ai_sessions tablosu yeniden kullanıldı)
+**YFZ 22 Tüm Tamamlananlar (güncel):**
+- [x] `src/engine/ai/types/entity-agent.types.ts`: Tam tip tanımları (IntentResult, SupportProblem, Sales, Master)
+- [x] `src/engine/ai/pipeline-logger.ts`: Ayrı pipeline logger modülü
+- [x] `db/migrations/0011_agent_sessions.sql`: kb_approval_queue, support_sessions, sales_sessions tabloları
+- [x] `entity-ai route`: KB Queue CRUD (GET /kb-queue, PUT approve/reject)
+- [x] `frontend/src/components/KbApprovalQueue.tsx`: Supervisor onay UI
 
 - Bağımlılık: YFZ 19-21 ✓
 
-### YFZ 23 — KIBI AI Agent Pipeline
-- src/engine/ai/kibi-agent.ts: Platform-level chat, danışman pipeline (K-2.3.1→K-2.3.2)
-- Endpoint'ler: POST /kibi-ai/chat, GET /kibi-ai/session
+### YFZ 23 — KIBI AI Agent Pipeline ✅ Tamamlandı
+
+**Tamamlanan (2026-06-16):**
+- [x] `src/engine/ai/kibi-agent.ts`: K-1 intent → K-2.1 support / K-2.2 sales / K-2.3 consulting (K-2.3.1 + K-2.3.2) → K-3 master
+- [x] `src/engine/ai/types/kibi-agent.types.ts`: ConsultingIntentResult, ConsultingRecommendationResult
+- [x] platform scope + ki_platform_knowledge KB koleksiyonu
 - Bağımlılık: YFZ 22 ✓
 
-### YFZ 24 — ERP & Muhasebe Modülü
-- Agent tool'ları: stock_query, supplier_balance, customer_balance, invoice_*, accounting_entry_*
-- UI: Muhasebe Dashboard (özet, stok, vadesi geçmiş, hızlı işlemler)
+**Eksik (sonraki iterasyon):**
+- POST /kibi-ai/chat route (mevcut /ai/chat korunuyor)
+
+### YFZ 24 — ERP & Muhasebe Modülü ✅ (Engine + Tools tamamlandı)
+
+**Tamamlanan (2026-06-16):**
+- [x] `src/engine/ai/entity-db-engine.ts`: Doğal dil → SELECT/INSERT/UPDATE (semantic catalog üzerinden)
+- [x] `src/engine/ai/tools/erp-tools.ts`: stock_query, low_stock_report, supplier_balance, customer_balance, invoice_query, accounting_summary
+
+**Eksik:**
+- Accounting UI (mevcut Accounting.tsx güncelleme)
 - Bağımlılık: YFZ 22 ✓
 
-### YFZ 25 — CRM Modülü Tamamlama
-- Agent tool'ları: contact_*, lead_*, deal_*, company_*, activity_log
-- UI: CRM Dashboard (pipeline kanban, kişi/firma listesi, detail view)
+### YFZ 25 — CRM Modülü Tamamlama ✅ (Tools tamamlandı)
+
+**Tamamlanan (2026-06-16):**
+- [x] `src/engine/ai/tools/crm-tools.ts`: contact_*, lead_*, deal_*, company_*, activity_log, pipeline_summary
+
+**Eksik:**
+- CRM Kanban UI (mevcut Modules.tsx güncelleme)
 - Bağımlılık: YFZ 22 ✓
 
-### YFZ 26 — Dashboard & Raporlama
-- Entity Dashboard: AI aktivite, CRM özeti, ERP özeti, kanal performansı
-- KIBI Admin Dashboard: Entity özeti, AI kullanım, pipeline logs, KB durumu
-- Endpoint'ler: GET /dashboard/* (tüm metrikleri real-time)
-- Bağımlılık: YFZ 22-25
+### YFZ 26 — Dashboard & Raporlama ✅ (API tamamlandı)
+
+**Tamamlanan (2026-06-16):**
+- [x] `src/api/routes/dashboard.ts`: GET /dashboard/summary (entity), /admin (platform), /pipeline-logs
+- [x] `Dashboard.tsx`: AI konuşma sayısı gerçek veri ile beslendi (aiStats hook)
+- [x] Redis cache 5dk, drizzle query optimize
+
+**Eksik:**
+- Intent dağılımı pie chart
+- Ticket listesi dashboard widget'ında göster
+- Bağımlılık: YFZ 22-25 ✓
 
 ### YFZ 27 — Plan & Faturalama
 - Plan yapısı: Starter / Professional / Enterprise (mesaj limiti, kanal sayısı, user sayısı)

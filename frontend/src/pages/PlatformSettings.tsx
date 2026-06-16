@@ -215,6 +215,7 @@ const COMM_CHANNELS: { id: string; label: string; color: string; emoji: string; 
 ]
 
 const MODEL_ROLE_LABELS: Record<string, string> = {
+  // Eski roller (geriye dönük uyumluluk)
   conversation:      'Konuşma Modeli',
   db_search:         'DB Arama',
   qdrant_search:     'Vektör Arama',
@@ -224,6 +225,88 @@ const MODEL_ROLE_LABELS: Record<string, string> = {
   support_refine:    'Destek Geliştirme',
   support_resolver:  'Destek Çözüm',
   support_answering: 'Destek Yanıt',
+  // 13 yeni semantik roller (YFZ 19-21)
+  intent_analysis:            'Niyet & Ruh Hali Analizörü',
+  support_problem:            'Destek Sorun Analizörü',
+  support_solution:           'Destek Çözüm Analizörü',
+  support_generator:          'Destek Çözüm Üreticisi',
+  sales_intent:               'Satış Niyet & Ruh Hali',
+  sales_conversation:         'Satış Konuşma Motoru',
+  consulting_intent:          'Danışman Niyet Analizörü',
+  consulting_recommendation:  'Danışman Öneri Motoru',
+  master_conversation:        'Master AI Motoru',
+  db_query:                   'DB Sorgu Motoru',
+  kb_vector:                  'KB Embedding Motoru',
+  connector:                  'Connector AI',
+  kb_signal_writer:           'KB Sinyal Yazıcı',
+}
+
+const ROLE_DESCRIPTIONS: Record<string, { code: string; scope: 'entity' | 'kibi' | 'both'; speedNeed: string }> = {
+  intent_analysis: {
+    code: 'E-1 / K-1',
+    scope: 'both',
+    speedNeed: 'Hız kritik — hafif model önerilir',
+  },
+  support_problem: {
+    code: 'E-2.1.1 / K-2.1.1',
+    scope: 'both',
+    speedNeed: 'Hız kritik — hafif model önerilir',
+  },
+  support_solution: {
+    code: 'E-2.1.2 / K-2.1.2',
+    scope: 'both',
+    speedNeed: 'Orta güç yeterli',
+  },
+  support_generator: {
+    code: 'E-2.1.3 / K-2.1.3',
+    scope: 'both',
+    speedNeed: 'Güçlü model önerilir',
+  },
+  sales_intent: {
+    code: 'E-2.2.1 / K-2.2.1',
+    scope: 'both',
+    speedNeed: 'Hız kritik — hafif model önerilir',
+  },
+  sales_conversation: {
+    code: 'E-2.2.2 / K-2.2.2',
+    scope: 'both',
+    speedNeed: 'Orta güç yeterli',
+  },
+  consulting_intent: {
+    code: 'K-2.3.1',
+    scope: 'kibi',
+    speedNeed: 'Hafif model yeterli',
+  },
+  consulting_recommendation: {
+    code: 'K-2.3.2',
+    scope: 'kibi',
+    speedNeed: 'Güçlü model önerilir',
+  },
+  master_conversation: {
+    code: 'E-3 / K-3',
+    scope: 'both',
+    speedNeed: 'Orta güç yeterli',
+  },
+  db_query: {
+    code: 'E-4 / K-4',
+    scope: 'both',
+    speedNeed: 'Güçlü model — SQL reasoning gerektiriyor',
+  },
+  kb_vector: {
+    code: 'E-5 / K-5',
+    scope: 'both',
+    speedNeed: 'Embedding modeli — LLM seçme',
+  },
+  connector: {
+    code: 'K-6',
+    scope: 'kibi',
+    speedNeed: 'Güçlü model önerilir',
+  },
+  kb_signal_writer: {
+    code: 'SYS-3',
+    scope: 'kibi',
+    speedNeed: 'Hafif model yeterli',
+  },
 }
 
 const TABS = [
@@ -233,6 +316,7 @@ const TABS = [
   { id: 'comms',      label: 'İletişim',     icon: MessageSquare },
   { id: 'database',   label: 'Veritabanı',   icon: HardDrive     },
   { id: 'ai',         label: 'AI Modelleri', icon: Brain         },
+  { id: 'logs',       label: 'AI Günlükleri', icon: BarChart3    },
 ]
 
 // ─── AI Provider Panel types ──────────────────────────────────────────────────
@@ -740,6 +824,117 @@ function PlatformVectorPanel({ isAdmin, showToast }: { isAdmin: boolean; showToa
               ))}
             </div>
       }
+    </div>
+  )
+}
+
+// ─── AI Logs Tab ─────────────────────────────────────────────────────────────
+function AiLogsTab({ isAdmin }: { isAdmin: boolean }) {
+  const [logs, setLogs] = useState<any[]>([])
+  const [summary, setSummary] = useState<any>(null)
+  const [loading, setLoading] = useState(true)
+  const [filterRole, setFilterRole] = useState<string>('')
+
+  useEffect(() => {
+    fetchLogs()
+  }, [filterRole])
+
+  const fetchLogs = async () => {
+    try {
+      const url = `/admin/pipeline-logs${filterRole ? `?modelRole=${filterRole}&limit=100` : '?limit=100'}`
+      const res = await api.get(url)
+      setLogs(res.data.logs ?? [])
+      setSummary(res.data.summary)
+    } catch (e) {
+      console.error('Failed to fetch logs:', e)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <div className="space-y-4">
+      {/* Summary badges */}
+      <div className="grid sm:grid-cols-4 gap-3">
+        {summary && [
+          { label: 'Toplam', value: summary.total, color: 'var(--text-2)' },
+          { label: 'Başarı', value: `${summary.successRate}%`, color: '#10b981' },
+          { label: 'Escalation', value: summary.escalatedCount, color: '#ef4444' },
+          { label: 'Avg Latency', value: `${summary.avgLatencyMs}ms`, color: 'var(--teal)' },
+        ].map(stat => (
+          <div key={stat.label} className="rounded-lg p-4" style={{ background: 'var(--surface)', border: '1px solid var(--border)' }}>
+            <div style={{ color: 'var(--text-3)', fontSize: '0.875rem' }}>{stat.label}</div>
+            <div style={{ color: stat.color, fontSize: '1.5rem', fontWeight: 'bold' }} className="mt-1">{stat.value}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Filtre & Tablo */}
+      <div className="rounded-lg p-4" style={{ background: 'var(--surface)', border: '1px solid var(--border)' }}>
+        <div className="mb-4">
+          <label style={{ color: 'var(--text-2)', fontSize: '0.875rem' }} className="block mb-2">Rol Filtresi</label>
+          <select
+            value={filterRole}
+            onChange={e => setFilterRole(e.target.value)}
+            className="w-full px-3 py-2 rounded-lg text-sm"
+            style={{ background: 'var(--surface-modal-2)', color: 'var(--text-1)', border: '1px solid rgba(255,255,255,0.08)' }}
+          >
+            <option value="">Tüm Roller</option>
+            {Object.entries(MODEL_ROLE_LABELS).map(([role, label]) => (
+              <option key={role} value={role}>{label}</option>
+            ))}
+          </select>
+        </div>
+
+        {loading ? (
+          <div style={{ color: 'var(--text-3)', textAlign: 'center', padding: '2rem' }}>Yükleniyor...</div>
+        ) : logs.length === 0 ? (
+          <div style={{ color: 'var(--text-3)', textAlign: 'center', padding: '2rem' }}>Kayıt bulunamadı</div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr style={{ borderBottom: '1px solid var(--border)' }}>
+                  <th style={{ color: 'var(--text-2)', textAlign: 'left', padding: '0.5rem' }}>Tarih</th>
+                  <th style={{ color: 'var(--text-2)', textAlign: 'left', padding: '0.5rem' }}>Rol</th>
+                  <th style={{ color: 'var(--text-2)', textAlign: 'left', padding: '0.5rem' }}>Model</th>
+                  <th style={{ color: 'var(--text-2)', textAlign: 'left', padding: '0.5rem' }}>Latency</th>
+                  <th style={{ color: 'var(--text-2)', textAlign: 'left', padding: '0.5rem' }}>Sonuç</th>
+                </tr>
+              </thead>
+              <tbody>
+                {logs.map((log, i) => (
+                  <tr key={i} style={{ borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
+                    <td style={{ color: 'var(--text-2)', padding: '0.75rem 0.5rem' }}>
+                      {new Date(log.createdAt).toLocaleString('tr')}
+                    </td>
+                    <td style={{ color: 'var(--text-2)', padding: '0.75rem 0.5rem' }}>
+                      {MODEL_ROLE_LABELS[log.modelRole] || log.modelRole}
+                    </td>
+                    <td style={{ color: 'var(--text-3)', padding: '0.75rem 0.5rem', fontSize: '0.8rem' }}>
+                      {log.modelUsed || '—'}
+                    </td>
+                    <td style={{ color: 'var(--text-2)', padding: '0.75rem 0.5rem' }}>
+                      {log.latencyMs ? `${log.latencyMs}ms` : '—'}
+                    </td>
+                    <td style={{ padding: '0.75rem 0.5rem' }}>
+                      <span
+                        className="px-2 py-1 rounded text-xs"
+                        style={{
+                          background: log.success ? 'rgba(16,185,129,0.1)' : 'rgba(239,68,68,0.1)',
+                          color: log.success ? '#10b981' : '#ef4444',
+                        }}
+                      >
+                        {log.success ? '✓ Başarı' : '✗ Hata'}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
     </div>
   )
 }
@@ -1323,6 +1518,11 @@ export default function PlatformSettings() {
       {/* ── AI Modelleri Tab ── */}
       {!loading && tab === 'ai' && (
         <AiModelsTab isAdmin={isAdmin} showToast={showToast} />
+      )}
+
+      {/* ── AI Günlükleri Tab ── */}
+      {!loading && tab === 'logs' && (
+        <AiLogsTab isAdmin={isAdmin} />
       )}
 
       {/* Comm Config Modal */}

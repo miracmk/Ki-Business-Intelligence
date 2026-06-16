@@ -22,6 +22,19 @@ type ModelRole =
   | 'support_refine'
   | 'support_resolver'
   | 'support_answering'
+  | 'intent_analysis'
+  | 'support_problem'
+  | 'support_solution'
+  | 'support_generator'
+  | 'sales_intent'
+  | 'sales_conversation'
+  | 'consulting_intent'
+  | 'consulting_recommendation'
+  | 'master_conversation'
+  | 'db_query'
+  | 'kb_vector'
+  | 'connector'
+  | 'kb_signal_writer'
 
 const CACHE_TTL_MS = 5 * 60 * 1000
 const cache = new Map<string, { models: string[]; ts: number }>()
@@ -73,6 +86,59 @@ export async function getPlatformModels(
 export const getAnalysisModels     = () => getPlatformModels('db_search',    ANALYSIS_MODELS)
 export const getConversationModels = () => getPlatformModels('conversation',  CONVERSATION_MODELS)
 export const getIntentModels       = () => getPlatformModels('intent',        ANALYSIS_MODELS)
+
+/**
+ * Get model(s) for a given role in a specific scope.
+ * Returns { primary, fallbacks } suitable for completeWithFallback.
+ *
+ * Lookup order:
+ * 1. Entity override (if tenantId + ai_configs.settings.modelOverrides[role])
+ * 2. kibi_model_configs (scope + role) with 5min cache
+ * 3. Hardcoded fallback (ANALYSIS_MODELS / CONVERSATION_MODELS)
+ */
+export async function getModelForRole(
+  role: ModelRole,
+  scope: 'platform' | 'entity_free',
+  tenantId?: string,
+): Promise<{ primary: string; fallbacks: string[] }> {
+  const dbScope = scope === 'platform' ? 'platform' : 'entity_free'
+
+  // Step 1: Check entity override
+  if (tenantId) {
+    try {
+      const entity = await db.query.aiConfigs.findFirst({
+        where: (t, { eq }) => eq(t.tenantId, tenantId as any),
+        columns: { settings: true },
+      })
+      if (entity?.settings) {
+        const settings = entity.settings as any
+        const override = settings.modelOverrides?.[role]
+        if (override) {
+          const primary = typeof override === 'string' ? override : override.primary
+          const fallbacks = Array.isArray(override) ? override : (override.fallbacks ?? [])
+          return { primary, fallbacks }
+        }
+      }
+    } catch (e) {
+      console.warn(`[MODEL-CONFIG] Entity override lookup failed for ${role}:`, (e as Error).message)
+    }
+  }
+
+  // Step 2: DB config with cache
+  try {
+    const row = await getPlatformModels(role, CONVERSATION_MODELS)
+    const fallbacks = row.slice(1)
+    return { primary: row[0], fallbacks }
+  } catch (e) {
+    console.warn(`[MODEL-CONFIG] Config lookup failed for ${role}:`, (e as Error).message)
+  }
+
+  // Step 3: Hardcoded fallback
+  const defaults = (role.includes('db_') || role.includes('search') || role === 'intent' || role === 'db_query')
+    ? ANALYSIS_MODELS
+    : CONVERSATION_MODELS
+  return { primary: defaults[0], fallbacks: defaults.slice(1) as string[] }
+}
 
 /**
  * Seed default platform model configs if none exist.
@@ -143,6 +209,98 @@ export async function seedDefaultModelConfigs(): Promise<number> {
       fallback2:    CONVERSATION_MODELS[2] ?? '',
       fallback3:    null,
     },
+    // 13 new semantic roles (YFZ 19-21 / FAZ A)
+    {
+      modelRole:    'intent_analysis',
+      primaryModel: `openrouter::${ANALYSIS_MODELS[1]}`,
+      fallback1:    `openrouter::${ANALYSIS_MODELS[0]}`,
+      fallback2:    `openrouter::${ANALYSIS_MODELS[2]}`,
+      fallback3:    null,
+    },
+    {
+      modelRole:    'support_problem',
+      primaryModel: `openrouter::${ANALYSIS_MODELS[1]}`,
+      fallback1:    `openrouter::${ANALYSIS_MODELS[0]}`,
+      fallback2:    `openrouter::${ANALYSIS_MODELS[2]}`,
+      fallback3:    null,
+    },
+    {
+      modelRole:    'support_solution',
+      primaryModel: `openrouter::${ANALYSIS_MODELS[0]}`,
+      fallback1:    `openrouter::${CONVERSATION_MODELS[0]}`,
+      fallback2:    `openrouter::${ANALYSIS_MODELS[1]}`,
+      fallback3:    null,
+    },
+    {
+      modelRole:    'support_generator',
+      primaryModel: `openrouter::${ANALYSIS_MODELS[0]}`,
+      fallback1:    `openrouter::${CONVERSATION_MODELS[0]}`,
+      fallback2:    `openrouter::${ANALYSIS_MODELS[1]}`,
+      fallback3:    null,
+    },
+    {
+      modelRole:    'sales_intent',
+      primaryModel: `openrouter::${ANALYSIS_MODELS[1]}`,
+      fallback1:    `openrouter::${ANALYSIS_MODELS[0]}`,
+      fallback2:    `openrouter::${ANALYSIS_MODELS[2]}`,
+      fallback3:    null,
+    },
+    {
+      modelRole:    'sales_conversation',
+      primaryModel: `openrouter::${CONVERSATION_MODELS[0]}`,
+      fallback1:    `openrouter::${CONVERSATION_MODELS[1]}`,
+      fallback2:    `openrouter::${CONVERSATION_MODELS[2]}`,
+      fallback3:    null,
+    },
+    {
+      modelRole:    'consulting_intent',
+      primaryModel: `openrouter::${ANALYSIS_MODELS[1]}`,
+      fallback1:    `openrouter::${ANALYSIS_MODELS[0]}`,
+      fallback2:    `openrouter::${ANALYSIS_MODELS[2]}`,
+      fallback3:    null,
+    },
+    {
+      modelRole:    'consulting_recommendation',
+      primaryModel: `openrouter::${ANALYSIS_MODELS[0]}`,
+      fallback1:    `openrouter::${CONVERSATION_MODELS[0]}`,
+      fallback2:    `openrouter::${ANALYSIS_MODELS[1]}`,
+      fallback3:    null,
+    },
+    {
+      modelRole:    'master_conversation',
+      primaryModel: `openrouter::${CONVERSATION_MODELS[0]}`,
+      fallback1:    `openrouter::${CONVERSATION_MODELS[1]}`,
+      fallback2:    `openrouter::${CONVERSATION_MODELS[2]}`,
+      fallback3:    null,
+    },
+    {
+      modelRole:    'db_query',
+      primaryModel: `openrouter::${ANALYSIS_MODELS[0]}`,
+      fallback1:    `openrouter::${ANALYSIS_MODELS[1]}`,
+      fallback2:    `openrouter::${ANALYSIS_MODELS[2]}`,
+      fallback3:    null,
+    },
+    {
+      modelRole:    'kb_vector',
+      primaryModel: 'huggingface::BAAI/bge-m3',
+      fallback1:    'huggingface::sentence-transformers/all-MiniLM-L6-v2',
+      fallback2:    '',
+      fallback3:    null,
+    },
+    {
+      modelRole:    'connector',
+      primaryModel: `openrouter::${ANALYSIS_MODELS[0]}`,
+      fallback1:    `openrouter::${ANALYSIS_MODELS[1]}`,
+      fallback2:    `openrouter::${ANALYSIS_MODELS[2]}`,
+      fallback3:    null,
+    },
+    {
+      modelRole:    'kb_signal_writer',
+      primaryModel: `openrouter::${ANALYSIS_MODELS[1]}`,
+      fallback1:    `openrouter::${ANALYSIS_MODELS[0]}`,
+      fallback2:    '',
+      fallback3:    null,
+    },
   ]
 
   let seeded = 0
@@ -152,6 +310,11 @@ export async function seedDefaultModelConfigs(): Promise<number> {
         and(eq(t.scope, 'platform'), eq(t.modelRole, d.modelRole as any)),
     })
     if (!existing) {
+      // Extract provider from model string if format is "provider::model"
+      const primaryProvider = d.primaryModel.includes('::')
+        ? d.primaryModel.split('::')[0]
+        : 'openrouter'
+
       await db.insert(kibiModelConfigs).values({
         scope:        'platform',
         modelRole:    d.modelRole as any,
@@ -159,7 +322,7 @@ export async function seedDefaultModelConfigs(): Promise<number> {
         fallback1:    d.fallback1 || null,
         fallback2:    d.fallback2 || null,
         fallback3:    d.fallback3,
-        provider:     'openrouter',
+        provider:     primaryProvider,
         isActive:     true,
         updatedAt:    new Date(),
       })

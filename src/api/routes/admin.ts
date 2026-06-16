@@ -2,7 +2,7 @@ import type { FastifyPluginAsync } from 'fastify'
 import { z } from 'zod'
 import { db } from '../../lib/db.js'
 import { sql, eq, and, desc, asc } from 'drizzle-orm'
-import { tenants, kibiEntities, kibiTokenUsage, kibiSupportTickets, kibiModelConfigs, kibiInternalUsers, users, platformMetrics, crmConnections, platformConfigs, platformVectorDocs } from '../../../db/schema.js'
+import { tenants, kibiEntities, kibiTokenUsage, kibiSupportTickets, kibiModelConfigs, kibiInternalUsers, users, platformMetrics, crmConnections, platformConfigs, platformVectorDocs, aiPipelineLogs } from '../../../db/schema.js'
 import { learnFromTicket } from '../../engine/kibi/support-pipeline.js'
 import { encrypt, decrypt } from '../../lib/crypto.js'
 import { invalidateModelCache, seedDefaultModelConfigs } from '../../engine/ai/model-config.js'
@@ -675,5 +675,44 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
     }
 
     return reply.send({ ok: true, indexed, total: docs.length })
+  })
+
+  // GET /admin/pipeline-logs — AI pipeline kayıtları (filtreleme ile)
+  app.get('/pipeline-logs', async (req, reply) => {
+    const { role, entityId, modelRole, success, limit } = req.query as {
+      role?: string
+      entityId?: string
+      modelRole?: string
+      success?: string
+      limit?: string
+    }
+
+    const filters: any[] = []
+    if (modelRole) filters.push(eq(aiPipelineLogs.modelRole, modelRole))
+    if (entityId) filters.push(eq(aiPipelineLogs.entityId, entityId as any))
+    if (success !== undefined) filters.push(eq(aiPipelineLogs.success, success === 'true'))
+
+    const whereClause = filters.length > 0 ? and(...filters) : undefined
+    const logs = await db.query.aiPipelineLogs.findMany({
+      where: whereClause,
+      orderBy: desc(aiPipelineLogs.createdAt),
+      limit: Math.min(parseInt(limit ?? '100'), 1000),
+    })
+
+    // Özet istatistikler
+    const total = logs.length
+    const succeeded = logs.filter(l => l.success).length
+    const escalated = logs.filter(l => l.escalated).length
+    const avgLatency = logs.reduce((sum, l) => sum + (l.latencyMs ?? 0), 0) / (total || 1)
+
+    return reply.send({
+      logs,
+      summary: {
+        total,
+        successRate: Math.round((succeeded / total) * 100),
+        escalatedCount: escalated,
+        avgLatencyMs: Math.round(avgLatency),
+      },
+    })
   })
 }

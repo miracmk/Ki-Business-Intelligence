@@ -254,6 +254,9 @@ export const kibiInternalUsers = pgTable('kibi_internal_users', {
 export const kibiModelRoleEnum = pgEnum('kibi_model_role', [
   'conversation', 'db_search', 'qdrant_search', 'redis_search',
   'intent', 'support_intent', 'support_refine', 'support_resolver', 'support_answering',
+  'intent_analysis', 'support_problem', 'support_solution', 'support_generator',
+  'sales_intent', 'sales_conversation', 'consulting_intent', 'consulting_recommendation',
+  'master_conversation', 'db_query', 'kb_vector', 'connector', 'kb_signal_writer',
 ])
 
 export const kibiTokenUsage = pgTable('kibi_token_usage', {
@@ -287,6 +290,48 @@ export const kibiModelConfigs = pgTable('kibi_model_configs', {
   isActive:              boolean('is_active').notNull().default(true),
   updatedBy:             uuid('updated_by'),
   updatedAt:             timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+})
+
+export const entityDataCatalog = pgTable('entity_data_catalog', {
+  id:             uuid('id').primaryKey().defaultRandom(),
+  entityId:       uuid('entity_id').notNull(),
+  connectionId:   uuid('connection_id').notNull(),
+  sourceName:     varchar('source_name', { length: 100 }).notNull(),
+  sourceType:     varchar('source_type', { length: 50 }).notNull(),
+  tableName:      varchar('table_name', { length: 200 }).notNull(),
+  displayName:    varchar('display_name', { length: 200 }),
+  tableIntent:    varchar('table_intent', { length: 100 }),
+  columns:        jsonb('columns'),
+  relationships:  jsonb('relationships'),
+  queryTemplates: jsonb('query_templates'),
+  dataQuality:    jsonb('data_quality'),
+  rawTablePath:   varchar('raw_table_path', { length: 300 }),
+  isQueryable:    boolean('is_queryable').notNull().default(true),
+  isWritable:     boolean('is_writable').notNull().default(false),
+  isUserApproved: boolean('is_user_approved').notNull().default(false),
+  catalogVersion: integer('catalog_version').notNull().default(1),
+  recordCount:    integer('record_count').notNull().default(0),
+  lastAnalyzedAt: timestamp('last_analyzed_at', { withTimezone: true }),
+  createdAt:      timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt:      timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+})
+
+export const aiPipelineLogs = pgTable('ai_pipeline_logs', {
+  id:              uuid('id').primaryKey().defaultRandom(),
+  entityId:        uuid('entity_id'),
+  sessionId:       varchar('session_id', { length: 200 }),
+  pipelineType:    varchar('pipeline_type', { length: 20 }).notNull(),
+  modelRole:       varchar('model_role', { length: 50 }).notNull(),
+  modelUsed:       varchar('model_used', { length: 100 }),
+  inputTokens:     integer('input_tokens'),
+  outputTokens:    integer('output_tokens'),
+  latencyMs:       integer('latency_ms'),
+  success:         boolean('success').notNull().default(true),
+  errorMessage:    text('error_message'),
+  confidenceScore: integer('confidence_score'),
+  escalated:       boolean('escalated').notNull().default(false),
+  kbWritten:       boolean('kb_written').notNull().default(false),
+  createdAt:       timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 })
 
 export const kibiSupportTicketStatusEnum = pgEnum('kibi_support_ticket_status', [

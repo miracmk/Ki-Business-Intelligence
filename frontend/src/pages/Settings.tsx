@@ -7,7 +7,7 @@ import {
 } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import api from '../lib/api'
-import CrmConnectorWizard from '../components/CrmConnectorWizard'
+import { UniversalConnectorWizard } from '../components/UniversalConnectorWizard'
 
 // ─── Channel schemas (based on official API docs) ─────────────────────────────
 
@@ -3037,11 +3037,10 @@ export default function Settings() {
           </div>
         </div>
       )}
-      {/* CRM Connector Wizard */}
+      {/* Universal Connector Wizard */}
       {showCrmWizard && (
-        <CrmConnectorWizard
-          onClose={() => setShowCrmWizard(false)}
-          onDone={() => { setShowCrmWizard(false); loadData() }}
+        <UniversalConnectorWizard
+          onClose={() => { setShowCrmWizard(false); loadData() }}
         />
       )}
     </div>

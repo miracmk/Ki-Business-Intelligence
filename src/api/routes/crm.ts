@@ -2,13 +2,14 @@ import type { FastifyPluginAsync } from 'fastify'
 import { z } from 'zod'
 import { db } from '../../lib/db.js'
 import { redis } from '../../lib/redis.js'
-import { crmConnections, crmBulkJobs, crmSyncState, crmRecords, crmModules, crmFields, kibiEntities, kibiEntityUsers } from '../../../db/schema.js'
+import { crmConnections, crmBulkJobs, crmSyncState, crmRecords, crmModules, crmFields, kibiEntities, kibiEntityUsers, entityDataCatalog, aiPipelineLogs } from '../../../db/schema.js'
 import { encryptJson, decryptJson } from '../../lib/crypto.js'
 import { createAdapter } from '../../adapters/index.js'
 import { runMetadataSync } from '../../engine/crm-sync/metadata-sync.js'
 import { startBulkSync } from '../../engine/crm-sync/bulk-sync.js'
 import { setupNotifications } from '../../engine/crm-sync/notification.js'
 import { runEntityEtl } from '../../engine/crm-sync/entity-etl.js'
+import { runConnectorAnalysis } from '../../engine/connector/connector-ai.js'
 import { PostgreSqlAdapter } from '../../adapters/postgresql.js'
 import { eq, and, asc, sql } from 'drizzle-orm'
 import { env } from '../../../config/env.js'
@@ -971,6 +972,155 @@ Output ONLY JSON: {"mappings":[{"sourceModule":"str","targetTable":"str","fields
     }
 
     return reply.send({ ok: true, userId, viewCrmStructure: allow })
+  })
+
+  // ── YFZ 19-21 / FAZ B — Connector AI Catalog + Analysis + Pipeline Logging ──
+
+  // GET /crm/connections/:id/catalog — entity_data_catalog'dan kayıtları döndür
+  app.get('/connections/:id/catalog', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const { id } = req.params as { id: string }
+    const user = req.user as any
+    const conn = await db.query.crmConnections.findFirst({ where: (t, { eq }) => eq(t.id, id as any) })
+    if (!conn) return reply.status(404).send({ error: 'Connection not found' })
+    if (conn.tenantId !== user.tenantId) return reply.status(403).send({ error: 'Forbidden' })
+
+    const entity = await db.query.kibiEntities.findFirst({ where: (t, { eq }) => eq(t.entityId, conn.tenantId as any) })
+    if (!entity) return reply.status(404).send({ error: 'Entity not found' })
+
+    const entries = await db.query.entityDataCatalog.findMany({
+      where: (t, { eq }) => eq(t.entityId, entity.id),
+    })
+
+    return reply.send({
+      catalog: entries.map(e => ({
+        ...e,
+        isApproved: e.isUserApproved,
+        columnCount: (e.columns as any)?.length ?? 0,
+      })),
+    })
+  })
+
+  // PUT /crm/connections/:id/catalog/:tableId/approve — tabloyu onayla
+  app.put('/connections/:id/catalog/:tableId/approve', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const { id, tableId } = req.params as { id: string; tableId: string }
+    const user = req.user as any
+    const conn = await db.query.crmConnections.findFirst({ where: (t, { eq }) => eq(t.id, id as any) })
+    if (!conn || conn.tenantId !== user.tenantId) return reply.status(403).send({ error: 'Forbidden' })
+
+    await db
+      .update(entityDataCatalog)
+      .set({ isUserApproved: true, updatedAt: new Date() })
+      .where(eq(entityDataCatalog.id, tableId as any))
+
+    return reply.send({ ok: true })
+  })
+
+  // POST /crm/connections/:id/catalog/bulk-approve — birden fazla tabloyu onayla
+  app.post('/connections/:id/catalog/bulk-approve', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const { id } = req.params as { id: string }
+    const { tableIds } = req.body as { tableIds: string[] }
+    const user = req.user as any
+    const conn = await db.query.crmConnections.findFirst({ where: (t, { eq }) => eq(t.id, id as any) })
+    if (!conn || conn.tenantId !== user.tenantId) return reply.status(403).send({ error: 'Forbidden' })
+
+    if (tableIds && tableIds.length > 0) {
+      for (const tableId of tableIds) {
+        await db
+          .update(entityDataCatalog)
+          .set({ isUserApproved: true, updatedAt: new Date() })
+          .where(eq(entityDataCatalog.id, tableId as any))
+      }
+    }
+
+    return reply.send({ ok: true })
+  })
+
+  // GET /crm/connections/:id/analyze/stream — Connector AI SSE akışı
+  app.get('/connections/:id/analyze/stream', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    const { token } = req.query as { token?: string }
+
+    if (!token) return reply.status(400).send({ error: 'token required' })
+
+    const conn = await db.query.crmConnections.findFirst({ where: (t, { eq }) => eq(t.id, id as any) })
+    if (!conn) return reply.status(404).send({ error: 'Connection not found' })
+
+    const entity = await db.query.kibiEntities.findFirst({ where: (t, { eq }) => eq(t.entityId, conn.tenantId as any) })
+    if (!entity) return reply.status(404).send({ error: 'Entity not found' })
+
+    // Scanned tablolar Redis'ten al (scan-structure'tan)
+    const scanKey = `crm:scan:${id}`
+    const scanJson = await redis.get(scanKey)
+    if (!scanJson) return reply.status(400).send({ error: 'Scan not found, run scan-structure first' })
+
+    const scannedTables = JSON.parse(scanJson)
+
+    reply.header('Content-Type', 'text/event-stream')
+    reply.header('Cache-Control', 'no-cache')
+    reply.header('Connection', 'keep-alive')
+
+    const send = (data: Record<string, any>) => {
+      reply.raw.write(`data: ${JSON.stringify(data)}\n\n`)
+    }
+
+    // Connector AI analiz
+    try {
+      await runConnectorAnalysis(id, entity.id, entity.id, conn.crmType ?? 'unknown', scannedTables, send)
+      send({ type: 'complete', ok: true })
+      reply.raw.end()
+    } catch (err: any) {
+      console.error('[ANALYZE-STREAM]', err)
+      send({ type: 'error', message: err.message })
+      reply.raw.end()
+    }
+  })
+
+  // POST /crm/connections/:id/test-query — katalog sorgu şablonunu test et
+  app.post('/connections/:id/test-query', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const { id } = req.params as { id: string }
+    const { templateKey, tableName, params } = req.body as {
+      templateKey: string
+      tableName: string
+      params: Record<string, any>
+    }
+
+    const user = req.user as any
+    const conn = await db.query.crmConnections.findFirst({ where: (t, { eq }) => eq(t.id, id as any) })
+    if (!conn || conn.crmType !== 'postgresql') return reply.status(400).send({ error: 'Only PostgreSQL' })
+    if (conn.tenantId !== user.tenantId) return reply.status(403).send({ error: 'Forbidden' })
+
+    // Katalog entry'den şablonu al
+    const entity = await db.query.kibiEntities.findFirst({ where: (t, { eq }) => eq(t.entityId, conn.tenantId as any) })
+    if (!entity) return reply.status(404).send({ error: 'Entity not found' })
+
+    const catalog = await db.query.entityDataCatalog.findFirst({
+      where: (t, { and, eq }) => and(eq(t.entityId, entity.id), eq(t.tableName, tableName)),
+    })
+    if (!catalog) return reply.status(404).send({ error: 'Table not in catalog' })
+
+    const templates = (catalog.queryTemplates as Record<string, string>) ?? {}
+    let query = templates[templateKey]
+    if (!query) return reply.status(400).send({ error: 'Template not found' })
+
+    // Parametreleri doldur
+    for (const [key, val] of Object.entries(params)) {
+      query = query.replace(`{${key}}`, String(val).substring(0, 100))
+    }
+
+    // SELECT kontrolü
+    if (!query.trim().toUpperCase().startsWith('SELECT')) {
+      return reply.status(403).send({ error: 'Only SELECT allowed' })
+    }
+
+    try {
+      const adapter = createAdapter(conn.crmType, decryptJson(conn.credentials))
+      if (!adapter) return reply.status(400).send({ error: 'Invalid adapter' })
+
+      const rows = await (adapter as any).queryRaw?.(query)
+      return reply.send({ rows: (rows ?? []).slice(0, 20) })
+    } catch (err: any) {
+      return reply.status(500).send({ error: err.message })
+    }
   })
 }
 

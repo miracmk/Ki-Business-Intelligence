@@ -831,3 +831,85 @@ entity_{slug}.crm_contacts / crm_companies / crm_deals / erp_products
 - [x] `Settings.tsx` AI tab → provider kartları (kendi key'i / platform sağlıyor / yok), model atama `input[list]` ile tüm sağlayıcılardan.
 
 **Deploy:** `npm run build` → `✓ built in 5.57s` → `docker compose restart ki_api` → `🚀 Ki Platform running`
+
+---
+
+#### YFZ 19-21 / FAZ A — Model Rol Taksonomisi + Semantic Katalog Altyapısı
+
+**Amaç:** 13 yeni semantik model rolünü tanıtmak, Connector AI semantic katalog + AI pipeline logging + KB sinyal yazımı için altyapıyı kurmak.
+Spec'in eski halini mevcut mimariye uyarlandı (çok-provider sistem korundu).
+
+**FAZ A — Veritabanı + Model Rol Taksonomisi (✅ Tamamlandı)**
+
+**DB Değişiklikleri:**
+- [x] Migration `0009_model_roles_catalog_logs.sql`:
+  - `ALTER TYPE kibi_model_role ADD VALUE` × 13 yeni rol ekle
+  - `CREATE TABLE entity_data_catalog` — Connector AI semantic katalog (tableName, tableIntent, columns/relationships/queryTemplates JSONB, dataQuality, rawTablePath, isQueryable/isWritable/isUserApproved)
+  - `CREATE TABLE ai_pipeline_logs` — her AI model çağrısının kaydı (pipelineType, modelRole, modelUsed, tokens, latency, success, confidence, escalated, kbWritten)
+- [x] Migration `0010_seed_model_roles.sql`:
+  - 13 yeni rolü `platform` ve `entity_free` scope'larında seed (format: `provider::modelId`)
+  - Fallback modellerle OpenRouter / Hugging Face mapping
+
+**Yeni Roller (13 semantik rol):**
+`intent_analysis` | `support_problem` | `support_solution` | `support_generator` | `sales_intent` | `sales_conversation` | `consulting_intent` | `consulting_recommendation` | `master_conversation` | `db_query` | `kb_vector` | `connector` | `kb_signal_writer`
+
+**Schema güncellemesi (db/schema.ts):**
+- [x] `kibiModelRoleEnum` — 13 yeni rol enum dizisine eklendi (mevcut 9 rol korundu)
+- [x] `entityDataCatalog` table — YFZ 19-21 spec A.1.2 tipleri
+- [x] `aiPipelineLogs` table — YFZ 19-21 spec A.1.3 tipleri
+
+**Backend (src/engine/ai/model-config.ts):**
+- [x] `ModelRole` type — 13 yeni rol eklendi (mevcut 9 rol korundu)
+- [x] `getModelForRole(role, scope, tenantId?)` yeni fonksiyon:
+  1. Entity override kontrol (`ai_configs.settings.modelOverrides[role]`) varsa döndür
+  2. `kibi_model_configs` (scope+role) 5dk cache ile dön
+  3. Fallback hardcoded modeller
+- [x] `seedDefaultModelConfigs()` — 13 yeni rol + eski 9 rol seed (mevcut platform scope'a)
+  - Provider parsing: `provider::model` formatından otomatik extract
+  - Idempotent: mevcut roller üzerine yazılmaz
+
+**Uyumluluk:**
+- ✅ Eski 9 model rol korundu (canlı `support_resolver/refine/answering` destek pipeline'ı bozulmadı)
+- ✅ Çok-provider `provider::model` sistem korundu (OpenRouter-only spec değil)
+- ✅ Migration 0004-0008 sıra başıdır (0009/0010 sonra uygulanır)
+- ✅ `tsc --noEmit` hata yok, build temiz
+
+**Test Geçtiğinde:**
+- Migration'lar postgres'te çalışır (0009 enum ADD → 0010 seed, transaction ayrımı)
+- `GET /admin/ai-providers/kibi/roles` → 22 rol (9 eski + 13 yeni) platform scope'ında
+- `npm run db:migrate` → veritabanında entityDataCatalog + aiPipelineLogs tablolar var
+
+**Sonraki:** FAZ B (Connector AI motoru + KB sinyal + endpoint'ler) → FAZ C (Frontend UI)
+*16 Haziran 2026 — FAZ A tamamlandı.*
+
+---
+
+#### YFZ 19-21 / FAZ B — Connector AI Motoru + Pipeline Logging + KB Sinyal (✅ Tamamlandı)
+
+**Yeni Backend Dosyaları:**
+- [x] `src/engine/connector/types.ts` — Semantic katalog tipleri (ConnectorColumn, CatalogEntry, ScannedTable vb.)
+- [x] `src/engine/connector/connector-ai.ts` — Connector AI motor (`analyzeTableStructure`, `runConnectorAnalysis`)
+- [x] `src/engine/ai/kb-signal-writer.ts` — KB sinyal yazımı (anonim sinyal → Qdrant `ki_platform_knowledge`)
+
+**CRM Route Güncellemeleri (5 yeni endpoint):**
+- [x] `GET /crm/connections/:id/catalog` — entity_data_catalog'dan katalog entry'lerini döndür
+- [x] `PUT /crm/connections/:id/catalog/:tableId/approve` — tabloyu onayla
+- [x] `POST /crm/connections/:id/catalog/bulk-approve` — birden fazla tabloyu onayla
+- [x] `GET /crm/connections/:id/analyze/stream` — Connector AI SSE akışı (semantic katalog üretimi)
+- [x] `POST /crm/connections/:id/test-query` — katalog şablonundan test query çalıştır (SELECT-only)
+
+**Admin Route Güncellemeleri:**
+- [x] `GET /admin/pipeline-logs` — ai_pipeline_logs kaydı (filtreleme: role/entityId/success, özet: success rate/escalation/latency)
+
+**Migration İyileştirmesi:**
+- [x] 0010_seed_model_roles.sql SQL hataları düzeltildi
+- [x] Migration'lar postgres'te başarıyla apply edildi (26 row: 13 rol × 2 scope)
+
+**Deploy:**
+- [x] `cd frontend && npm run build` ✓ 6.23s
+- [x] Migrations 0009 + 0010 docker exec ile apply edildi
+- [x] `docker compose restart ki_api` → `🚀 Ki Platform running on 0.0.0.0:3001`
+- [x] [CrmScheduler] Started, API çalışıyor
+
+**Sonraki:** FAZ C (Frontend: Model Seçici UI + 7 adımlı UniversalConnectorWizard + AI Günlükleri sekmesi)
+*16 Haziran 2026 — FAZ B tamamlandı.*

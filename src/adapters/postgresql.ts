@@ -50,7 +50,7 @@ export class PostgreSqlAdapter extends CrmAdapter {
   }
 
   async getModules(): Promise<CrmModule[]> {
-    const c = this.credentials as PgConnectionCreds & { modulesTable?: string }
+    const c = this.creds as PgConnectionCreds & { modulesTable?: string }
     if (c.modulesTable) {
       const client = await this.pool.connect()
       try {
@@ -92,7 +92,7 @@ export class PostgreSqlAdapter extends CrmAdapter {
   }
 
   async getModuleFields(module: string): Promise<any[]> {
-    const c = this.credentials as PgConnectionCreds & { fieldsTable?: string }
+    const c = this.creds as PgConnectionCreds & { fieldsTable?: string }
     if (c.fieldsTable) {
       const client = await this.pool.connect()
       try {
@@ -175,7 +175,7 @@ export class PostgreSqlAdapter extends CrmAdapter {
   }
 
   async search(params: SearchParams): Promise<CrmRecord[]> {
-    const c = this.credentials as PgConnectionCreds & { dataTable?: string }
+    const c = this.creds as PgConnectionCreds & { dataTable?: string }
     if (c.dataTable) {
       const client = await this.pool.connect()
       try {

@@ -241,74 +241,6 @@ const MODEL_ROLE_LABELS: Record<string, string> = {
   kb_signal_writer:           'KB Sinyal Yazıcı',
 }
 
-const ROLE_DESCRIPTIONS: Record<string, { code: string; scope: 'entity' | 'kibi' | 'both'; speedNeed: string }> = {
-  intent_analysis: {
-    code: 'E-1 / K-1',
-    scope: 'both',
-    speedNeed: 'Hız kritik — hafif model önerilir',
-  },
-  support_problem: {
-    code: 'E-2.1.1 / K-2.1.1',
-    scope: 'both',
-    speedNeed: 'Hız kritik — hafif model önerilir',
-  },
-  support_solution: {
-    code: 'E-2.1.2 / K-2.1.2',
-    scope: 'both',
-    speedNeed: 'Orta güç yeterli',
-  },
-  support_generator: {
-    code: 'E-2.1.3 / K-2.1.3',
-    scope: 'both',
-    speedNeed: 'Güçlü model önerilir',
-  },
-  sales_intent: {
-    code: 'E-2.2.1 / K-2.2.1',
-    scope: 'both',
-    speedNeed: 'Hız kritik — hafif model önerilir',
-  },
-  sales_conversation: {
-    code: 'E-2.2.2 / K-2.2.2',
-    scope: 'both',
-    speedNeed: 'Orta güç yeterli',
-  },
-  consulting_intent: {
-    code: 'K-2.3.1',
-    scope: 'kibi',
-    speedNeed: 'Hafif model yeterli',
-  },
-  consulting_recommendation: {
-    code: 'K-2.3.2',
-    scope: 'kibi',
-    speedNeed: 'Güçlü model önerilir',
-  },
-  master_conversation: {
-    code: 'E-3 / K-3',
-    scope: 'both',
-    speedNeed: 'Orta güç yeterli',
-  },
-  db_query: {
-    code: 'E-4 / K-4',
-    scope: 'both',
-    speedNeed: 'Güçlü model — SQL reasoning gerektiriyor',
-  },
-  kb_vector: {
-    code: 'E-5 / K-5',
-    scope: 'both',
-    speedNeed: 'Embedding modeli — LLM seçme',
-  },
-  connector: {
-    code: 'K-6',
-    scope: 'kibi',
-    speedNeed: 'Güçlü model önerilir',
-  },
-  kb_signal_writer: {
-    code: 'SYS-3',
-    scope: 'kibi',
-    speedNeed: 'Hafif model yeterli',
-  },
-}
-
 const TABS = [
   { id: 'crm',        label: 'CRM',          icon: Database      },
   { id: 'erp',        label: 'ERP',          icon: Server        },
@@ -829,7 +761,7 @@ function PlatformVectorPanel({ isAdmin, showToast }: { isAdmin: boolean; showToa
 }
 
 // ─── AI Logs Tab ─────────────────────────────────────────────────────────────
-function AiLogsTab({ isAdmin }: { isAdmin: boolean }) {
+function AiLogsTab() {
   const [logs, setLogs] = useState<any[]>([])
   const [summary, setSummary] = useState<any>(null)
   const [loading, setLoading] = useState(true)
@@ -1522,7 +1454,7 @@ export default function PlatformSettings() {
 
       {/* ── AI Günlükleri Tab ── */}
       {!loading && tab === 'logs' && (
-        <AiLogsTab isAdmin={isAdmin} />
+        <AiLogsTab />
       )}
 
       {/* Comm Config Modal */}

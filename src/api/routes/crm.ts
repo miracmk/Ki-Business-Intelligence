@@ -448,12 +448,12 @@ export const crmRoutes: FastifyPluginAsync = async (app) => {
       let sampleRows: any[] = []
       try {
         const sr = await adapter.search({ module: mod.apiName, page: 1, perPage: 5 })
-        sampleRows = sr.records ?? []
+        sampleRows = sr ?? []
       } catch { /* ignore */ }
 
       const enrichedFields = fields.map((f: any) => {
         const sampleValues = sampleRows
-          .map(r => r[f.apiName] ?? r[f.name])
+          .map(r => r.data?.[f.apiName] ?? r.data?.[f.name])
           .filter(v => v != null && String(v).length > 0)
           .slice(0, 3)
           .map(v => String(v))
@@ -469,7 +469,7 @@ export const crmRoutes: FastifyPluginAsync = async (app) => {
 
       modules.push({
         name: mod.apiName,
-        label: mod.pluralLabel ?? mod.apiName,
+        label: mod.label ?? mod.apiName,
         recordCount,
         fields: enrichedFields,
         relations: [],
@@ -532,18 +532,18 @@ export const crmRoutes: FastifyPluginAsync = async (app) => {
 
       for (let i = 0; i < total; i++) {
         const mod = rawModules[i]!
-        send('progress', `"${mod.pluralLabel ?? mod.apiName}" taranıyor...`, 15 + Math.round((i / total) * 70))
+        send('progress', `"${mod.label ?? mod.apiName}" taranıyor...`, 15 + Math.round((i / total) * 70))
 
         const fields = await adapter.getModuleFields(mod.apiName).catch(() => [])
         let sampleRows: any[] = []
         try {
           const sr = await adapter.search({ module: mod.apiName, page: 1, perPage: 5 })
-          sampleRows = sr.records ?? []
+          sampleRows = sr ?? []
         } catch { /* ignore */ }
 
         const enrichedFields = fields.map((f: any) => {
           const sampleValues = sampleRows
-            .map(r => r[f.apiName] ?? r[f.name])
+            .map(r => r.data?.[f.apiName] ?? r.data?.[f.name])
             .filter(v => v != null && String(v).length > 0)
             .slice(0, 3)
             .map(v => String(v))
@@ -555,8 +555,8 @@ export const crmRoutes: FastifyPluginAsync = async (app) => {
           if ((adapter as any).getTableCount) recordCount = await (adapter as any).getTableCount(mod.apiName)
         } catch { /* ignore */ }
 
-        modules.push({ name: mod.apiName, label: mod.pluralLabel ?? mod.apiName, recordCount, fields: enrichedFields, relations: [], sampleRows: sampleRows.slice(0, 5) })
-        send('structure', JSON.stringify({ name: mod.apiName, label: mod.pluralLabel ?? mod.apiName, recordCount, fields: enrichedFields, sampleRows: sampleRows.slice(0, 5) }), 15 + Math.round(((i + 1) / total) * 70))
+        modules.push({ name: mod.apiName, label: mod.label ?? mod.apiName, recordCount, fields: enrichedFields, relations: [], sampleRows: sampleRows.slice(0, 5) })
+        send('structure', JSON.stringify({ name: mod.apiName, label: mod.label ?? mod.apiName, recordCount, fields: enrichedFields, sampleRows: sampleRows.slice(0, 5) }), 15 + Math.round(((i + 1) / total) * 70))
       }
 
       const cacheKey = `ki:crm:structure:${id}`
@@ -1113,7 +1113,8 @@ Output ONLY JSON: {"mappings":[{"sourceModule":"str","targetTable":"str","fields
     }
 
     try {
-      const adapter = createAdapter(conn.crmType, decryptJson(conn.credentials))
+      const creds = decryptJson<any>(conn.credentials)
+      const adapter = createAdapter({ ...creds, type: conn.crmType } as any)
       if (!adapter) return reply.status(400).send({ error: 'Invalid adapter' })
 
       const rows = await (adapter as any).queryRaw?.(query)

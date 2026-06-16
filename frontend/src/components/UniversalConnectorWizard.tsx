@@ -8,7 +8,6 @@ interface WizardProps {
 export function UniversalConnectorWizard({ onClose }: WizardProps) {
   const [step, setStep] = useState(1)
   const [sourceType, setSourceType] = useState<'crm_api' | 'database' | 'erp_api' | null>(null)
-  const [connectionId, setConnectionId] = useState<string | null>(null)
 
   const stepTitles = [
     'Kaynak Seç',
@@ -25,7 +24,7 @@ export function UniversalConnectorWizard({ onClose }: WizardProps) {
       case 1:
         return <StepSourceSelect onSelect={t => { setSourceType(t); setStep(2) }} />
       case 2:
-        return <StepConnect sourceType={sourceType!} onConnect={id => { setConnectionId(id); setStep(3) }} />
+        return <StepConnect sourceType={sourceType!} onConnect={() => setStep(3)} />
       case 3:
         return <StepScan onDone={() => setStep(4)} />
       case 4:
@@ -53,7 +52,7 @@ export function UniversalConnectorWizard({ onClose }: WizardProps) {
 
         {/* Adım İndikatörü */}
         <div className="mb-8 flex items-center justify-between">
-          {stepTitles.map((title, i) => (
+          {stepTitles.map((_, i) => (
             <React.Fragment key={i}>
               <div
                 className="w-8 h-8 rounded-full flex items-center justify-center text-sm font-semibold transition-all"
@@ -136,7 +135,7 @@ function StepSourceSelect({ onSelect }: { onSelect: (type: 'crm_api' | 'database
   )
 }
 
-function StepConnect({ sourceType, onConnect }: { sourceType: 'crm_api' | 'database' | 'erp_api'; onConnect: (id: string) => void }) {
+function StepConnect({ sourceType, onConnect }: { sourceType: 'crm_api' | 'database' | 'erp_api'; onConnect: () => void }) {
   const [name, setName] = useState('')
 
   return (
@@ -159,7 +158,7 @@ function StepConnect({ sourceType, onConnect }: { sourceType: 'crm_api' | 'datab
         </>
       )}
       <button
-        onClick={() => onConnect(`conn_${Date.now()}`)}
+        onClick={() => onConnect()}
         disabled={!name}
         className="w-full py-2 rounded-lg text-sm font-semibold disabled:opacity-50"
         style={{ background: 'var(--teal)', color: '#fff' }}

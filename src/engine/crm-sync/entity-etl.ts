@@ -157,7 +157,7 @@ function applyConnectorMapping(
         break
       case 'phone_e164':
         transformed = str.replace(/[^\d+]/g, '')
-        if (!transformed.startsWith('+') && String(transformed).length === 10) transformed = '+90' + transformed
+        if (!(transformed as string).startsWith('+') && String(transformed).length === 10) transformed = '+90' + transformed
         break
       case 'country_iso':
         transformed = str.length === 2 ? str.toUpperCase() : val
@@ -485,7 +485,7 @@ async function mirrorCrmMetadata(pool: Pool, schemaName: string, connectionId: s
     crmType,
     syncedAt: new Date().toISOString(),
     modules: modules.map(m => ({
-      apiName: m.apiName, label: m.pluralLabel, totalRecords: m.totalRecords,
+      apiName: m.apiName, label: m.pluralLabel,
     })),
     fields: fields.map(f => ({
       module: f.moduleApiName, apiName: f.apiName, label: f.fieldLabel, dataType: f.dataType,

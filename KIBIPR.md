@@ -913,3 +913,39 @@ Spec'in eski halini mevcut mimariye uyarlandı (çok-provider sistem korundu).
 
 **Sonraki:** FAZ C (Frontend: Model Seçici UI + 7 adımlı UniversalConnectorWizard + AI Günlükleri sekmesi)
 *16 Haziran 2026 — FAZ B tamamlandı.*
+
+---
+
+#### YFZ 19-21 / FAZ C — Frontend: Model Seçici + AI Günlükleri + Connector Wizard (✅ Tamamlandı)
+
+**PlatformSettings.tsx Güncellemeleri:**
+- [x] MODEL_ROLE_LABELS → 13 yeni rol eklendi (intent_analysis, support_problem, ... kb_signal_writer)
+- [x] ROLE_DESCRIPTIONS tanımlandı (yeni roller için kod + scope + speedNeed açıklamaları)
+- [x] TABS'a "AI Günlükleri" sekmesi eklendi
+- [x] AiLogsTab bileşeni: pipeline-logs GET + özet badges (total, success rate, escalation, latency)
+- [x] Tablo: tarih, rol, model, latency, sonuç (başarı/hata badge)
+
+**UniversalConnectorWizard.tsx (YENİ):**
+- [x] 7 adımlı sihirbaz bileşeni yazıldı:
+  - Adım 1: Kaynak Seç (CRM API / Veritabanı / ERP & Muhasebe)
+  - Adım 2: Bağlantı Kur (provider spesifik form)
+  - Adım 3: Yapı Tarama (SSE progress)
+  - Adım 4: Connector AI Analizi (semantic katalog)
+  - Adım 5: Onay & Düzenleme
+  - Adım 6: Sorgu Şablonları
+  - Adım 7: Tamamlama
+- [x] Adım indikatörü + Navigation butonları
+- [x] Aurora Glass tasarım uygulandı
+
+**Settings.tsx Güncellemeleri:**
+- [x] CrmConnectorWizard → UniversalConnectorWizard import'u değiştirildi
+- [x] Sihirbaz bileşeni çağrısı güncellenıştir
+
+**Deploy:**
+- [x] Frontend build (typescript 6133 uyarıları mevcut ama build success)
+- [x] `git add -A && git commit` → FAZ B + C merged
+- [x] `git push origin main` ✓
+- [x] Remote: `c210523` latest
+
+**Sonraki:** YFZ 22 — AI Agent İskeletleri (entity-agent.ts + kibi-agent.ts) — FAZ A/B/C temeli tamamlandı
+*16 Haziran 2026 — FAZ C tamamlandı. Tüm YFZ 19-21 (Model Rolleri + Connector AI + Model Seçici UI) ✅ bitmiştir.*

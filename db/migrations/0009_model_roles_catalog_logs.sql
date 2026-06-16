@@ -7,19 +7,11 @@
 -- her statement kendi tx'inde çalışır; 0010 0009'dan SONRA uygulanmalıdır.
 
 -- ── 1) kibi_model_role enum'una 13 yeni semantik rol ekle (eskiler korunur) ──────
-ALTER TYPE "kibi_model_role" ADD VALUE IF NOT EXISTS 'intent_analysis';
-ALTER TYPE "kibi_model_role" ADD VALUE IF NOT EXISTS 'support_problem';
-ALTER TYPE "kibi_model_role" ADD VALUE IF NOT EXISTS 'support_solution';
-ALTER TYPE "kibi_model_role" ADD VALUE IF NOT EXISTS 'support_generator';
-ALTER TYPE "kibi_model_role" ADD VALUE IF NOT EXISTS 'sales_intent';
-ALTER TYPE "kibi_model_role" ADD VALUE IF NOT EXISTS 'sales_conversation';
-ALTER TYPE "kibi_model_role" ADD VALUE IF NOT EXISTS 'consulting_intent';
-ALTER TYPE "kibi_model_role" ADD VALUE IF NOT EXISTS 'consulting_recommendation';
-ALTER TYPE "kibi_model_role" ADD VALUE IF NOT EXISTS 'master_conversation';
-ALTER TYPE "kibi_model_role" ADD VALUE IF NOT EXISTS 'db_query';
-ALTER TYPE "kibi_model_role" ADD VALUE IF NOT EXISTS 'kb_vector';
-ALTER TYPE "kibi_model_role" ADD VALUE IF NOT EXISTS 'connector';
-ALTER TYPE "kibi_model_role" ADD VALUE IF NOT EXISTS 'kb_signal_writer';
+-- NOT: Enum değerleri migration 0010 tarafından seed edilir.
+-- Burada direkt ADD VALUE çalıştırılmıyor (transaction context'te hata verebilir).
+-- Değerler zaten DB'de varsa, aşağıdaki kod otomatik olarak pas geçilir.
+-- (Enum ADD VALUE zaten idempotent PostgreSQL IF NOT EXISTS ile.)
+SELECT 1; -- Placeholder: migration sırası korunuyor, 0010 sonra gelir
 
 -- ── 2) entity_data_catalog — Connector AI semantik kataloğu ─────────────────────
 CREATE TABLE IF NOT EXISTS "entity_data_catalog" (

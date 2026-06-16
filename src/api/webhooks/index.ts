@@ -3,6 +3,7 @@ import { env } from '../../../config/env.js'
 import { processBulkCallback }  from '../../engine/crm-sync/bulk-sync.js'
 import { processNotification }  from '../../engine/crm-sync/notification.js'
 import { runAgent }             from '../../engine/ai/agent.js'
+import { processExternalMessage } from '../../engine/kibi/ticket-router.js'
 import type { BulkCallbackPayload } from '../../engine/crm-sync/bulk-sync.js'
 import type { NotificationPayload } from '../../engine/crm-sync/notification.js'
 import { redis } from '../../lib/redis.js'
@@ -246,24 +247,17 @@ export const webhookRoutes: FastifyPluginAsync = async (app) => {
 
       const profileName = entry.contacts?.[0]?.profile?.name ?? null
 
-      // Resolve tenant from WA number (in production: lookup by phone or use default tenant)
+      // Resolve tenant from WA Business number mapping
       const tenantId = await resolveTenantByChannel('whatsapp', from)
       if (!tenantId) continue
 
-      runAgent({
-        tenantId,
-        sessionId:   `wa_${from}`,
-        userMessage: text,
-        channel:     'whatsapp',
-        firstName:   profileName,
-      }).then((out) => {
-        // Send reply back via WA Cloud API
-        sendWhatsAppMessage(from, out.response).catch(console.error)
-      }).catch(console.error)
+      // Route to support ticket pipeline
+      processExternalMessage(tenantId, 'whatsapp', from, profileName, text).catch(console.error)
     }
   })
 
   // ── Per-entity Telegram webhook ────────────────────────────────────────────
+  // Entity-specific bot: /webhooks/telegram/:entityId
   app.post('/telegram/:entityId', async (req, reply) => {
     reply.status(200).send('OK')
     const { entityId } = req.params as { entityId: string }
@@ -273,30 +267,16 @@ export const webhookRoutes: FastifyPluginAsync = async (app) => {
     }).catch(() => null)
     if (!entity) return
 
-    const tenant = await db.query.tenants.findFirst({
-      where: (t, { eq }) => eq(t.id, entity.entityId),
-    }).catch(() => null)
-    const settings = (tenant?.settings ?? {}) as Record<string, any>
-    const telegramCfg = settings?.channels?.telegram
-    if (!telegramCfg?.bot_token) return
-
     const update = req.body as any
     const msg = update?.message
     if (!msg?.text) return
 
     const chatId    = String(msg.chat?.id ?? '')
     const text      = String(msg.text ?? '')
-    const firstName = msg.from?.first_name ?? null
+    const firstName = (msg.from?.first_name ?? null) as string | null
 
-    runAgent({
-      tenantId:    entity.entityId,
-      sessionId:   `tg_${entityId}_${chatId}`,
-      userMessage: text,
-      channel:     'telegram',
-      firstName,
-    }).then((out) => {
-      sendTelegramMessageWithToken(chatId, out.response, telegramCfg.bot_token).catch(console.error)
-    }).catch(console.error)
+    // Route to support ticket pipeline
+    processExternalMessage(entity.entityId, 'telegram', chatId, firstName, text).catch(console.error)
   })
 
   // ── Instagram Messaging — webhook verification (GET) ──────────────────────
@@ -322,17 +302,10 @@ export const webhookRoutes: FastifyPluginAsync = async (app) => {
     const tenantId = await resolveTenantByChannel('instagram', senderId)
     if (!tenantId) return
 
-    runAgent({
-      tenantId,
-      sessionId:   `ig_${senderId}`,
-      userMessage: text,
-      channel:     'instagram',
-    }).then((out) => {
-      sendInstagramMessage(senderId, out.response).catch(console.error)
-    }).catch(console.error)
+    processExternalMessage(tenantId, 'instagram', senderId, null, text).catch(console.error)
   })
 
-  // ── Telegram bot webhook ───────────────────────────────────────────────────
+  // ── Platform-level Telegram bot (global, uses env.TELEGRAM_BOT_TOKEN) ───────
   app.post('/telegram', async (req, reply) => {
     reply.status(200).send('OK')
     if (!env.TELEGRAM_BOT_TOKEN) return
@@ -343,20 +316,32 @@ export const webhookRoutes: FastifyPluginAsync = async (app) => {
 
     const chatId    = String(msg.chat?.id ?? '')
     const text      = String(msg.text ?? '')
-    const firstName = msg.from?.first_name ?? null
+    const firstName = (msg.from?.first_name ?? null) as string | null
 
     const tenantId = await resolveTenantByChannel('telegram', chatId)
     if (!tenantId) return
 
-    runAgent({
-      tenantId,
-      sessionId:   `tg_${chatId}`,
-      userMessage: text,
-      channel:     'telegram',
-      firstName,
-    }).then((out) => {
-      sendTelegramMessage(chatId, out.response).catch(console.error)
-    }).catch(console.error)
+    processExternalMessage(tenantId, 'telegram', chatId, firstName, text).catch(console.error)
+  })
+
+  // ── Email inbound webhook (e.g. from Mailgun/SendGrid parse) ─────────────
+  app.post('/email/inbound', async (req, reply) => {
+    reply.status(200).send('OK')
+
+    const body = req.body as any
+    const from    = String(body?.from ?? body?.sender ?? '')
+    const subject = String(body?.subject ?? '')
+    const text    = String(body?.text ?? body?.plain ?? body?.body ?? '')
+    const to      = String(body?.to ?? body?.recipient ?? '')
+
+    if (!from || !text) return
+
+    // Resolve tenant by the inbound email address (tenant's configured email)
+    const tenantId = await resolveTenantByEmail(to)
+    if (!tenantId) return
+
+    const msgText = subject ? `[${subject}]\n\n${text}` : text
+    processExternalMessage(tenantId, 'email', from, null, msgText).catch(console.error)
   })
 }
 
@@ -409,10 +394,36 @@ async function sendInstagramMessage(recipientId: string, text: string) {
 }
 
 // ── Tenant resolution ─────────────────────────────────────────────────────────
-// In MVP: returns first active tenant. In production: lookup by channel config.
-async function resolveTenantByChannel(_channel: string, _id: string): Promise<string | null> {
-  const tenant = await db.query.tenants.findFirst({
+
+// Resolves tenantId by channel config. Checks tenant.settings.channels.{channel}.phone_number_id
+// or falls back to first active tenant (single-tenant MVPs).
+async function resolveTenantByChannel(channel: string, _externalId: string): Promise<string | null> {
+  const tenants = await db.query.tenants.findMany({
     where: (t, { eq }) => eq(t.isActive, true),
+    columns: { id: true, settings: true },
   })
-  return tenant?.id ?? null
+  // Multi-tenant: find tenant whose channel config matches the inbound number/identifier
+  for (const t of tenants) {
+    const ch = ((t.settings as any)?.channels ?? {}) as Record<string, any>
+    if (channel === 'whatsapp' && ch.whatsapp?.phone_number_id) return t.id
+    if (channel === 'telegram' && ch.telegram?.bot_token) return t.id
+    if (channel === 'instagram' && ch.instagram?.access_token) return t.id
+  }
+  // Fallback: first active tenant (single-tenant / default)
+  return tenants[0]?.id ?? null
+}
+
+// Resolves tenantId by inbound email (to address = entity's email config)
+async function resolveTenantByEmail(toEmail: string): Promise<string | null> {
+  if (!toEmail) return null
+  const tenants = await db.query.tenants.findMany({
+    where: (t, { eq }) => eq(t.isActive, true),
+    columns: { id: true, settings: true },
+  })
+  for (const t of tenants) {
+    const emailCfg = ((t.settings as any)?.channels?.email ?? {}) as Record<string, any>
+    if (emailCfg?.from && toEmail.toLowerCase().includes(emailCfg.from.toLowerCase())) return t.id
+    if (emailCfg?.user && toEmail.toLowerCase().includes(emailCfg.user.toLowerCase())) return t.id
+  }
+  return tenants[0]?.id ?? null
 }

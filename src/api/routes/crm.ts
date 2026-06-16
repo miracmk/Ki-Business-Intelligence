@@ -2,7 +2,7 @@ import type { FastifyPluginAsync } from 'fastify'
 import { z } from 'zod'
 import { db } from '../../lib/db.js'
 import { redis } from '../../lib/redis.js'
-import { crmConnections, crmBulkJobs, crmSyncState, crmRecords, crmModules, crmFields, kibiEntities } from '../../../db/schema.js'
+import { crmConnections, crmBulkJobs, crmSyncState, crmRecords, crmModules, crmFields, kibiEntities, kibiEntityUsers } from '../../../db/schema.js'
 import { encryptJson, decryptJson } from '../../lib/crypto.js'
 import { createAdapter } from '../../adapters/index.js'
 import { runMetadataSync } from '../../engine/crm-sync/metadata-sync.js'
@@ -10,7 +10,7 @@ import { startBulkSync } from '../../engine/crm-sync/bulk-sync.js'
 import { setupNotifications } from '../../engine/crm-sync/notification.js'
 import { runEntityEtl } from '../../engine/crm-sync/entity-etl.js'
 import { PostgreSqlAdapter } from '../../adapters/postgresql.js'
-import { eq, and, asc } from 'drizzle-orm'
+import { eq, and, asc, sql } from 'drizzle-orm'
 import { env } from '../../../config/env.js'
 import { nanoid } from 'nanoid'
 
@@ -380,9 +380,10 @@ export const crmRoutes: FastifyPluginAsync = async (app) => {
     const user = req.user as { sub: string; tenantId: string }
     if (!user.tenantId) return reply.status(400).send({ error: 'Entity bağlantısı gerekli' })
 
-    const { name, dbType = 'postgresql', host, port = 5432, database, username, password, ssl = false } = req.body as {
+    const { name, dbType = 'postgresql', host, port = 5432, database, username, password, ssl = false, modulesTable, fieldsTable, dataTable } = req.body as {
       name: string; dbType?: string; host: string; port?: number
       database: string; username: string; password: string; ssl?: boolean
+      modulesTable?: string; fieldsTable?: string; dataTable?: string
     }
     if (!name || !host || !database || !username) {
       return reply.status(400).send({ error: 'name, host, database, username zorunlu' })
@@ -407,7 +408,7 @@ export const crmRoutes: FastifyPluginAsync = async (app) => {
       tenantId:    user.tenantId,
       name,
       crmType:     crmType as any,
-      credentials: encryptJson({ dbType, host, port, database, username, password, ssl }),
+      credentials: encryptJson({ dbType, host, port, database, username, password, ssl, modulesTable, fieldsTable, dataTable }),
       syncStatus:  'idle',
     }).returning()
 
@@ -799,6 +800,177 @@ Output ONLY JSON: {"mappings":[{"sourceModule":"str","targetTable":"str","fields
       limit: 20,
     })
     return reply.send({ jobs })
+  })
+
+  // ── POST /crm/connections/:id/import-direct ────────────────────────────────
+  // Eşleştirmesiz import: modülleri ve field'ları doğrudan DB'den çekip crm_modules + crm_fields'e yazar
+  app.post('/connections/:id/import-direct', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = req.user as { sub: string; tenantId: string; role?: string }
+    const { id } = req.params as { id: string }
+
+    const isUUID = (s: string | null | undefined) =>
+      !!s && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)
+    if (!isUUID(user.tenantId)) return reply.status(403).send({ error: 'Entity bağlantısı gerekli' })
+
+    const conn = await db.query.crmConnections.findFirst({
+      where: (t, { and, eq }) => and(eq(t.id, id), eq(t.tenantId, user.tenantId)),
+    })
+    if (!conn) return reply.status(404).send({ error: 'Bağlantı bulunamadı' })
+
+    const creds = decryptJson<any>(conn.credentials)
+    const adapter = createAdapter({ ...creds, type: conn.crmType } as any)
+
+    const rawModules = await adapter.getModules()
+
+    let importedModules = 0
+    let importedFields  = 0
+
+    for (const mod of rawModules.slice(0, 100)) {
+      await db.insert(crmModules).values({
+        tenantId:      user.tenantId,
+        connectionId:  id,
+        apiName:       mod.apiName,
+        moduleName:    mod.label ?? mod.apiName,
+        singularLabel: mod.singular ?? mod.apiName,
+        pluralLabel:   mod.label ?? mod.apiName,
+        generatedType: 'custom',
+        apiSupported:  true,
+        creatable:     false,
+        editable:      false,
+        deletable:     false,
+        viewable:      true,
+        isActive:      true,
+        lastSyncedAt:  new Date(),
+      }).onConflictDoUpdate({
+        target:      [crmModules.connectionId, crmModules.apiName],
+        set: {
+          moduleName:   mod.label ?? mod.apiName,
+          pluralLabel:  mod.label ?? mod.apiName,
+          isActive:     true,
+          lastSyncedAt: new Date(),
+        },
+      })
+      importedModules++
+
+      const fields = await adapter.getModuleFields(mod.apiName).catch(() => [] as any[])
+      for (const f of (fields as any[]).slice(0, 200)) {
+        await db.insert(crmFields).values({
+          connectionId:  id,
+          moduleApiName: mod.apiName,
+          apiName:       String(f.apiName ?? f.name ?? ''),
+          fieldLabel:    String(f.label ?? f.apiName ?? ''),
+          dataType:      String(f.dataType ?? f.type ?? 'text'),
+          fieldType:     String(f.fieldType ?? f.type ?? 'text'),
+          isMandatory:   Boolean(f.isMandatory ?? false),
+          isReadOnly:    Boolean(f.isReadOnly ?? false),
+          isCustomField: Boolean(f.isCustomField ?? false),
+          lastSyncedAt:  new Date(),
+        }).onConflictDoUpdate({
+          target: [crmFields.connectionId, crmFields.moduleApiName, crmFields.apiName],
+          set: {
+            fieldLabel:   String(f.label ?? f.apiName ?? ''),
+            dataType:     String(f.dataType ?? f.type ?? 'text'),
+            lastSyncedAt: new Date(),
+          },
+        })
+        importedFields++
+      }
+    }
+
+    return reply.send({ ok: true, importedModules, importedFields })
+  })
+
+  // ── GET /crm/structure ─────────────────────────────────────────────────────
+  // Dashboard için CRM yapısını döner (modüller + field'lar).
+  // entity_main / entity_supervisor: hep görür
+  // entity_sub: permissions.viewCrmStructure === true ise görür
+  app.get('/structure', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = req.user as { sub: string; tenantId: string | null; role?: string }
+    const isUUID = (s: string | null | undefined) =>
+      !!s && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)
+
+    if (!isUUID(user.tenantId)) return reply.send({ modules: [], canView: false })
+
+    const role = user.role ?? 'entity_sub'
+    const elevated = ['admin', 'supervisor', 'entity_main', 'entity_supervisor'].includes(role)
+
+    if (!elevated) {
+      // entity_sub: check viewCrmStructure permission
+      const entity = await db.query.kibiEntities.findFirst({
+        where: (t, { eq }) => eq(t.entityId, user.tenantId!),
+        columns: { id: true },
+      })
+      if (!entity) return reply.send({ modules: [], canView: false })
+
+      const entityUser = await db.query.kibiEntityUsers.findFirst({
+        where: (t, { and, eq }) => and(eq(t.entityId, entity.id), eq(t.userId, user.sub))
+      })
+      const perms = (entityUser?.permissions ?? {}) as Record<string, boolean>
+      if (!perms.viewCrmStructure) return reply.send({ modules: [], canView: false })
+    }
+
+    // Get first active connection for this tenant
+    const conn = await db.query.crmConnections.findFirst({
+      where: (t, { and, eq }) => and(eq(t.tenantId, user.tenantId!), eq(t.isActive, true)),
+      columns: { id: true, name: true, crmType: true },
+    })
+    if (!conn) return reply.send({ modules: [], canView: true })
+
+    const modules = await db.query.crmModules.findMany({
+      where: (t, { and, eq }) => and(eq(t.connectionId, conn.id), eq(t.isActive, true)),
+      orderBy: (t, { asc }) => [asc(t.apiName)],
+      columns: { id: true, apiName: true, moduleName: true, pluralLabel: true, singularLabel: true, lastSyncedAt: true },
+    })
+
+    const fields = await db.query.crmFields.findMany({
+      where: (t, { eq }) => eq(t.connectionId, conn.id),
+      orderBy: (t, { asc }) => [asc(t.moduleApiName), asc(t.apiName)],
+      columns: { id: true, moduleApiName: true, apiName: true, fieldLabel: true, dataType: true, isMandatory: true, isCustomField: true },
+    })
+
+    return reply.send({ modules, fields, connection: conn, canView: true })
+  })
+
+  // ── PUT /crm/users/:userId/structure-permission ───────────────────────────
+  // entity_main veya admin: entity_sub kullanıcıya CRM yapısı görüntüleme yetkisi ver/al
+  app.put('/users/:userId/structure-permission', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = req.user as { sub: string; tenantId: string | null; role?: string }
+    const { userId } = req.params as { userId: string }
+    const { allow } = req.body as { allow: boolean }
+
+    const isUUID = (s: string | null | undefined) =>
+      !!s && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)
+
+    if (!['entity_main', 'admin', 'supervisor'].includes(user.role ?? '')) {
+      return reply.status(403).send({ error: 'Bu işlem için yetkiniz yok' })
+    }
+    if (!isUUID(user.tenantId)) return reply.status(403).send({ error: 'Entity bağlantısı gerekli' })
+
+    const entity = await db.query.kibiEntities.findFirst({
+      where: (t, { eq }) => eq(t.entityId, user.tenantId!),
+      columns: { id: true },
+    })
+    if (!entity) return reply.status(404).send({ error: 'Entity bulunamadı' })
+
+    const entityUser = await db.query.kibiEntityUsers.findFirst({
+      where: (t, { and, eq }) => and(eq(t.entityId, entity.id), eq(t.userId, userId))
+    })
+
+    if (entityUser) {
+      const current = (entityUser.permissions ?? {}) as Record<string, boolean>
+      await db.update(kibiEntityUsers)
+        .set({ permissions: { ...current, viewCrmStructure: allow } })
+        .where(and(eq(kibiEntityUsers.entityId, entity.id), eq(kibiEntityUsers.userId, userId)))
+    } else {
+      await db.insert(kibiEntityUsers).values({
+        entityId:    entity.id,
+        userId,
+        role:        'entity_sub',
+        permissions: { viewCrmStructure: allow },
+      })
+    }
+
+    return reply.send({ ok: true, userId, viewCrmStructure: allow })
   })
 }
 

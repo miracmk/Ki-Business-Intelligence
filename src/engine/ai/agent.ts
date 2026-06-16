@@ -12,6 +12,7 @@
 import {
   defaultGateway, gatewayForTenant,
   ANALYSIS_MODELS, CONVERSATION_MODELS,
+  aiComplete,
   type Message,
 } from './gateway.js'
 import { getAnalysisModels, getConversationModels, getPlatformModels } from './model-config.js'
@@ -19,6 +20,8 @@ import { runDbQuery } from '../tools/db-query.js'
 import { vectorSearch } from '../../lib/qdrant.js'
 import { redis, redisKeys } from '../../lib/redis.js'
 import { db } from '../../lib/db.js'
+import { aiMessages, aiSessions } from '../../../db/schema.js'
+import { eq, sql } from 'drizzle-orm'
 
 export type Department = 'support' | 'finance' | 'booking' | 'document' | 'info' | 'general'
 
@@ -244,10 +247,6 @@ export async function runAgent(input: AgentInput): Promise<AgentOutput> {
       })
     : null
 
-  const gateway  = aiConfig
-    ? gatewayForTenant({ provider: aiConfig.provider as any, apiKey: aiConfig.apiKey })
-    : defaultGateway
-
   const settings        = (aiConfig?.settings ?? {}) as Record<string, any>
   const { analysisChain, conversationChain, vectorChain } = await buildModelChains(settings)
 
@@ -255,10 +254,27 @@ export async function runAgent(input: AgentInput): Promise<AgentOutput> {
   console.log('  [AGENT] Conversation chain:', conversationChain)
   console.log('  [AGENT] Vector chain:      ', vectorChain)
 
-  // 2. Load chat history (Redis — last 10 exchanges = 20 messages)
-  const messagesKey = redisKeys.sessionMessages(input.sessionId)
-  const historyRaw  = await redis.lrange(messagesKey, -20, -1)
-  const history: Message[] = historyRaw.map((r: string) => JSON.parse(r))
+  // 2. Load chat history (Postgres if session ID is UUID, otherwise Redis)
+  let history: Message[] = []
+  if (isValidUUID(input.sessionId)) {
+    try {
+      const dbMessages = await db.query.aiMessages.findMany({
+        where: (t, { eq }) => eq(t.sessionId, input.sessionId),
+        orderBy: (t, { asc }) => [asc(t.createdAt)],
+        limit: 20,
+      })
+      history = dbMessages.map(m => ({
+        role: m.role as 'user' | 'assistant' | 'system',
+        content: m.content
+      }))
+    } catch (err) {
+      console.error('  [AGENT] DB history load failed:', err)
+    }
+  } else {
+    const messagesKey = redisKeys.sessionMessages(input.sessionId)
+    const historyRaw  = await redis.lrange(messagesKey, -20, -1)
+    history = historyRaw.map((r: string) => JSON.parse(r))
+  }
 
   const systemPrompt = buildSystemPrompt(input)
   const messages: Message[] = [
@@ -267,16 +283,32 @@ export async function runAgent(input: AgentInput): Promise<AgentOutput> {
     { role: 'user', content: input.userMessage },
   ]
 
-  // 3. Analysis phase: use analysis model chain (tool-capable, structured)
+  // 3. Analysis phase: use analysis model chain with multi-provider complete
   let finalResponse = ''
   let usedModel     = ''
+  let lastError: any = null
+
+  async function completeWithFallback(chain: string[], temp: number, maxTokens: number) {
+    for (const modelStr of chain) {
+      try {
+        console.log(`  [AGENT] Attempting completion with model: ${modelStr}`)
+        const normalizedModel = modelStr.includes('::') ? modelStr : `openrouter::${modelStr}`
+        const res = await aiComplete(normalizedModel, messages, input.tenantId === 'platform' || input.tenantId === 'admin' ? null : input.tenantId, {
+          temperature: temp,
+          maxTokens,
+        })
+        return { content: res.content, usedModel: res.usedModel }
+      } catch (err: any) {
+        console.warn(`  [AGENT] Model ${modelStr} failed: ${err.message}`)
+        lastError = err
+      }
+    }
+    throw lastError ?? new Error('Fallback chain empty or all models failed')
+  }
 
   try {
     console.log('  [AGENT] Analysis phase using chain:', analysisChain)
-    const result = await gateway.completeWithFallback(messages, analysisChain, {
-      temperature: 0.2,   // lower temp → more deterministic for DB/tool reasoning
-      maxTokens:   2000,
-    })
+    const result = await completeWithFallback(analysisChain, 0.2, 2000)
     finalResponse = result.content
     usedModel     = result.usedModel
     console.log(`  [AGENT] Analysis done with model: ${usedModel}`)
@@ -284,10 +316,7 @@ export async function runAgent(input: AgentInput): Promise<AgentOutput> {
     console.error('  [AGENT] Analysis phase failed, falling back to conversation chain:', e)
     // Last-resort: try conversation chain
     try {
-      const result = await gateway.completeWithFallback(messages, conversationChain, {
-        temperature: 0.4,
-        maxTokens:   1200,
-      })
+      const result = await completeWithFallback(conversationChain, 0.4, 1200)
       finalResponse = result.content
       usedModel     = result.usedModel
     } catch {
@@ -300,12 +329,43 @@ export async function runAgent(input: AgentInput): Promise<AgentOutput> {
   const department = (deptMatch?.[1]?.toLowerCase() ?? 'general') as Department
   const cleanResp  = finalResponse.replace(/DEPT:\w+\n?/g, '').trim()
 
-  // 5. Persist to Redis
+  // 5. Persist to Redis & DB
   const newUserMsg: Message = { role: 'user',      content: input.userMessage }
   const newAsstMsg: Message = { role: 'assistant', content: cleanResp }
 
+  // Redis
+  const messagesKey = redisKeys.sessionMessages(input.sessionId)
   await redis.rpush(messagesKey, JSON.stringify(newUserMsg), JSON.stringify(newAsstMsg))
   await redis.expire(messagesKey, 60 * 60 * 24 * 30)  // 30 days
+
+  // Postgres
+  if (isValidUUID(input.sessionId)) {
+    try {
+      await db.insert(aiMessages).values([
+        {
+          sessionId: input.sessionId,
+          role: 'user',
+          content: input.userMessage,
+          modelName: usedModel,
+        },
+        {
+          sessionId: input.sessionId,
+          role: 'assistant',
+          content: cleanResp,
+          modelName: usedModel,
+        }
+      ])
+      await db.update(aiSessions)
+        .set({
+          messageCount: sql`message_count + 2`,
+          lastMessageAt: new Date(),
+          updatedAt: new Date(),
+        })
+        .where(eq(aiSessions.id, input.sessionId))
+    } catch (err) {
+      console.error('  [AGENT] DB message persist failed:', err)
+    }
+  }
 
   const identity = {
     contactId:  input.contactId,

@@ -4,6 +4,7 @@ import {
   Database, MessageSquare, BarChart3, Brain,
   Eye, EyeOff, Save, Trash2, RefreshCw, CheckCircle, AlertCircle,
   Server, Wifi, HardDrive, Zap, ChevronDown, ChevronRight, Plus, X,
+  ExternalLink, Key, BookOpen, AlertTriangle,
 } from 'lucide-react'
 import api from '../lib/api'
 import { useAuth } from '../store/auth'
@@ -225,13 +226,6 @@ const MODEL_ROLE_LABELS: Record<string, string> = {
   support_answering: 'Destek Yanıt',
 }
 
-const CONFIG_SCHEMA: Record<string, { label: string; category: string; isSecret: boolean; placeholder?: string }> = {
-  openrouter_api_key: { label: 'OpenRouter API Key', category: 'ai', isSecret: true, placeholder: 'sk-or-v1-...' },
-  openai_api_key:     { label: 'OpenAI API Key',     category: 'ai', isSecret: true, placeholder: 'sk-...' },
-  anthropic_api_key:  { label: 'Anthropic API Key',  category: 'ai', isSecret: true, placeholder: 'sk-ant-...' },
-  google_ai_api_key:  { label: 'Google AI API Key',  category: 'ai', isSecret: true, placeholder: 'AIza...' },
-}
-
 const TABS = [
   { id: 'crm',        label: 'CRM',          icon: Database      },
   { id: 'erp',        label: 'ERP',          icon: Server        },
@@ -240,6 +234,559 @@ const TABS = [
   { id: 'database',   label: 'Veritabanı',   icon: HardDrive     },
   { id: 'ai',         label: 'AI Modelleri', icon: Brain         },
 ]
+
+// ─── AI Provider Panel types ──────────────────────────────────────────────────
+interface AiProviderInfo {
+  id:          string
+  name:        string
+  docsUrl:     string
+  freeModels:  boolean
+  isConfigured: boolean
+}
+interface ModelGroup  { provider: string; models: Array<{ id: string; name: string }> }
+interface RoleConfig  { modelRole: string; primaryModel: string; fallback1?: string; fallback2?: string }
+
+// ─── AiProviderPanel ─────────────────────────────────────────────────────────
+function AiProviderPanel({
+  scope, baseEndpoint, isAdmin, showToast,
+}: {
+  scope:        'kibi' | 'entity-free'
+  baseEndpoint: string
+  isAdmin:      boolean
+  showToast:    (msg: string, ok?: boolean) => void
+}) {
+  const [providers,   setProviders]   = useState<AiProviderInfo[]>([])
+  const [modelGroups, setModelGroups] = useState<ModelGroup[]>([])
+  const [roles,       setRoles]       = useState<RoleConfig[]>([])
+  const [roleEdits,   setRoleEdits]   = useState<Record<string, { primary: string; fb1: string; fb2: string }>>({})
+  const [loading,      setLoading]      = useState(true)
+  const [poolLoading,  setPoolLoading]  = useState(false)
+  const [roleSaving,   setRoleSaving]   = useState(false)
+  const [poolLastAt,   setPoolLastAt]   = useState<Date | null>(null)
+  const [editingId,    setEditingId]    = useState<string | null>(null)
+  const [editKey,      setEditKey]      = useState('')
+  const [savingKey,    setSavingKey]    = useState(false)
+  const [sectionOpen,  setSectionOpen]  = useState<Record<string, boolean>>({})
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    try {
+      const [pRes, rRes] = await Promise.allSettled([
+        api.get(`${baseEndpoint}`),
+        api.get(`${baseEndpoint}/roles`),
+      ])
+      if (pRes.status === 'fulfilled') setProviders(pRes.value.data.providers ?? [])
+      if (rRes.status === 'fulfilled') {
+        const rows: RoleConfig[] = rRes.value.data.roles ?? []
+        setRoles(rows)
+        const edits: Record<string, { primary: string; fb1: string; fb2: string }> = {}
+        for (const r of rows) edits[r.modelRole] = { primary: r.primaryModel ?? '', fb1: r.fallback1 ?? '', fb2: r.fallback2 ?? '' }
+        setRoleEdits(edits)
+      }
+    } finally { setLoading(false) }
+  }, [baseEndpoint])
+
+  useEffect(() => { load() }, [load])
+
+  const fetchModels = async () => {
+    setPoolLoading(true)
+    try {
+      const res = await api.get(`${baseEndpoint}/models`)
+      setModelGroups(res.data.providers ?? [])
+      setPoolLastAt(new Date())
+    } catch { showToast('Model havuzu yüklenemedi', false) }
+    finally { setPoolLoading(false) }
+  }
+
+  const saveKey = async (providerId: string) => {
+    if (!editKey.trim()) return
+    setSavingKey(true)
+    try {
+      await api.put(`${baseEndpoint}/${providerId}`, { apiKey: editKey.trim() })
+      showToast('API key kaydedildi')
+      setEditingId(null)
+      setEditKey('')
+      await load()
+    } catch { showToast('Kayıt başarısız', false) }
+    finally { setSavingKey(false) }
+  }
+
+  const deleteKey = async (providerId: string) => {
+    try {
+      await api.delete(`${baseEndpoint}/${providerId}`)
+      showToast('Key silindi')
+      await load()
+    } catch { showToast('Silinemedi', false) }
+  }
+
+  const saveRoles = async () => {
+    setRoleSaving(true)
+    try {
+      const rolesPayload: Record<string, any> = {}
+      for (const [role, edit] of Object.entries(roleEdits)) {
+        if (edit.primary) rolesPayload[role] = { primary: edit.primary, fallback1: edit.fb1 || undefined, fallback2: edit.fb2 || undefined }
+      }
+      await api.put(`${baseEndpoint}/roles`, { roles: rolesPayload })
+      showToast('Roller kaydedildi')
+      await load()
+    } catch { showToast('Kayıt başarısız', false) }
+    finally { setRoleSaving(false) }
+  }
+
+  // Build flat model list for datalist + dropdown
+  const allModels = modelGroups.flatMap(g => g.models.map(m => ({ ...m, provider: g.provider })))
+
+  if (loading) return <div className="text-center py-12" style={{ color: 'var(--text-3)' }}>Yükleniyor...</div>
+
+  return (
+    <div className="space-y-5">
+      {scope === 'entity-free' && (
+        <div className="flex items-start gap-2 px-4 py-3 rounded-xl text-sm" style={{ background: 'rgba(251,191,36,0.08)', border: '1px solid rgba(251,191,36,0.20)', color: '#fbbf24' }}>
+          <AlertCircle size={15} className="mt-0.5 flex-shrink-0" />
+          Bu sağlayıcı key'leri ve modeller, kendi API key'i olmayan entity kullanıcılarına sunulan paylaşımlı altyapıyı oluşturur. Yüksek kullanımda rate limit'e girebilir.
+        </div>
+      )}
+
+      {/* ── Provider API Keys ── */}
+      <div className="rounded-2xl p-5" style={{ background: 'var(--surface)', backdropFilter: 'blur(20px)', border: '1px solid var(--border)', boxShadow: 'var(--shadow)' }}>
+        <div className="flex items-center gap-3 mb-4">
+          <div className="w-8 h-8 rounded-xl flex items-center justify-center" style={{ background: 'linear-gradient(135deg, var(--accent), var(--forest))' }}>
+            <Key size={15} className="text-white" />
+          </div>
+          <div>
+            <h3 className="font-bold text-sm" style={{ color: 'var(--text-1)' }}>Provider API Anahtarları</h3>
+            <p className="text-xs" style={{ color: 'var(--text-3)' }}>Model havuzunu genişletmek için provider key'lerini yapılandırın</p>
+          </div>
+        </div>
+        <div className="space-y-2">
+          {providers.map(p => (
+            <div key={p.id} className="rounded-xl p-3.5" style={{ background: 'var(--surface-2)', border: '1px solid var(--border)' }}>
+              <div className="flex items-center justify-between gap-3 flex-wrap">
+                <div className="flex items-center gap-2 min-w-0">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-sm font-medium" style={{ color: 'var(--text-1)' }}>{p.name}</span>
+                      {p.isConfigured
+                        ? <span className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full" style={{ background: 'rgba(38,166,154,0.15)', color: 'var(--accent)' }}><CheckCircle size={9}/> Bağlı</span>
+                        : <span className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full" style={{ background: 'rgba(251,191,36,0.10)', color: '#fbbf24' }}><AlertCircle size={9}/> Yapılandırılmadı</span>
+                      }
+                      {p.freeModels && <span className="text-[10px] px-1.5 py-0.5 rounded-full" style={{ background: 'rgba(74,222,128,0.12)', color: '#4ade80' }}>Ücretsiz Modeller</span>}
+                    </div>
+                    {p.docsUrl && (
+                      <a href={p.docsUrl} target="_blank" rel="noreferrer"
+                        className="inline-flex items-center gap-1 text-[10px] mt-0.5" style={{ color: 'var(--text-3)' }}>
+                        API Key Al <ExternalLink size={9} />
+                      </a>
+                    )}
+                  </div>
+                </div>
+                {isAdmin && (
+                  <div className="flex items-center gap-2 flex-shrink-0">
+                    <button onClick={() => { setEditingId(p.id === editingId ? null : p.id); setEditKey('') }}
+                      className="text-xs px-3 py-1.5 rounded-lg transition-colors"
+                      style={{ background: 'rgba(38,166,154,0.12)', color: 'var(--accent)', border: '1px solid rgba(38,166,154,0.25)' }}>
+                      {p.isConfigured ? 'Güncelle' : 'Ayarla'}
+                    </button>
+                    {p.isConfigured && (
+                      <button onClick={() => deleteKey(p.id)}
+                        className="p-1.5 rounded-lg"
+                        style={{ background: 'rgba(239,68,68,0.08)', color: '#f87171', border: '1px solid rgba(239,68,68,0.15)' }}>
+                        <Trash2 size={12} />
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+              {editingId === p.id && isAdmin && (
+                <div className="mt-3 flex gap-2">
+                  <div className="flex-1 relative">
+                    <input type="password" value={editKey} onChange={e => setEditKey(e.target.value)}
+                      placeholder="API key girin..."
+                      className="w-full px-3 py-2 rounded-lg text-sm outline-none"
+                      style={{ background: 'var(--surface-modal-2)', border: '1px solid var(--accent)', color: 'var(--text-1)' }} />
+                  </div>
+                  <button onClick={() => saveKey(p.id)} disabled={savingKey || !editKey.trim()}
+                    className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs text-white disabled:opacity-50"
+                    style={{ background: 'linear-gradient(135deg, var(--accent), var(--forest))' }}>
+                    <Save size={12} /> {savingKey ? '...' : 'Kaydet'}
+                  </button>
+                  <button onClick={() => { setEditingId(null); setEditKey('') }}
+                    className="px-3 py-2 rounded-lg text-xs"
+                    style={{ background: 'var(--surface-2)', color: 'var(--text-2)', border: '1px solid var(--border)' }}>
+                    İptal
+                  </button>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* ── Model Pool ── */}
+      <div className="rounded-2xl p-5" style={{ background: 'var(--surface)', backdropFilter: 'blur(20px)', border: '1px solid var(--border)', boxShadow: 'var(--shadow)' }}>
+        <div className="flex items-center justify-between gap-3 mb-4 flex-wrap">
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 rounded-xl flex items-center justify-center" style={{ background: 'linear-gradient(135deg, #6366f1, #4f46e5)' }}>
+              <Zap size={15} className="text-white" />
+            </div>
+            <div>
+              <h3 className="font-bold text-sm" style={{ color: 'var(--text-1)' }}>Model Havuzu</h3>
+              <p className="text-xs" style={{ color: 'var(--text-3)' }}>
+                {poolLastAt
+                  ? `Son güncelleme: ${Math.round((Date.now() - poolLastAt.getTime()) / 60000)} dakika önce`
+                  : 'Yapılandırılmış provider\'lardan modelleri yükleyin'}
+              </p>
+            </div>
+          </div>
+          <button onClick={fetchModels} disabled={poolLoading}
+            className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs transition-all disabled:opacity-50"
+            style={{ background: 'rgba(38,166,154,0.12)', color: 'var(--accent)', border: '1px solid rgba(38,166,154,0.25)' }}>
+            <RefreshCw size={12} className={poolLoading ? 'animate-spin' : ''} />
+            Modelleri Yükle
+          </button>
+        </div>
+        {modelGroups.length === 0
+          ? <p className="text-sm text-center py-6" style={{ color: 'var(--text-3)' }}>Modelleri yüklemek için "Modelleri Yükle" butonuna basın.</p>
+          : (
+            <div className="space-y-3">
+              {modelGroups.map(g => (
+                <div key={g.provider}>
+                  <div className="text-xs font-semibold mb-1 px-1" style={{ color: 'var(--text-2)' }}>{g.provider}</div>
+                  <div className="rounded-xl overflow-hidden" style={{ border: '1px solid var(--border)' }}>
+                    {g.models.slice(0, 10).map(m => (
+                      <div key={m.id} className="flex items-center gap-2 px-3 py-1.5 border-b last:border-0" style={{ background: 'var(--surface-2)', borderColor: 'var(--border)' }}>
+                        <span className="text-[11px] font-mono truncate" style={{ color: 'var(--text-1)' }}>{m.id}</span>
+                        {m.name !== m.id && <span className="text-[10px] truncate" style={{ color: 'var(--text-3)' }}>{m.name}</span>}
+                      </div>
+                    ))}
+                    {g.models.length > 10 && (
+                      <div className="px-3 py-1.5 text-[10px]" style={{ background: 'var(--surface-2)', color: 'var(--text-3)' }}>
+                        +{g.models.length - 10} model daha
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )
+        }
+        <datalist id={`model-pool-${scope}`}>
+          {allModels.map(m => <option key={m.id} value={m.id} label={m.name} />)}
+        </datalist>
+      </div>
+
+      {/* ── Role Assignments ── */}
+      <div className="rounded-2xl p-5" style={{ background: 'var(--surface)', backdropFilter: 'blur(20px)', border: '1px solid var(--border)', boxShadow: 'var(--shadow)' }}>
+        <div className="flex items-center justify-between gap-3 mb-4 flex-wrap">
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 rounded-xl flex items-center justify-center" style={{ background: 'linear-gradient(135deg, var(--accent), var(--forest))' }}>
+              <Brain size={15} className="text-white" />
+            </div>
+            <div>
+              <h3 className="font-bold text-sm" style={{ color: 'var(--text-1)' }}>Rol Bazlı Model Atama</h3>
+              <p className="text-xs" style={{ color: 'var(--text-3)' }}>Her AI rolü için primary + 2 yedek model atayın (provider::model formatında)</p>
+            </div>
+          </div>
+          {isAdmin && (
+            <button onClick={saveRoles} disabled={roleSaving}
+              className="flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-medium text-white disabled:opacity-50"
+              style={{ background: 'linear-gradient(135deg, var(--accent), var(--forest))' }}>
+              <Save size={12} /> {roleSaving ? 'Kaydediliyor...' : 'Tümünü Kaydet'}
+            </button>
+          )}
+        </div>
+        <div className="space-y-2">
+          {Object.entries(MODEL_ROLE_LABELS).map(([role, label]) => {
+            const edit  = roleEdits[role] ?? { primary: '', fb1: '', fb2: '' }
+            const saved = roles.find(r => r.modelRole === role)
+            const isOpen = sectionOpen[role] ?? false
+            return (
+              <div key={role} className="rounded-xl overflow-hidden" style={{ border: '1px solid var(--border)' }}>
+                <button onClick={() => setSectionOpen(p => ({ ...p, [role]: !p[role] }))}
+                  className="w-full flex items-center justify-between gap-3 px-4 py-3"
+                  style={{ background: 'var(--surface-2)' }}>
+                  <div className="flex items-center gap-3 min-w-0">
+                    <span className="text-sm font-medium" style={{ color: 'var(--text-1)' }}>{label}</span>
+                    {saved?.primaryModel
+                      ? <span className="text-[11px] font-mono truncate max-w-[200px]" style={{ color: 'var(--accent)' }}>{saved.primaryModel}</span>
+                      : <span className="text-xs" style={{ color: 'var(--text-3)' }}>— seçilmedi —</span>}
+                  </div>
+                  <div className="flex items-center gap-2 flex-shrink-0">
+                    {saved?.primaryModel && <span className="text-[10px] px-1.5 py-0.5 rounded-full" style={{ background: 'rgba(34,197,94,0.1)', color: '#4ade80' }}>Kayıtlı</span>}
+                    {isOpen ? <ChevronDown size={13} style={{ color: 'var(--text-3)' }} /> : <ChevronRight size={13} style={{ color: 'var(--text-3)' }} />}
+                  </div>
+                </button>
+                {isOpen && isAdmin && (
+                  <div className="px-4 pb-4 pt-3 space-y-3" style={{ background: 'var(--surface)' }}>
+                    {[
+                      { field: 'primary', label: 'Primary Model', required: true },
+                      { field: 'fb1',     label: 'Fallback 1',   required: false },
+                      { field: 'fb2',     label: 'Fallback 2',   required: false },
+                    ].map(({ field, label: fLabel, required }) => (
+                      <div key={field}>
+                        <label className="text-[11px] mb-1 block" style={{ color: 'var(--text-3)' }}>{fLabel}{required ? ' *' : ''}</label>
+                        <select
+                          value={edit[field as keyof typeof edit]}
+                          onChange={e => setRoleEdits(p => ({ ...p, [role]: { ...edit, [field]: e.target.value } }))}
+                          className="w-full px-3 py-2 rounded-lg text-xs outline-none"
+                          style={{ background: 'var(--surface-modal)', color: 'var(--text-1)', border: '1px solid var(--border)' }}>
+                          <option value="" style={{ background: 'var(--surface-modal)', color: 'var(--text-1)' }}>— seçin —</option>
+                          {modelGroups.map(g => (
+                            <optgroup key={g.provider} label={g.provider} style={{ background: 'var(--surface-modal)', color: 'var(--text-2)' }}>
+                              {g.models.map(m => (
+                                <option key={m.id} value={m.id} style={{ background: 'var(--surface-modal)', color: 'var(--text-1)' }}>{m.id}</option>
+                              ))}
+                            </optgroup>
+                          ))}
+                        </select>
+                        <input list={`model-pool-${scope}`}
+                          value={edit[field as keyof typeof edit]}
+                          onChange={e => setRoleEdits(p => ({ ...p, [role]: { ...edit, [field]: e.target.value } }))}
+                          placeholder={required ? 'provider::model — zorunlu' : 'opsiyonel yedek'}
+                          className="w-full px-3 py-1.5 rounded-lg text-[11px] outline-none font-mono mt-1"
+                          style={{ background: 'var(--surface-modal-2)', color: 'var(--text-1)', border: '1px solid var(--border)' }} />
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {isOpen && !isAdmin && saved?.primaryModel && (
+                  <div className="px-4 pb-4 pt-2 space-y-1" style={{ background: 'var(--surface)' }}>
+                    {[['Primary', saved.primaryModel], ['Fallback 1', saved.fallback1], ['Fallback 2', saved.fallback2]].filter(([, v]) => v).map(([l, v]) => (
+                      <div key={l} className="flex items-center gap-2">
+                        <span className="text-xs w-16 flex-shrink-0" style={{ color: 'var(--text-3)' }}>{l}</span>
+                        <span className="text-[11px] font-mono" style={{ color: 'var(--text-1)' }}>{v}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ─── AI Models Tab (two sub-tabs) ─────────────────────────────────────────────
+// ─── PlatformVectorPanel ──────────────────────────────────────────────────────
+function PlatformVectorPanel({ isAdmin, showToast }: { isAdmin: boolean; showToast: (msg: string, ok?: boolean) => void }) {
+  const [docs,        setDocs]        = useState<any[]>([])
+  const [loading,     setLoading]     = useState(false)
+  const [reindexing,  setReindexing]  = useState(false)
+  const [showAdd,     setShowAdd]     = useState(false)
+  const [newTitle,    setNewTitle]    = useState('')
+  const [newContent,  setNewContent]  = useState('')
+  const [newTags,     setNewTags]     = useState('')
+  const [saving,      setSaving]      = useState(false)
+
+  const loadDocs = useCallback(async () => {
+    setLoading(true)
+    try {
+      const res = await api.get('/admin/platform-vector-docs')
+      setDocs(res.data.docs ?? [])
+    } catch { /* ignore */ } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => { loadDocs() }, [loadDocs])
+
+  const saveDoc = async () => {
+    if (!newTitle.trim() || !newContent.trim()) return
+    setSaving(true)
+    try {
+      await api.post('/admin/platform-vector-docs', {
+        title:   newTitle.trim(),
+        content: newContent.trim(),
+        tags:    newTags.split(',').map(t => t.trim()).filter(Boolean),
+      })
+      showToast('Doküman eklendi ve vektöre indexlendi')
+      setNewTitle(''); setNewContent(''); setNewTags(''); setShowAdd(false)
+      await loadDocs()
+    } catch (e: any) {
+      showToast(e.response?.data?.error || 'Kaydedilemedi', false)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const deleteDoc = async (id: string) => {
+    try {
+      await api.delete(`/admin/platform-vector-docs/${id}`)
+      showToast('Doküman silindi')
+      await loadDocs()
+    } catch (e: any) {
+      showToast(e.response?.data?.error || 'Silinemedi', false)
+    }
+  }
+
+  const reindexAll = async () => {
+    setReindexing(true)
+    try {
+      const res = await api.post('/admin/platform-vector-docs/reindex-all')
+      showToast(`${res.data.indexed}/${res.data.total} doküman yeniden indexlendi`)
+      await loadDocs()
+    } catch (e: any) {
+      showToast(e.response?.data?.error || 'Reindex başarısız', false)
+    } finally {
+      setReindexing(false)
+    }
+  }
+
+  return (
+    <div className="rounded-2xl p-5" style={{ background: 'var(--surface-modal)', border: '1px solid var(--border)' }}>
+      <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
+        <div>
+          <h3 className="font-bold" style={{ color: 'var(--text-1)' }}>KIBI AI Vektör Tabanı</h3>
+          <p className="text-xs mt-0.5" style={{ color: 'var(--text-3)' }}>Platform düzeyindeki AI arama için bilgi dokümanları</p>
+        </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          <button onClick={loadDocs} disabled={loading}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs"
+            style={{ background: 'var(--surface-modal-2)', border: '1px solid var(--border)', color: 'var(--text-2)' }}>
+            <RefreshCw size={12} className={loading ? 'animate-spin' : ''} /> Yenile
+          </button>
+          {isAdmin && (
+            <>
+              <button onClick={reindexAll} disabled={reindexing}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs"
+                style={{ background: 'rgba(168,85,247,0.10)', border: '1px solid rgba(168,85,247,0.25)', color: '#a855f7' }}>
+                <Database size={12} /> {reindexing ? 'Reindex...' : 'Tümünü Reindex'}
+              </button>
+              <button onClick={() => setShowAdd(v => !v)}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs text-white"
+                style={{ background: 'linear-gradient(135deg, var(--accent), var(--forest))' }}>
+                <Plus size={12} /> Doküman Ekle
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+
+      {showAdd && (
+        <div className="mb-4 p-4 rounded-xl space-y-3" style={{ background: 'var(--surface-modal-2)', border: '1px solid var(--border)' }}>
+          <input type="text" value={newTitle} onChange={e => setNewTitle(e.target.value)}
+            placeholder="Doküman başlığı..."
+            className="w-full px-3 py-2 rounded-lg text-sm outline-none"
+            style={{ background: 'var(--surface-modal)', border: '1px solid var(--accent)', color: 'var(--text-1)' }} />
+          <textarea value={newContent} onChange={e => setNewContent(e.target.value)}
+            placeholder="İçerik (KIBI hizmet açıklaması, politika, SSS...)&#10;AI sorgu sırasında bu içerik anlamsal olarak aranır."
+            rows={5}
+            className="w-full px-3 py-2 rounded-lg text-sm outline-none resize-y"
+            style={{ background: 'var(--surface-modal)', border: '1px solid var(--border)', color: 'var(--text-1)' }} />
+          <input type="text" value={newTags} onChange={e => setNewTags(e.target.value)}
+            placeholder="Etiketler (virgülle ayır): hizmet, fiyat, teknik..."
+            className="w-full px-3 py-2 rounded-lg text-xs outline-none"
+            style={{ background: 'var(--surface-modal)', border: '1px solid var(--border)', color: 'var(--text-2)' }} />
+          <div className="flex gap-2 justify-end">
+            <button onClick={() => { setShowAdd(false); setNewTitle(''); setNewContent(''); setNewTags('') }}
+              className="px-4 py-2 rounded-lg text-xs"
+              style={{ background: 'var(--surface-modal)', color: 'var(--text-2)', border: '1px solid var(--border)' }}>
+              İptal
+            </button>
+            <button onClick={saveDoc} disabled={saving || !newTitle.trim() || !newContent.trim()}
+              className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs text-white disabled:opacity-50"
+              style={{ background: 'linear-gradient(135deg, var(--accent), var(--forest))' }}>
+              <Save size={12} /> {saving ? 'Kaydediliyor...' : 'Kaydet & Vektörle'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {loading
+        ? <div className="text-center py-8 text-sm" style={{ color: 'var(--text-3)' }}>Yükleniyor...</div>
+        : docs.length === 0
+          ? <div className="text-center py-10" style={{ color: 'var(--text-3)' }}>
+              <BookOpen size={30} className="mx-auto mb-2 opacity-30" />
+              <p className="text-sm">Henüz platform dokümanı eklenmedi</p>
+              <p className="text-xs mt-1 opacity-60">KIBI AI'ın kullanacağı bilgi tabanını oluşturun</p>
+            </div>
+          : <div className="space-y-2">
+              {docs.map((doc: any) => (
+                <div key={doc.id} className="p-3 rounded-xl" style={{ background: 'var(--surface-modal-2)', border: '1px solid var(--border)' }}>
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-sm font-medium" style={{ color: 'var(--text-1)' }}>{doc.title}</span>
+                        {doc.isIndexed
+                          ? <span className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-full" style={{ background: 'rgba(38,166,154,0.12)', color: 'var(--accent)' }}>
+                              <CheckCircle size={9} /> İndexlendi
+                            </span>
+                          : <span className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-full" style={{ background: 'rgba(251,191,36,0.10)', color: '#fbbf24' }}>
+                              <AlertTriangle size={9} /> Bekliyor
+                            </span>
+                        }
+                        {doc.tags?.length > 0 && doc.tags.map((tag: string) => (
+                          <span key={tag} className="text-[10px] px-1.5 py-0.5 rounded-full" style={{ background: 'rgba(99,102,241,0.12)', color: '#818cf8' }}>
+                            {tag}
+                          </span>
+                        ))}
+                      </div>
+                      <p className="text-xs mt-1 line-clamp-2" style={{ color: 'var(--text-3)' }}>{doc.content}</p>
+                      {doc.vectorModel && (
+                        <p className="text-[10px] mt-1" style={{ color: 'var(--text-4, var(--text-3))', opacity: 0.7 }}>Model: {doc.vectorModel}</p>
+                      )}
+                    </div>
+                    {isAdmin && (
+                      <button onClick={() => deleteDoc(doc.id)}
+                        className="p-1.5 rounded-lg flex-shrink-0"
+                        style={{ background: 'rgba(239,68,68,0.08)', color: '#f87171', border: '1px solid rgba(239,68,68,0.15)' }}>
+                        <Trash2 size={13} />
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+      }
+    </div>
+  )
+}
+
+function AiModelsTab({ isAdmin, showToast }: { isAdmin: boolean; showToast: (msg: string, ok?: boolean) => void }) {
+  const [subTab, setSubTab] = useState<'kibi' | 'entity-free' | 'vector'>('kibi')
+
+  return (
+    <div className="space-y-4">
+      <div className="flex gap-2 flex-wrap">
+        {([
+          { id: 'kibi'        as const, label: 'KIBI AI',          icon: Brain },
+          { id: 'entity-free' as const, label: 'Entity Free Tier', icon: Zap },
+          { id: 'vector'      as const, label: 'Vektör Tabanı',    icon: Database },
+        ]).map(t => (
+          <button key={t.id} onClick={() => setSubTab(t.id)}
+            className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-medium transition-all"
+            style={subTab === t.id
+              ? { background: 'linear-gradient(135deg, var(--accent), var(--forest))', color: '#fff', boxShadow: '0 4px 12px rgba(38,166,154,0.25)' }
+              : { background: 'var(--surface)', border: '1px solid var(--border)', color: 'var(--text-2)' }}>
+            <t.icon size={14} /> {t.label}
+          </button>
+        ))}
+      </div>
+
+      {subTab === 'kibi' && (
+        <AiProviderPanel
+          scope="kibi"
+          baseEndpoint="/admin/ai-providers/kibi"
+          isAdmin={isAdmin}
+          showToast={showToast}
+        />
+      )}
+      {subTab === 'entity-free' && (
+        <AiProviderPanel
+          scope="entity-free"
+          baseEndpoint="/admin/ai-providers/entity-free"
+          isAdmin={isAdmin}
+          showToast={showToast}
+        />
+      )}
+      {subTab === 'vector' && (
+        <PlatformVectorPanel isAdmin={isAdmin} showToast={showToast} />
+      )}
+    </div>
+  )
+}
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
 function StatusBadge({ isSet }: { isSet: boolean }) {
@@ -262,78 +809,6 @@ function SecretInput({ value, onChange, placeholder }: { value: string; onChange
       <button type="button" onClick={() => setShow(s => !s)} className="absolute right-2 top-1/2 -translate-y-1/2" style={{ color: 'var(--text-3)' }}>
         {show ? <EyeOff size={14} /> : <Eye size={14} />}
       </button>
-    </div>
-  )
-}
-
-function ConfigField({ cfgKey, config, isAdmin, onSave, onDelete }: {
-  cfgKey: string
-  config: { label: string; isSecret: boolean; isSet: boolean; value: string }
-  isAdmin: boolean
-  onSave: (key: string, val: string) => Promise<void>
-  onDelete: (key: string) => Promise<void>
-}) {
-  const [editing, setEditing] = useState(false)
-  const [val, setVal]         = useState('')
-  const [saving, setSaving]   = useState(false)
-
-  const handleSave = async () => {
-    setSaving(true)
-    await onSave(cfgKey, val)
-    setSaving(false)
-    setEditing(false)
-    setVal('')
-  }
-
-  return (
-    <div className="rounded-xl p-4" style={{ background: 'var(--surface-2)', border: '1px solid var(--border)' }}>
-      <div className="flex items-start justify-between gap-3 flex-wrap">
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2 flex-wrap">
-            <span className="text-sm font-medium" style={{ color: 'var(--text-1)' }}>{config.label}</span>
-            <StatusBadge isSet={config.isSet} />
-          </div>
-          <div className="text-xs mt-0.5 font-mono" style={{ color: 'var(--text-3)' }}>{cfgKey}</div>
-        </div>
-        {isAdmin && !editing && (
-          <div className="flex items-center gap-2 flex-shrink-0">
-            <button onClick={() => { setEditing(true); setVal('') }}
-              className="text-xs px-3 py-1.5 rounded-lg transition-colors"
-              style={{ background: 'rgba(38,166,154,0.12)', color: 'var(--accent)', border: '1px solid rgba(38,166,154,0.25)' }}>
-              {config.isSet ? 'Güncelle' : 'Ayarla'}
-            </button>
-            {config.isSet && (
-              <button onClick={() => onDelete(cfgKey)}
-                className="text-xs px-2 py-1.5 rounded-lg transition-colors"
-                style={{ background: 'rgba(239,68,68,0.08)', color: '#f87171', border: '1px solid rgba(239,68,68,0.15)' }}>
-                <Trash2 size={12} />
-              </button>
-            )}
-          </div>
-        )}
-      </div>
-      {editing && isAdmin && (
-        <div className="mt-3 flex gap-2">
-          <div className="flex-1">
-            {config.isSecret
-              ? <SecretInput value={val} onChange={setVal} placeholder="Değeri girin..." />
-              : <input type="text" value={val} onChange={e => setVal(e.target.value)} placeholder="Değeri girin..."
-                  className="w-full px-3 py-2 rounded-lg text-sm outline-none"
-                  style={{ background: 'var(--surface)', border: '1px solid var(--accent)', color: 'var(--text-1)' }} />
-            }
-          </div>
-          <button onClick={handleSave} disabled={saving || !val}
-            className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm text-white disabled:opacity-50"
-            style={{ background: 'linear-gradient(135deg, var(--accent), var(--forest))' }}>
-            <Save size={13} /> {saving ? '...' : 'Kaydet'}
-          </button>
-          <button onClick={() => { setEditing(false); setVal('') }}
-            className="px-3 py-2 rounded-lg text-sm"
-            style={{ background: 'var(--surface-2)', color: 'var(--text-2)', border: '1px solid var(--border)' }}>
-            İptal
-          </button>
-        </div>
-      )}
     </div>
   )
 }
@@ -627,21 +1102,13 @@ export default function PlatformSettings() {
   const { user } = useAuth()
   const isAdmin  = user?.role === 'admin'
 
-  const [tab,            setTab]            = useState('crm')
-  const [configs,        setConfigs]        = useState<Record<string, any>>({})
-  const [metrics,        setMetrics]        = useState<any>(null)
-  const [models,         setModels]         = useState<any[]>([])
-  const [loading,        setLoading]        = useState(true)
-  const [toast,          setToast]          = useState<{ msg: string; ok: boolean } | null>(null)
-  const [modelPool,      setModelPool]      = useState<Array<{ id: string; name: string }>>([])
-  const [poolLoading,    setPoolLoading]    = useState(false)
-  const [roleEdits,      setRoleEdits]      = useState<Record<string, { primary: string; fb1: string; fb2: string }>>({})
-  const [roleSaving,     setRoleSaving]     = useState<Record<string, boolean>>({})
-  const [seedLoading,    setSeedLoading]    = useState(false)
-  const [aiSectionOpen,  setAiSectionOpen]  = useState<Record<string, boolean>>({})
-  const [commConfigs,    setCommConfigs]    = useState<Record<string, Record<string, string> | null>>({})
-  const [commLoading,    setCommLoading]    = useState(false)
-  const [editComm,       setEditComm]       = useState<typeof COMM_CHANNELS[0] | null>(null)
+  const [tab,         setTab]         = useState('crm')
+  const [metrics,     setMetrics]     = useState<any>(null)
+  const [loading,     setLoading]     = useState(true)
+  const [toast,       setToast]       = useState<{ msg: string; ok: boolean } | null>(null)
+  const [commConfigs, setCommConfigs] = useState<Record<string, Record<string, string> | null>>({})
+  const [commLoading, setCommLoading] = useState(false)
+  const [editComm,    setEditComm]    = useState<typeof COMM_CHANNELS[0] | null>(null)
 
   if (user?.role !== 'admin' && user?.role !== 'supervisor') {
     return <Navigate to="/app/dashboard" replace />
@@ -655,26 +1122,8 @@ export default function PlatformSettings() {
   const loadAll = useCallback(async () => {
     setLoading(true)
     try {
-      const [cfgRes, metricsRes, modelsRes] = await Promise.allSettled([
-        api.get('/admin/platform-settings'),
-        api.get('/admin/metrics'),
-        api.get('/admin/models'),
-      ])
-      if (cfgRes.status === 'fulfilled') {
-        const map: Record<string, any> = {}
-        for (const c of cfgRes.value.data.configs ?? []) map[c.key] = c
-        setConfigs(map)
-      }
-      if (metricsRes.status === 'fulfilled') setMetrics(metricsRes.value.data)
-      if (modelsRes.status === 'fulfilled') {
-        const rows: any[] = modelsRes.value.data.models ?? []
-        setModels(rows)
-        const edits: Record<string, { primary: string; fb1: string; fb2: string }> = {}
-        for (const m of rows) {
-          edits[m.modelRole] = { primary: m.primaryModel ?? '', fb1: m.fallback1 ?? '', fb2: m.fallback2 ?? '' }
-        }
-        setRoleEdits(edits)
-      }
+      const metricsRes = await api.get('/admin/metrics').catch(() => null)
+      if (metricsRes) setMetrics(metricsRes.data)
     } finally {
       setLoading(false)
     }
@@ -695,69 +1144,6 @@ export default function PlatformSettings() {
     setCommConfigs(results)
     setCommLoading(false)
   }, [isAdmin])
-
-  const fetchModelPool = useCallback(async (bust = false) => {
-    setPoolLoading(true)
-    try {
-      if (bust) await api.post('/ai/openrouter-models/refresh').catch(() => {})
-      const res = await api.get('/ai/openrouter-models')
-      setModelPool(res.data.models ?? [])
-    } catch {
-      showToast('Model havuzu yüklenemedi', false)
-    } finally {
-      setPoolLoading(false)
-    }
-  }, [])
-
-  const saveRoleConfig = async (role: string) => {
-    const edit = roleEdits[role]
-    if (!edit) return
-    setRoleSaving(p => ({ ...p, [role]: true }))
-    try {
-      await api.put(`/admin/models/${role}`, { primaryModel: edit.primary || undefined, fallback1: edit.fb1 || undefined, fallback2: edit.fb2 || undefined })
-      showToast(`${MODEL_ROLE_LABELS[role] ?? role} kaydedildi`)
-      await loadAll()
-    } catch {
-      showToast('Kayıt başarısız', false)
-    } finally {
-      setRoleSaving(p => ({ ...p, [role]: false }))
-    }
-  }
-
-  const seedDefaults = async () => {
-    setSeedLoading(true)
-    try {
-      const res = await api.post('/admin/models/seed')
-      showToast(`${res.data.seeded} varsayılan config yüklendi`)
-      await loadAll()
-    } catch {
-      showToast('Yükleme başarısız', false)
-    } finally {
-      setSeedLoading(false)
-    }
-  }
-
-  const handleSave = async (key: string, value: string) => {
-    const schema = CONFIG_SCHEMA[key]
-    if (!schema) return
-    try {
-      await api.put(`/admin/platform-settings/${key}`, { value, label: schema.label, category: schema.category, isSecret: schema.isSecret })
-      showToast(`${schema.label} kaydedildi`)
-      await loadAll()
-    } catch {
-      showToast('Kayıt başarısız', false)
-    }
-  }
-
-  const handleDelete = async (key: string) => {
-    try {
-      await api.delete(`/admin/platform-settings/${key}`)
-      showToast('Silindi')
-      await loadAll()
-    } catch {
-      showToast('Silinemedi', false)
-    }
-  }
 
   const saveCommConfig = async (channelId: string, data: Record<string, string>) => {
     await api.put(`/admin/platform-comms/${channelId}`, data)
@@ -936,170 +1322,7 @@ export default function PlatformSettings() {
 
       {/* ── AI Modelleri Tab ── */}
       {!loading && tab === 'ai' && (
-        <div className="space-y-6">
-          {card(
-            <>
-              <div className="flex items-center gap-3 mb-5">
-                <div className="w-9 h-9 rounded-xl flex items-center justify-center" style={{ background: 'linear-gradient(135deg, var(--accent), var(--forest))' }}>
-                  <Brain size={17} className="text-white" />
-                </div>
-                <div>
-                  <h2 className="font-bold" style={{ color: 'var(--text-1)' }}>Provider API Anahtarları</h2>
-                  <p className="text-xs" style={{ color: 'var(--text-3)' }}>Model havuzunu genişletmek için ek provider anahtarları</p>
-                </div>
-              </div>
-              <div className="space-y-2">
-                {['openrouter_api_key', 'openai_api_key', 'anthropic_api_key', 'google_ai_api_key'].map(k => (
-                  <ConfigField key={k} cfgKey={k}
-                    config={{ label: CONFIG_SCHEMA[k].label, isSecret: CONFIG_SCHEMA[k].isSecret, isSet: configs[k]?.isSet ?? false, value: configs[k]?.value ?? '' }}
-                    isAdmin={isAdmin} onSave={handleSave} onDelete={handleDelete} />
-                ))}
-              </div>
-            </>
-          )}
-
-          {card(
-            <>
-              <div className="flex items-center justify-between gap-3 mb-5 flex-wrap">
-                <div className="flex items-center gap-3">
-                  <div className="w-9 h-9 rounded-xl flex items-center justify-center" style={{ background: 'linear-gradient(135deg, #6366f1, #4f46e5)' }}>
-                    <Zap size={17} className="text-white" />
-                  </div>
-                  <div>
-                    <h2 className="font-bold" style={{ color: 'var(--text-1)' }}>OpenRouter Ücretsiz Model Havuzu</h2>
-                    <p className="text-xs" style={{ color: 'var(--text-3)' }}>
-                      {modelPool.length > 0 ? `${modelPool.length} ücretsiz model` : 'Model havuzu yüklenmedi'}
-                    </p>
-                  </div>
-                </div>
-                <div className="flex gap-2">
-                  <button onClick={() => fetchModelPool(false)} disabled={poolLoading}
-                    className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs transition-all disabled:opacity-50"
-                    style={{ background: 'var(--surface-2)', color: 'var(--text-2)', border: '1px solid var(--border)' }}>
-                    <RefreshCw size={12} className={poolLoading ? 'animate-spin' : ''} /> Getir
-                  </button>
-                  {isAdmin && (
-                    <button onClick={() => fetchModelPool(true)} disabled={poolLoading}
-                      className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs transition-all disabled:opacity-50"
-                      style={{ background: 'rgba(38,166,154,0.12)', color: 'var(--accent)', border: '1px solid rgba(38,166,154,0.25)' }}>
-                      <RefreshCw size={12} /> Cache'i Temizle
-                    </button>
-                  )}
-                </div>
-              </div>
-              {modelPool.length > 0 ? (
-                <div className="max-h-48 overflow-y-auto rounded-xl" style={{ background: 'var(--surface-2)', border: '1px solid var(--border)' }}>
-                  {modelPool.map(m => (
-                    <div key={m.id} className="flex items-center gap-2 px-3 py-2 border-b last:border-0" style={{ borderColor: 'var(--border)' }}>
-                      <div className="min-w-0">
-                        <div className="text-xs font-mono truncate" style={{ color: 'var(--text-1)' }}>{m.id}</div>
-                        <div className="text-[10px]" style={{ color: 'var(--text-3)' }}>{m.name}</div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <p className="text-sm text-center py-6" style={{ color: 'var(--text-3)' }}>"Getir" butonuna basarak ücretsiz modelleri listeleyin.</p>
-              )}
-              <datalist id="model-pool-list">
-                {modelPool.map(m => <option key={m.id} value={m.id} label={m.name} />)}
-              </datalist>
-            </>
-          )}
-
-          {card(
-            <>
-              <div className="flex items-center justify-between gap-3 mb-5 flex-wrap">
-                <div className="flex items-center gap-3">
-                  <div className="w-9 h-9 rounded-xl flex items-center justify-center" style={{ background: 'linear-gradient(135deg, var(--accent), var(--forest))' }}>
-                    <Brain size={17} className="text-white" />
-                  </div>
-                  <div>
-                    <h2 className="font-bold" style={{ color: 'var(--text-1)' }}>Rol Bazlı Model Atama</h2>
-                    <p className="text-xs" style={{ color: 'var(--text-3)' }}>Her AI rolü için primary ve fallback modellerini atayın</p>
-                  </div>
-                </div>
-                {isAdmin && (
-                  <button onClick={seedDefaults} disabled={seedLoading}
-                    className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-medium transition-all disabled:opacity-50"
-                    style={{ background: 'rgba(38,166,154,0.12)', color: 'var(--accent)', border: '1px solid rgba(38,166,154,0.25)' }}>
-                    <Zap size={12} /> {seedLoading ? 'Yükleniyor...' : 'Varsayılanları Yükle'}
-                  </button>
-                )}
-              </div>
-              {models.length === 0 && Object.keys(roleEdits).length === 0 ? (
-                <div className="text-center py-8">
-                  <p className="text-sm mb-3" style={{ color: 'var(--text-3)' }}>Henüz model konfigürasyonu yok.</p>
-                  {isAdmin && (
-                    <button onClick={seedDefaults} disabled={seedLoading}
-                      className="px-4 py-2 rounded-xl text-sm font-medium transition-all"
-                      style={{ background: 'linear-gradient(135deg, var(--accent), var(--forest))', color: '#fff' }}>
-                      {seedLoading ? 'Yükleniyor...' : 'Varsayılan Konfigürasyonları Yükle'}
-                    </button>
-                  )}
-                </div>
-              ) : (
-                <div className="space-y-3">
-                  {Object.entries(MODEL_ROLE_LABELS).map(([role, label]) => {
-                    const edit   = roleEdits[role] ?? { primary: '', fb1: '', fb2: '' }
-                    const saved  = models.find((m: any) => m.modelRole === role)
-                    const isOpen = aiSectionOpen[role] ?? false
-                    return (
-                      <div key={role} className="rounded-xl overflow-hidden" style={{ border: '1px solid var(--border)' }}>
-                        <button onClick={() => setAiSectionOpen(p => ({ ...p, [role]: !p[role] }))}
-                          className="w-full flex items-center justify-between gap-3 px-4 py-3 transition-all"
-                          style={{ background: 'var(--surface-2)' }}>
-                          <div className="flex items-center gap-3 min-w-0">
-                            <span className="text-sm font-medium" style={{ color: 'var(--text-1)' }}>{label}</span>
-                            {saved?.primaryModel
-                              ? <span className="text-xs font-mono truncate max-w-[180px]" style={{ color: 'var(--accent)' }}>{saved.primaryModel}</span>
-                              : <span className="text-xs" style={{ color: 'var(--text-3)' }}>— seçilmedi —</span>}
-                          </div>
-                          <div className="flex items-center gap-2 flex-shrink-0">
-                            {saved && <span className="text-[10px] px-1.5 py-0.5 rounded-full" style={{ background: 'rgba(34,197,94,0.1)', color: '#4ade80' }}>Kayıtlı</span>}
-                            {isOpen ? <ChevronDown size={14} style={{ color: 'var(--text-3)' }} /> : <ChevronRight size={14} style={{ color: 'var(--text-3)' }} />}
-                          </div>
-                        </button>
-                        {isOpen && isAdmin && (
-                          <div className="px-4 pb-4 pt-3 space-y-3" style={{ background: 'var(--surface)' }}>
-                            {[{ field: 'primary', label: 'Primary Model' }, { field: 'fb1', label: 'Fallback 1' }, { field: 'fb2', label: 'Fallback 2' }].map(({ field, label: fLabel }) => (
-                              <div key={field}>
-                                <label className="text-xs mb-1 block" style={{ color: 'var(--text-3)' }}>{fLabel}</label>
-                                <input list="model-pool-list"
-                                  value={edit[field as keyof typeof edit]}
-                                  onChange={e => setRoleEdits(p => ({ ...p, [role]: { ...edit, [field]: e.target.value } }))}
-                                  placeholder={field === 'primary' ? 'model/id:free — zorunlu' : 'isteğe bağlı fallback'}
-                                  className="w-full px-3 py-2 rounded-lg text-xs outline-none font-mono"
-                                  style={{ background: 'var(--surface-2)', color: 'var(--text-1)', border: '1px solid var(--border)' }} />
-                              </div>
-                            ))}
-                            <div className="flex justify-end">
-                              <button onClick={() => saveRoleConfig(role)} disabled={roleSaving[role] || !edit.primary}
-                                className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-medium text-white transition-all disabled:opacity-50"
-                                style={{ background: 'linear-gradient(135deg, var(--accent), var(--forest))' }}>
-                                <Save size={12} /> {roleSaving[role] ? 'Kaydediliyor...' : 'Kaydet'}
-                              </button>
-                            </div>
-                          </div>
-                        )}
-                        {isOpen && !isAdmin && saved && (
-                          <div className="px-4 pb-4 pt-2 space-y-1.5" style={{ background: 'var(--surface)' }}>
-                            {[['Primary', saved.primaryModel], ['Fallback 1', saved.fallback1], ['Fallback 2', saved.fallback2]].filter(([, v]) => v).map(([l, v]) => (
-                              <div key={l} className="flex items-center gap-2">
-                                <span className="text-xs w-16 flex-shrink-0" style={{ color: 'var(--text-3)' }}>{l}</span>
-                                <span className="text-xs font-mono" style={{ color: 'var(--text-1)' }}>{v}</span>
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    )
-                  })}
-                </div>
-              )}
-            </>
-          )}
-        </div>
+        <AiModelsTab isAdmin={isAdmin} showToast={showToast} />
       )}
 
       {/* Comm Config Modal */}

@@ -16,6 +16,7 @@ import Settings from './pages/Settings'
 import Admin from './pages/Admin'
 import PlatformSettings from './pages/PlatformSettings'
 import Register from './pages/Register'
+import KiWallet from './pages/KiWallet'
 function PrivateRoute({ children }: { children: React.ReactNode }) {
   const { accessToken } = useAuth()
   if (!accessToken) return <Navigate to="/app/login" replace />
@@ -48,6 +49,7 @@ function AppShell() {
           <Route path="chat"       element={<AiChat />} />
           <Route path="entity-ai"  element={<EntityAI />} />
           <Route path="support"    element={<Support />} />
+          <Route path="wallet"     element={<KiWallet />} />
           <Route path="settings"   element={<Settings />} />
           <Route path="admin"             element={<AdminRoute><Admin /></AdminRoute>} />
           <Route path="admin/settings"   element={<AdminRoute><PlatformSettings /></AdminRoute>} />

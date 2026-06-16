@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
-import { Database, LifeBuoy, MessageSquare, HardDrive, RefreshCw, X, Bot, Mail, Users, CheckCircle2, Circle } from 'lucide-react'
+import { Database, LifeBuoy, MessageSquare, HardDrive, RefreshCw, X, Bot, Mail, Users, CheckCircle2, Circle, ChevronDown, ChevronRight, Layers } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import api from '../lib/api'
+import { useAuth } from '../store/auth'
 
 interface OnboardingStep { key: string; label: string; desc: string; done: boolean; to: string; icon: React.ElementType }
 
@@ -48,6 +49,10 @@ function OnboardingBanner({ steps, onDismiss }: { steps: OnboardingStep[]; onDis
 }
 
 export default function Dashboard() {
+  const { user } = useAuth()
+  const userRole = (user as any)?.role ?? ''
+  const canSeeCrmStructure = ['admin', 'supervisor', 'entity_main', 'entity_supervisor'].includes(userRole)
+
   const [connections,  setConnections]  = useState<any[]>([])
   const [tickets,      setTickets]      = useState<any[]>([])
   const [usedMB,       setUsedMB]       = useState(0)
@@ -56,6 +61,12 @@ export default function Dashboard() {
   const [memberCount,  setMemberCount]  = useState(0)
   const [dismissed,    setDismissed]    = useState(() => localStorage.getItem('ki-onboarding-dismissed') === '1')
 
+  // CRM Structure (modüller + field'lar)
+  const [crmModuleList, setCrmModuleList] = useState<any[]>([])
+  const [crmFieldList,  setCrmFieldList]  = useState<any[]>([])
+  const [crmCanView,    setCrmCanView]    = useState(false)
+  const [expandedMod,   setExpandedMod]   = useState<string | null>(null)
+
   useEffect(() => {
     Promise.all([
       api.get('/crm/connections'),
@@ -63,7 +74,8 @@ export default function Dashboard() {
       api.get('/tenants/storage-usage'),
       api.get('/tenants/email-config').catch(() => ({ data: { config: null } })),
       api.get('/tenants/me/members').catch(() => ({ data: { members: [] } })),
-    ]).then(([crm, support, storage, email, members]) => {
+      api.get('/crm/structure').catch(() => ({ data: { modules: [], fields: [], canView: false } })),
+    ]).then(([crm, support, storage, email, members, structure]) => {
       setConnections(crm.data.connections ?? [])
       setTickets((support.data.tickets ?? []).slice(0, 5))
       const used = storage.data.usedBytes ?? 0
@@ -72,6 +84,9 @@ export default function Dashboard() {
       setLimitMB(Math.round(limit / 1024 / 1024))
       setEmailDone(!!email.data.config?.smtp?.host)
       setMemberCount((members.data.members ?? []).length)
+      setCrmModuleList(structure.data.modules ?? [])
+      setCrmFieldList(structure.data.fields ?? [])
+      setCrmCanView(structure.data.canView ?? false)
     }).catch(console.error)
   }, [])
 
@@ -122,6 +137,61 @@ export default function Dashboard() {
           </div>
         ))}
       </div>
+
+      {/* CRM Yapı Paneli — entity_main / supervisor: varsayılan; entity_sub: yetki gerekli */}
+      {crmCanView && crmModuleList.length > 0 && (
+        <div className="mb-6 rounded-xl p-5" style={{ background: 'var(--surface-2)', border: '1px solid var(--border)' }}>
+          <div className="flex items-center gap-2 mb-4">
+            <Layers size={16} style={{ color: 'var(--accent)' }} />
+            <h3 className="font-semibold text-sm" style={{ color: 'var(--text-1)' }}>
+              CRM Yapısı — {crmModuleList.length} Modül
+            </h3>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+            {crmModuleList.map((mod: any) => {
+              const modFields = crmFieldList.filter((f: any) => f.moduleApiName === mod.apiName)
+              const isExpanded = expandedMod === mod.apiName
+              return (
+                <div key={mod.apiName} className="rounded-xl overflow-hidden"
+                  style={{ border: '1px solid var(--border)', background: 'var(--surface)' }}>
+                  <button
+                    onClick={() => setExpandedMod(isExpanded ? null : mod.apiName)}
+                    className="w-full flex items-center justify-between px-3 py-2.5 text-left transition-all"
+                    style={{ background: isExpanded ? 'rgba(38,166,154,0.08)' : '' }}>
+                    <div className="min-w-0">
+                      <p className="text-xs font-semibold truncate" style={{ color: 'var(--text-1)' }}>
+                        {mod.pluralLabel || mod.moduleName || mod.apiName}
+                      </p>
+                      <p className="text-[10px] font-mono" style={{ color: 'var(--text-3)' }}>{mod.apiName}</p>
+                    </div>
+                    <div className="flex items-center gap-2 flex-shrink-0 ml-2">
+                      <span className="text-[10px] px-1.5 py-0.5 rounded-full" style={{ background: 'rgba(38,166,154,0.1)', color: 'var(--accent)' }}>
+                        {modFields.length} alan
+                      </span>
+                      {isExpanded ? <ChevronDown size={12} style={{ color: 'var(--text-3)' }} /> : <ChevronRight size={12} style={{ color: 'var(--text-3)' }} />}
+                    </div>
+                  </button>
+                  {isExpanded && modFields.length > 0 && (
+                    <div className="px-3 pb-2 pt-1 space-y-0.5 max-h-40 overflow-y-auto" style={{ borderTop: '1px solid var(--border)' }}>
+                      {modFields.map((f: any) => (
+                        <div key={f.apiName} className="flex items-center justify-between py-0.5">
+                          <span className="text-[11px] font-mono" style={{ color: 'var(--text-2)' }}>{f.apiName}</span>
+                          <span className="text-[10px]" style={{ color: 'var(--text-3)' }}>{f.dataType}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+          {!canSeeCrmStructure && (
+            <p className="text-[11px] mt-3" style={{ color: 'var(--text-3)' }}>
+              Bu bölüm yetkilendirilmiş kullanıcılara görünür. Yetkiniz Entity Yöneticisi tarafından verildi.
+            </p>
+          )}
+        </div>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* CRM connections */}

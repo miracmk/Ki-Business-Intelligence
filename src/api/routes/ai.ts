@@ -5,10 +5,38 @@ import { AiGateway, ANALYSIS_MODELS, CONVERSATION_MODELS } from '../../engine/ai
 import { redis } from '../../lib/redis.js'
 import { vectorSearch } from '../../lib/qdrant.js'
 import { db } from '../../lib/db.js'
-import { kibiEntities, kibiSupportTickets, kibiTokenUsage, entityMetrics } from '../../../db/schema.js'
-import { eq, sql } from 'drizzle-orm'
+import { kibiEntities, kibiSupportTickets, kibiTokenUsage, entityMetrics, aiSessions, aiMessages } from '../../../db/schema.js'
+import { eq, and, sql } from 'drizzle-orm'
 import { getEntitySchema, queryEntitySchema, getEntityDataSummary } from '../../lib/entity-provisioner.js'
 import { env } from '../../../config/env.js'
+
+async function resolveEntityId(userId: string, tenantId: string | null): Promise<string> {
+  const isUUID = (s: string | null | undefined) =>
+    !!s && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)
+
+  if (isUUID(tenantId)) {
+    const entity = await db.query.kibiEntities.findFirst({
+      where: (t, { eq }) => eq(t.entityId, tenantId!)
+    })
+    if (entity) return entity.id
+  }
+
+  // Fallback: Find membership
+  const membership = await db.query.tenantMemberships.findFirst({
+    where: (t, { eq }) => eq(t.userId, userId)
+  })
+  if (membership) {
+    const entity = await db.query.kibiEntities.findFirst({
+      where: (t, { eq }) => eq(t.entityId, membership.tenantId)
+    })
+    if (entity) return entity.id
+  }
+
+  const firstEntity = await db.query.kibiEntities.findFirst()
+  if (firstEntity) return firstEntity.id
+
+  throw new Error('Aktif bir entity bulunamadı.')
+}
 
 // Plan limits per plan name
 const PLAN_MSG_LIMITS: Record<string, number> = {
@@ -66,6 +94,91 @@ const FREE_MODELS_CACHE_TTL = 6 * 60 * 60  // 6 hours
 
 export const aiRoutes: FastifyPluginAsync = async (app) => {
 
+  // ── GET /api/v1/ai/sessions ───────────────────────────────────────────────
+  app.get('/sessions', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = req.user as { sub: string; tenantId: string | null }
+    const { type } = req.query as { type?: string }
+    try {
+      const entityId = await resolveEntityId(user.sub, user.tenantId)
+      const list = await db.query.aiSessions.findMany({
+        where: (t, { and, eq }) => {
+          const conds = [eq(t.userId, user.sub), eq(t.entityId, entityId), eq(t.isArchived, false)]
+          if (type) conds.push(eq(t.type, type as any))
+          return and(...conds)
+        },
+        orderBy: (t, { desc }) => [desc(t.updatedAt)],
+      })
+      return reply.send({ sessions: list })
+    } catch (e: any) {
+      return reply.status(500).send({ error: e.message })
+    }
+  })
+
+  // ── POST /api/v1/ai/sessions ──────────────────────────────────────────────
+  app.post('/sessions', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = req.user as { sub: string; tenantId: string | null }
+    const body = z.object({
+      title: z.string().max(500).default('Yeni Sohbet'),
+      type: z.enum(['kibi_ai', 'entity_ai']).default('kibi_ai'),
+      channel: z.string().default('web')
+    }).safeParse(req.body)
+    if (!body.success) return reply.status(400).send({ error: body.error.flatten() })
+
+    try {
+      const entityId = await resolveEntityId(user.sub, user.tenantId)
+      const [session] = await db.insert(aiSessions).values({
+        entityId,
+        userId: user.sub,
+        type: body.data.type,
+        title: body.data.title,
+        channel: body.data.channel as any,
+        messageCount: 0,
+      }).returning()
+      return reply.status(201).send({ session })
+    } catch (e: any) {
+      return reply.status(500).send({ error: e.message })
+    }
+  })
+
+  // ── GET /api/v1/ai/sessions/:id/messages ──────────────────────────────────
+  app.get('/sessions/:id/messages', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = req.user as { sub: string; tenantId: string | null }
+    const { id } = req.params as { id: string }
+    try {
+      const entityId = await resolveEntityId(user.sub, user.tenantId)
+      const session = await db.query.aiSessions.findFirst({
+        where: (t, { and, eq }) => and(eq(t.id, id), eq(t.userId, user.sub), eq(t.entityId, entityId))
+      })
+      if (!session) return reply.status(404).send({ error: 'Oturum bulunamadı' })
+
+      const list = await db.query.aiMessages.findMany({
+        where: (t, { eq }) => eq(t.sessionId, id),
+        orderBy: (t, { asc }) => [asc(t.createdAt)]
+      })
+      return reply.send({ messages: list })
+    } catch (e: any) {
+      return reply.status(500).send({ error: e.message })
+    }
+  })
+
+  // ── DELETE /api/v1/ai/sessions/:id ─────────────────────────────────────────
+  app.delete('/sessions/:id', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = req.user as { sub: string; tenantId: string | null }
+    const { id } = req.params as { id: string }
+    try {
+      const entityId = await resolveEntityId(user.sub, user.tenantId)
+      const session = await db.query.aiSessions.findFirst({
+        where: (t, { and, eq }) => and(eq(t.id, id), eq(t.userId, user.sub), eq(t.entityId, entityId))
+      })
+      if (!session) return reply.status(404).send({ error: 'Oturum bulunamadı' })
+
+      await db.delete(aiSessions).where(eq(aiSessions.id, id))
+      return reply.send({ ok: true })
+    } catch (e: any) {
+      return reply.status(500).send({ error: e.message })
+    }
+  })
+
   // ── POST /api/v1/ai/chat ──────────────────────────────────────────────────
   app.post('/chat', { onRequest: [app.authenticate] }, async (req, reply) => {
     const user = req.user as { sub: string; tenantId: string | null; role?: string }
@@ -73,13 +186,56 @@ export const aiRoutes: FastifyPluginAsync = async (app) => {
     if (!body.success) return reply.status(400).send({ error: body.error.flatten() })
 
     const { message, sessionId, ...rest } = body.data
-    const sid = sessionId ?? `web_${user.sub}_${Date.now()}`
+    let sid = sessionId
     const isAdmin = user.role === 'admin' || user.role === 'supervisor'
+
+    const isUUIDCheck = (s: string | null | undefined) =>
+      !!s && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)
+
+    const entityId = await resolveEntityId(user.sub, user.tenantId).catch(() => null)
+
+    if (!sid || !isUUIDCheck(sid)) {
+      if (entityId) {
+        try {
+          const [newSession] = await db.insert(aiSessions).values({
+            entityId,
+            userId: user.sub,
+            type: 'kibi_ai',
+            title: message.slice(0, 50) || 'Yeni Sohbet',
+            messageCount: 0,
+            channel: 'web',
+          }).returning()
+          sid = newSession.id
+        } catch (err) {
+          console.error('[AI CHAT] Failed to auto-create session in DB:', err)
+          sid = sid ?? `web_${user.sub}_${Date.now()}`
+        }
+      } else {
+        sid = sid ?? `web_${user.sub}_${Date.now()}`
+      }
+    } else {
+      if (entityId) {
+        const existing = await db.query.aiSessions.findFirst({ where: (t, { eq }) => eq(t.id, sid!) })
+        if (!existing) {
+          try {
+            await db.insert(aiSessions).values({
+              id: sid,
+              entityId,
+              userId: user.sub,
+              type: 'kibi_ai',
+              title: message.slice(0, 50) || 'Yeni Sohbet',
+              messageCount: 0,
+              channel: 'web',
+            })
+          } catch (err) {
+            console.error('[AI CHAT] Failed to create session with UUID:', err)
+          }
+        }
+      }
+    }
 
     // Load custom KIBI instructions if tenant has AI config
     let kibiInstructions: string | undefined
-    const isUUIDCheck = (s: string | null | undefined) =>
-      !!s && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)
     if (isUUIDCheck(user.tenantId)) {
       try {
         const cfg = await db.query.aiConfigs.findFirst({ where: (t, { eq }) => eq(t.tenantId, user.tenantId!) })
@@ -276,6 +432,45 @@ export const aiRoutes: FastifyPluginAsync = async (app) => {
         })
       }
 
+      // Resolve / auto-create session
+      const { sessionId } = body.data
+      let sid = sessionId
+      const entityId = entity.id
+
+      if (!sid || !isUUID(sid)) {
+        try {
+          const [newSession] = await db.insert(aiSessions).values({
+            entityId,
+            userId: user.sub,
+            type: 'entity_ai',
+            title: message.slice(0, 50) || 'Yeni Entity Sohbeti',
+            messageCount: 0,
+            channel: 'web',
+          }).returning()
+          sid = newSession.id
+        } catch (err) {
+          console.error('[ENTITY AI] Failed to auto-create session in DB:', err)
+          sid = sid ?? `entity_${user.sub}_${Date.now()}`
+        }
+      } else {
+        const existing = await db.query.aiSessions.findFirst({ where: (t, { eq }) => eq(t.id, sid!) })
+        if (!existing) {
+          try {
+            await db.insert(aiSessions).values({
+              id: sid,
+              entityId,
+              userId: user.sub,
+              type: 'entity_ai',
+              title: message.slice(0, 50) || 'Yeni Entity Sohbeti',
+              messageCount: 0,
+              channel: 'web',
+            })
+          } catch (err) {
+            console.error('[ENTITY AI] Failed to create session with UUID:', err)
+          }
+        }
+      }
+
       // Get live data summary to build context
       const summary = await getEntityDataSummary(entity.entityDbSchema)
 
@@ -298,13 +493,13 @@ Kullanıcı sorusu:`
 
       const result = await runAgent({
         tenantId:     user.tenantId ?? 'default',
-        sessionId:    `entity_${user.sub}_${Date.now()}`,
+        sessionId:    sid,
         userMessage:  `${context}\n${message}`,
         channel:      'web',
         instructions: entityInstructions,
       })
 
-      return reply.send({ response: result.response, sessionId: `entity_${user.sub}` })
+      return reply.send({ response: result.response, sessionId: sid })
     } catch (e: any) {
       console.error('[ENTITY AI] Error:', e)
       return reply.status(500).send({ error: 'Entity AI hatası, lütfen tekrar deneyin' })
@@ -312,23 +507,39 @@ Kullanıcı sorusu:`
   })
 
   // ── POST /api/v1/ai/admin-chat ────────────────────────────────────────────
-  // KIBI Admin AI: superadmin only, full access, no history retention
+  // KIBI Admin AI: superadmin + supervisor, full platform access, now with session history
   app.post('/admin-chat', { onRequest: [app.authenticate] }, async (req, reply) => {
     const user = req.user as { sub: string; tenantId: string | null; role?: string }
-    if (user.role !== 'admin') return reply.status(403).send({ error: 'Yetkisiz erişim' })
+    if (user.role !== 'admin' && user.role !== 'supervisor') {
+      return reply.status(403).send({ error: 'Yetkisiz erişim' })
+    }
 
-    const body = z.object({ message: z.string().min(1) }).safeParse(req.body)
+    const body = z.object({
+      message:   z.string().min(1),
+      sessionId: z.string().optional(),
+    }).safeParse(req.body)
     if (!body.success) return reply.status(400).send({ error: body.error.flatten() })
 
+    const isUUID = (s: string | null | undefined) =>
+      !!s && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)
+
+    // Resolve a persistent session for admin (admin doesn't belong to an entity,
+    // so we use a special "platform_admin" entity lookup or create a Redis-backed session)
+    let sid = body.data.sessionId
+    // Admin sessions are Redis-backed only (no entity UUID required)
+    if (!sid || !isUUID(sid)) {
+      sid = `admin_${user.sub}_persistent`
+    }
+
     try {
-      // Admin AI uses a fresh session each time — no history
       const result = await runAgent({
         tenantId:    'admin',
-        sessionId:   `admin_${user.sub}_${Date.now()}`, // unique = no context carry
+        sessionId:   sid,
         userMessage: body.data.message,
         channel:     'web',
+        isAdmin:     true,
       })
-      return reply.send({ response: result.response })
+      return reply.send({ response: result.response, sessionId: sid })
     } catch (e: any) {
       console.error('[ADMIN AI] Error:', e)
       return reply.status(500).send({ error: 'Admin AI hatası' })

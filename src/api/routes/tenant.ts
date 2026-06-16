@@ -1,12 +1,16 @@
 import type { FastifyPluginAsync } from 'fastify'
 import { db } from '../../lib/db.js'
-import { aiConfigs, emailConfigs, tenantMemberships, tenants, users } from '../../../db/schema.js'
-import { encryptJson, decryptJson } from '../../lib/crypto.js'
-import { eq } from 'drizzle-orm'
+import { aiConfigs, emailConfigs, tenantMemberships, tenants, users, platformConfigs, kibiModelConfigs, knowledgeEntries } from '../../../db/schema.js'
+import { encryptJson, decryptJson, encrypt, decrypt } from '../../lib/crypto.js'
+import { eq, and } from 'drizzle-orm'
 import nodemailer from 'nodemailer'
 import * as argon2 from 'argon2'
 import { nanoid } from 'nanoid'
 import { env } from '../../../config/env.js'
+import { PROVIDERS, getConfigKey, KIBI_FREE_MODEL } from '../../engine/ai/providers.js'
+import { invalidateProviderKeyCache } from '../../engine/ai/gateway.js'
+import { redis } from '../../lib/redis.js'
+import { qdrant, embedConfigured } from '../../lib/qdrant.js'
 
 const isUUID = (s: string | null | undefined): s is string =>
   !!s && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)
@@ -489,6 +493,197 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
     return reply.send({ ok: true, added: false, invited: true })
   })
 
+  // ── Entity AI Provider Management ─────────────────────────────────────────────
+
+  // GET /api/v1/tenants/ai-providers — list own keys + platform entity_free keys + kibi_free
+  app.get('/ai-providers', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = req.user as { sub: string; tenantId: string }
+    if (!isUUID(user.tenantId)) return reply.send({ providers: [] })
+
+    // Entity's own keys from ai_configs.settings.providerKeys
+    const aiConfig = await db.query.aiConfigs.findFirst({
+      where: (t, { eq }) => eq(t.tenantId, user.tenantId),
+    })
+    const ownProviderKeys = (aiConfig?.settings as any)?.providerKeys as Record<string, string> | undefined ?? {}
+
+    // Platform entity_free keys
+    const allPlatformRows = await db.select().from(platformConfigs)
+    const entityFreeSet = new Set(
+      allPlatformRows
+        .filter(r => r.key.startsWith('ai_provider_entity_free_') && r.value !== '')
+        .map(r => r.key.replace('ai_provider_entity_free_', ''))
+    )
+
+    const providers = PROVIDERS.map(p => ({
+      id:          p.id,
+      name:        p.name,
+      docsUrl:     p.docsUrl,
+      freeModels:  p.freeModels,
+      source:      ownProviderKeys[p.id] ? 'own' : (entityFreeSet.has(p.id) ? 'platform' : 'none'),
+      isConfigured: !!(ownProviderKeys[p.id] || entityFreeSet.has(p.id)),
+    }))
+
+    // Add kibi_free virtual option
+    const freeOption = {
+      id:          'kibi_free',
+      name:        'KIBI Ücretsiz Altyapısı',
+      docsUrl:     '',
+      freeModels:  true,
+      source:      'platform' as const,
+      isConfigured: true,
+    }
+
+    return reply.send({ providers: [freeOption, ...providers] })
+  })
+
+  // PUT /api/v1/tenants/ai-providers/:providerId — save entity's own key
+  app.put('/ai-providers/:providerId', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = req.user as { sub: string; tenantId: string; role: string }
+    if (!isUUID(user.tenantId)) return reply.status(400).send({ error: 'Entity bağlantısı gerekli' })
+    if (!['entity_main', 'admin'].includes(user.role)) return reply.status(403).send({ error: 'Yetkisiz' })
+
+    const { providerId } = req.params as { providerId: string }
+    if (!PROVIDERS.find(p => p.id === providerId)) return reply.status(400).send({ error: 'Bilinmeyen provider' })
+
+    const { apiKey } = req.body as { apiKey: string }
+    if (!apiKey?.trim()) return reply.status(400).send({ error: 'API key boş olamaz' })
+
+    const encryptedKey = encrypt(apiKey.trim())
+
+    const existing = await db.query.aiConfigs.findFirst({
+      where: (t, { eq }) => eq(t.tenantId, user.tenantId),
+    })
+    const existingSettings = (existing?.settings ?? {}) as Record<string, any>
+    const providerKeys = { ...(existingSettings.providerKeys ?? {}), [providerId]: encryptedKey }
+
+    if (existing) {
+      await db.update(aiConfigs)
+        .set({ settings: { ...existingSettings, providerKeys } as any })
+        .where(eq(aiConfigs.id, existing.id))
+    } else {
+      await db.insert(aiConfigs).values({
+        tenantId: user.tenantId,
+        provider: 'openrouter' as any,
+        model:    'meta-llama/llama-3.3-70b-instruct:free',
+        isDefault: true,
+        settings: { providerKeys } as any,
+      })
+    }
+
+    // Invalidate key cache for this entity+provider
+    invalidateProviderKeyCache(`entity_own:${user.tenantId}:${providerId}`)
+    return reply.send({ ok: true })
+  })
+
+  // DELETE /api/v1/tenants/ai-providers/:providerId — remove entity's own key
+  app.delete('/ai-providers/:providerId', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = req.user as { sub: string; tenantId: string; role: string }
+    if (!isUUID(user.tenantId)) return reply.status(400).send({ error: 'Entity bağlantısı gerekli' })
+    if (!['entity_main', 'admin'].includes(user.role)) return reply.status(403).send({ error: 'Yetkisiz' })
+
+    const { providerId } = req.params as { providerId: string }
+
+    const existing = await db.query.aiConfigs.findFirst({
+      where: (t, { eq }) => eq(t.tenantId, user.tenantId),
+    })
+    if (!existing) return reply.send({ ok: true })
+
+    const existingSettings = (existing.settings ?? {}) as Record<string, any>
+    const providerKeys = { ...(existingSettings.providerKeys ?? {}) }
+    delete providerKeys[providerId]
+    await db.update(aiConfigs)
+      .set({ settings: { ...existingSettings, providerKeys } as any })
+      .where(eq(aiConfigs.id, existing.id))
+
+    invalidateProviderKeyCache(`entity_own:${user.tenantId}:${providerId}`)
+    return reply.send({ ok: true })
+  })
+
+  // GET /api/v1/tenants/ai-providers/all-models — models from own + entity_free + kibi_free
+  app.get('/ai-providers/all-models', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = req.user as { sub: string; tenantId: string }
+    if (!isUUID(user.tenantId)) return reply.send({ providers: [] })
+
+    const aiConfig = await db.query.aiConfigs.findFirst({
+      where: (t, { eq }) => eq(t.tenantId, user.tenantId),
+    })
+    const ownKeys = (aiConfig?.settings as any)?.providerKeys as Record<string, string> | undefined ?? {}
+
+    const allPlatformRows = await db.select().from(platformConfigs)
+    const entityFreeConfigured = allPlatformRows
+      .filter(r => r.key.startsWith('ai_provider_entity_free_') && r.value !== '')
+      .map(r => r.key.replace('ai_provider_entity_free_', ''))
+
+    const results: Array<{ provider: string; source: string; models: Array<{ id: string; name: string }> }> = []
+
+    // kibi_free virtual option always first
+    const freeRoles = await db.select().from(kibiModelConfigs)
+      .where(eq(kibiModelConfigs.scope, 'entity_free'))
+    const freeModels = freeRoles.map(r => ({
+      id:   KIBI_FREE_MODEL,
+      name: `KIBI Ücretsiz (${r.modelRole}: ${r.primaryModel})`,
+    }))
+    results.push({ provider: 'kibi_free', source: 'platform', models: freeModels.length ? [{ id: KIBI_FREE_MODEL, name: 'KIBI Ücretsiz Altyapısı (Paylaşımlı)' }] : [{ id: KIBI_FREE_MODEL, name: 'KIBI Ücretsiz Altyapısı' }] })
+
+    // Entity own keys
+    for (const [providerId] of Object.entries(ownKeys)) {
+      const cacheKey = `ki:models:entity_own:${user.tenantId}:${providerId}`
+      const cached   = await redis.get(cacheKey).catch(() => null)
+      if (cached) {
+        try { results.push({ provider: providerId, source: 'own', models: JSON.parse(cached) }); continue }
+        catch { /* continue */ }
+      }
+
+      const providerDef = PROVIDERS.find(p => p.id === providerId)
+      if (!providerDef?.modelsPath) continue
+
+      try {
+        const encKey = ownKeys[providerId]
+        let apiKey: string
+        try { apiKey = decrypt(encKey) } catch { continue }
+
+        const headers: Record<string, string> = {
+          'Content-Type': 'application/json',
+          ...providerDef.extraHeaders,
+          ...(providerDef.authHeader === 'x-api-key'
+            ? { 'x-api-key': apiKey }
+            : { 'Authorization': `Bearer ${apiKey}` }),
+        }
+        const controller = new AbortController()
+        const timer      = setTimeout(() => controller.abort(), 10_000)
+        let modelsRes: Response
+        try {
+          modelsRes = await fetch(`${providerDef.baseUrl}${providerDef.modelsPath}`, { headers, signal: controller.signal })
+        } finally {
+          clearTimeout(timer)
+        }
+        if (!modelsRes.ok) continue
+
+        const modelsData = await modelsRes.json() as any
+        const models = ((modelsData.data ?? modelsData.models ?? []) as any[])
+          .map((m: any) => ({ id: `${providerId}::${m.name?.replace('models/', '') ?? m.id}`, name: m.display_name ?? m.displayName ?? m.id }))
+
+        await redis.set(cacheKey, JSON.stringify(models), 'EX', 1800)
+        results.push({ provider: providerId, source: 'own', models })
+      } catch { /* skip */ }
+    }
+
+    // Entity_free platform keys
+    for (const providerId of entityFreeConfigured) {
+      if (ownKeys[providerId]) continue  // entity has own key, already included
+      const cacheKey = `ki:models:entity_free:${providerId}`
+      const cached   = await redis.get(cacheKey).catch(() => null)
+      if (cached) {
+        try { results.push({ provider: providerId, source: 'platform', models: JSON.parse(cached) }); continue }
+        catch { /* continue */ }
+      }
+      // Models for platform keys are cached by admin endpoint; serve empty if not cached
+      results.push({ provider: providerId, source: 'platform', models: [] })
+    }
+
+    return reply.send({ providers: results })
+  })
+
   // GET /api/v1/tenants/external-users — list external users for this entity
   app.get('/external-users', { onRequest: [app.authenticate] }, async (req, reply) => {
     const user = req.user as { sub: string; tenantId: string; role: string }
@@ -506,5 +701,144 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
       columns: { id: true, email: true, name: true, phone: true, isActive: true, createdAt: true },
     })
     return reply.send({ users: externalUsers })
+  })
+
+  // ─── Vector Docs (Entity Knowledge Base) ────────────────────────────────────
+
+  // GET /api/v1/tenants/vector-docs — list entity's knowledge entries
+  app.get('/vector-docs', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = req.user as { sub: string; tenantId: string }
+    if (!isUUID(user.tenantId)) return reply.status(400).send({ error: 'Geçersiz tenant' })
+
+    const docs = await db.select({
+      id:        knowledgeEntries.id,
+      title:     knowledgeEntries.title,
+      content:   knowledgeEntries.content,
+      source:    knowledgeEntries.source,
+      isIndexed: knowledgeEntries.isIndexed,
+      qdrantId:  knowledgeEntries.qdrantId,
+      createdAt: knowledgeEntries.createdAt,
+    }).from(knowledgeEntries).where(eq(knowledgeEntries.tenantId, user.tenantId))
+
+    return reply.send({ docs })
+  })
+
+  // POST /api/v1/tenants/vector-docs — create + embed + upsert to Qdrant
+  app.post('/vector-docs', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = req.user as { sub: string; tenantId: string; role: string }
+    if (!isUUID(user.tenantId)) return reply.status(400).send({ error: 'Geçersiz tenant' })
+    if (!['entity_main', 'entity_supervisor', 'admin'].includes(user.role)) {
+      return reply.status(403).send({ error: 'Yetkisiz' })
+    }
+
+    const { title, content } = req.body as { title?: string; content?: string }
+    if (!title?.trim() || !content?.trim()) {
+      return reply.status(400).send({ error: 'Başlık ve içerik zorunlu' })
+    }
+
+    const [doc] = await db.insert(knowledgeEntries).values({
+      tenantId: user.tenantId,
+      title:    title.trim(),
+      content:  content.trim(),
+      source:   'manual',
+    }).returning()
+
+    // Embed + upsert to Qdrant (best-effort — don't fail the request if Qdrant is down)
+    try {
+      const [vector] = await embedConfigured([content.trim()])
+      const collection = `entity_${user.tenantId}`
+      await qdrant.upsert(collection, {
+        wait: true,
+        points: [{
+          id:      doc!.id,
+          vector:  vector!,
+          payload: { title: doc!.title, tenantId: user.tenantId, source: 'manual' },
+        }],
+      }).catch(() =>
+        // Fallback: try platform collection
+        qdrant.upsert(env.QDRANT_COLLECTION, {
+          wait: true,
+          points: [{ id: doc!.id, vector: vector!, payload: { title: doc!.title, tenantId: user.tenantId } }],
+        })
+      )
+      await db.update(knowledgeEntries)
+        .set({ qdrantId: doc!.id, isIndexed: true })
+        .where(eq(knowledgeEntries.id, doc!.id))
+    } catch (e: any) {
+      console.warn('[vector-docs] Embedding/Qdrant error:', e.message)
+    }
+
+    return reply.status(201).send({ doc })
+  })
+
+  // PUT /api/v1/tenants/vector-docs/:id — update title/content + reindex
+  app.put('/vector-docs/:id', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = req.user as { sub: string; tenantId: string; role: string }
+    if (!isUUID(user.tenantId)) return reply.status(400).send({ error: 'Geçersiz tenant' })
+    if (!['entity_main', 'entity_supervisor', 'admin'].includes(user.role)) {
+      return reply.status(403).send({ error: 'Yetkisiz' })
+    }
+
+    const { id } = req.params as { id: string }
+    const { title, content } = req.body as { title?: string; content?: string }
+
+    const existing = await db.query.knowledgeEntries.findFirst({
+      where: (t, { and, eq }) => and(eq(t.id, id), eq(t.tenantId, user.tenantId)),
+    })
+    if (!existing) return reply.status(404).send({ error: 'Bulunamadı' })
+
+    const newContent = content?.trim() ?? existing.content
+    await db.update(knowledgeEntries)
+      .set({
+        title:     title?.trim() ?? existing.title,
+        content:   newContent,
+        isIndexed: false,
+      })
+      .where(eq(knowledgeEntries.id, id))
+
+    // Re-embed
+    try {
+      const [vector] = await embedConfigured([newContent])
+      const collection = `entity_${user.tenantId}`
+      await qdrant.upsert(collection, {
+        wait: true,
+        points: [{ id, vector: vector!, payload: { title: title?.trim() ?? existing.title, tenantId: user.tenantId } }],
+      }).catch(() =>
+        qdrant.upsert(env.QDRANT_COLLECTION, {
+          wait: true,
+          points: [{ id, vector: vector!, payload: { title: title?.trim() ?? existing.title, tenantId: user.tenantId } }],
+        })
+      )
+      await db.update(knowledgeEntries).set({ isIndexed: true }).where(eq(knowledgeEntries.id, id))
+    } catch (e: any) {
+      console.warn('[vector-docs] Re-embed error:', e.message)
+    }
+
+    return reply.send({ ok: true })
+  })
+
+  // DELETE /api/v1/tenants/vector-docs/:id — delete from DB + Qdrant
+  app.delete('/vector-docs/:id', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = req.user as { sub: string; tenantId: string; role: string }
+    if (!isUUID(user.tenantId)) return reply.status(400).send({ error: 'Geçersiz tenant' })
+    if (!['entity_main', 'entity_supervisor', 'admin'].includes(user.role)) {
+      return reply.status(403).send({ error: 'Yetkisiz' })
+    }
+
+    const { id } = req.params as { id: string }
+    const existing = await db.query.knowledgeEntries.findFirst({
+      where: (t, { and, eq }) => and(eq(t.id, id), eq(t.tenantId, user.tenantId)),
+    })
+    if (!existing) return reply.status(404).send({ error: 'Bulunamadı' })
+
+    await db.delete(knowledgeEntries).where(eq(knowledgeEntries.id, id))
+
+    // Remove from Qdrant (best-effort)
+    try {
+      await qdrant.delete(`entity_${user.tenantId}`, { wait: true, points: [id] })
+        .catch(() => qdrant.delete(env.QDRANT_COLLECTION, { wait: true, points: [id] }))
+    } catch {}
+
+    return reply.send({ ok: true })
   })
 }

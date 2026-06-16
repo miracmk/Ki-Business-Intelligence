@@ -1,25 +1,64 @@
-import { useState } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { Send, ShieldCheck, Trash2 } from 'lucide-react'
 import api from '../lib/api'
+import { useAuth } from '../store/auth'
 
 interface Msg { role: 'user' | 'assistant'; content: string }
 
+const SESSION_KEY = 'ki-admin-ai-session'
+
 export default function KibiAdminAI() {
+  const { user } = useAuth()
+  const persistentSessionId = `admin_${(user as any)?.id ?? 'unknown'}_persistent`
+
   const [messages, setMessages] = useState<Msg[]>([])
   const [input,    setInput]    = useState('')
   const [loading,  setLoading]  = useState(false)
   const [error,    setError]    = useState('')
+  const [initDone, setInitDone] = useState(false)
+  const bottomRef = useRef<HTMLDivElement>(null)
+
+  // Load session history on mount from Redis (via a dummy send that fetches context)
+  // Admin sessions are Redis-backed, so we restore from localStorage as UI cache
+  useEffect(() => {
+    try {
+      const cached = localStorage.getItem(SESSION_KEY)
+      if (cached) {
+        setMessages(JSON.parse(cached))
+      }
+    } catch { /* non-fatal */ }
+    setInitDone(true)
+  }, [])
+
+  useEffect(() => {
+    if (initDone && messages.length > 0) {
+      try {
+        localStorage.setItem(SESSION_KEY, JSON.stringify(messages.slice(-50)))
+      } catch { /* non-fatal */ }
+    }
+  }, [messages, initDone])
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [messages, loading])
+
+  const clearSession = () => {
+    setMessages([])
+    localStorage.removeItem(SESSION_KEY)
+  }
 
   const send = async () => {
     if (!input.trim() || loading) return
     setError('')
-    const userMsg: Msg = { role: 'user', content: input }
-    setMessages(p => [...p, userMsg])
     const text = input
     setInput('')
+    setMessages(p => [...p, { role: 'user', content: text }])
     setLoading(true)
     try {
-      const res = await api.post('/ai/admin-chat', { message: text })
+      const res = await api.post('/ai/admin-chat', {
+        message:   text,
+        sessionId: persistentSessionId,
+      })
       setMessages(p => [...p, { role: 'assistant', content: res.data.response }])
     } catch (e: any) {
       setError(e.response?.data?.error || 'Mesaj gönderilemedi')
@@ -41,21 +80,14 @@ export default function KibiAdminAI() {
           </div>
           <div>
             <h2 className="text-sm font-semibold" style={{ color: 'var(--text-1)' }}>KIBI Admin AI</h2>
-            <p className="text-xs" style={{ color: 'var(--text-3)' }}>Tam erişim — tüm entity verilerini görebilir</p>
+            <p className="text-xs" style={{ color: 'var(--text-3)' }}>Tam erişim — tüm entity verilerini görebilir · Geçmiş aktif</p>
           </div>
         </div>
-        <button onClick={() => setMessages([])} title="Sohbeti temizle"
+        <button onClick={clearSession} title="Sohbeti temizle"
           className="p-2 rounded-lg transition-all hover:opacity-70"
           style={{ color: 'var(--text-3)' }}>
           <Trash2 size={15} />
         </button>
-      </div>
-
-      {/* Notice */}
-      <div className="mx-6 mt-4 px-4 py-2.5 rounded-xl text-xs flex items-center gap-2"
-        style={{ background: 'rgba(245,158,11,0.1)', color: '#f59e0b', border: '1px solid rgba(245,158,11,0.2)' }}>
-        <ShieldCheck size={13} />
-        Bu mod sohbet geçmişi tutmaz. KIBI AI ve Entity AI geçmişlerine erişim sağlayabilir.
       </div>
 
       {/* Messages */}
@@ -65,6 +97,7 @@ export default function KibiAdminAI() {
             <h3 className="font-semibold" style={{ color: 'var(--text-1)' }}>KIBI Admin AI'ya Hoş Geldiniz</h3>
             <p className="text-sm" style={{ color: 'var(--text-3)' }}>
               Tüm entity verilerine, KIBI AI ve Entity AI sohbet geçmişlerine kısıtsız erişimle çalışır.
+              Sohbet geçmişiniz bu oturumda korunur.
             </p>
             <div className="grid grid-cols-2 gap-2 mt-6 text-left">
               {['Tüm entity özeti', 'Bu ay token kullanımı', 'Destek talep durumu', 'Sistem sağlığı'].map(q => (
@@ -79,7 +112,7 @@ export default function KibiAdminAI() {
         )}
         {messages.map((m, i) => (
           <div key={i} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-            <div className="max-w-[75%] px-4 py-3 rounded-2xl text-sm"
+            <div className="max-w-[75%] px-4 py-3 rounded-2xl text-sm whitespace-pre-wrap leading-relaxed"
               style={m.role === 'user'
                 ? { background: 'rgba(38,166,154,0.18)', color: 'var(--text-1)' }
                 : { background: 'var(--surface-2)', color: 'var(--text-1)', border: '1px solid var(--border)' }}>
@@ -89,12 +122,18 @@ export default function KibiAdminAI() {
         ))}
         {loading && (
           <div className="flex justify-start">
-            <div className="px-4 py-3 rounded-2xl text-sm" style={{ background: 'var(--surface-2)', color: 'var(--text-3)', border: '1px solid var(--border)' }}>
-              Yanıt hazırlanıyor...
+            <div className="px-4 py-3 rounded-2xl" style={{ background: 'var(--surface-2)', border: '1px solid var(--border)' }}>
+              <div className="flex gap-1.5 items-center">
+                {[0, 100, 200].map(d => (
+                  <span key={d} className="w-2 h-2 rounded-full animate-bounce"
+                    style={{ background: 'var(--accent)', animationDelay: `${d}ms` }} />
+                ))}
+              </div>
             </div>
           </div>
         )}
         {error && <p className="text-red-400 text-xs text-center">{error}</p>}
+        <div ref={bottomRef} />
       </div>
 
       {/* Input */}
@@ -103,7 +142,7 @@ export default function KibiAdminAI() {
           <input
             value={input} onChange={e => setInput(e.target.value)}
             onKeyDown={e => e.key === 'Enter' && !e.shiftKey && send()}
-            placeholder="Admin sorusu..."
+            placeholder="Admin sorusu… (Enter göndermek için)"
             className="flex-1 px-4 py-2.5 rounded-xl text-sm outline-none"
             style={{ background: 'var(--surface-2)', color: 'var(--text-1)', border: '1px solid var(--border)' }}
           />

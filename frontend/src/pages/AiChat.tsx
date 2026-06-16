@@ -30,6 +30,32 @@ export default function AiChat({ isAdminMode = false }: { isAdminMode?: boolean 
     }).catch(() => {})
   }, [])
 
+  useEffect(() => {
+    api.get(`/ai/sessions?type=kibi_ai`).then(r => {
+      const list = r.data.sessions ?? []
+      const mapped = list.map((s: any) => ({ id: s.id, title: s.title || 'Yeni Sohbet', messages: [] }))
+      setSessions(mapped)
+      if (mapped[0]) setActiveId(mapped[0].id)
+    }).catch(() => {})
+  }, [])
+
+  useEffect(() => {
+    if (!activeId) return
+    const active = sessions.find(s => s.id === activeId)
+    if (active && active.messages.length === 0) {
+      setLoading(true)
+      api.get(`/ai/sessions/${activeId}/messages`).then(r => {
+        const msgs = r.data.messages ?? []
+        setSessions(prev => prev.map(s =>
+          s.id === activeId
+            ? { ...s, messages: msgs.map((m: any) => ({ role: m.role, content: m.content })) }
+            : s
+        ))
+      }).catch(() => {})
+        .finally(() => setLoading(false))
+    }
+  }, [activeId])
+
   const saveInstructions = async () => {
     setSavingInstructions(true)
     try {
@@ -41,30 +67,50 @@ export default function AiChat({ isAdminMode = false }: { isAdminMode?: boolean 
     }
   }
 
-  const newSession = () => {
-    const id = `s_${Date.now()}`
-    setSessions(prev => [{ id, title: 'Yeni Sohbet', messages: [] }, ...prev])
-    setActiveId(id)
-    setError('')
+  const newSession = async () => {
+    try {
+      const res = await api.post('/ai/sessions', { title: 'Yeni Sohbet', type: 'kibi_ai' })
+      const newSess = res.data.session
+      setSessions(prev => [{ id: newSess.id, title: newSess.title, messages: [] }, ...prev])
+      setActiveId(newSess.id)
+      setError('')
+    } catch {
+      setError('Yeni sohbet oturumu oluşturulamadı')
+    }
   }
 
-  const deleteSession = (id: string, e: React.MouseEvent) => {
+  const deleteSession = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation()
-    setSessions(prev => {
-      const next = prev.filter(s => s.id !== id)
-      if (activeId === id) setActiveId(next[0]?.id ?? null)
-      return next
-    })
+    try {
+      await api.delete(`/ai/sessions/${id}`)
+      setSessions(prev => {
+        const next = prev.filter(s => s.id !== id)
+        if (activeId === id) setActiveId(next[0]?.id ?? null)
+        return next
+      })
+    } catch {
+      setError('Sohbet silinemedi')
+    }
   }
 
   const send = async () => {
     if (!input.trim() || loading) return
 
     let sid = activeId
+    let isNew = false
+
     if (!sid) {
-      sid = `s_${Date.now()}`
-      setSessions(prev => [{ id: sid!, title: input.slice(0, 42), messages: [] }, ...prev])
-      setActiveId(sid)
+      isNew = true
+      try {
+        const res = await api.post('/ai/sessions', { title: input.slice(0, 42), type: 'kibi_ai' })
+        const newSess = res.data.session
+        sid = newSess.id
+        setSessions(prev => [{ id: sid!, title: input.slice(0, 42), messages: [] }, ...prev])
+        setActiveId(sid)
+      } catch {
+        setError('Oturum oluşturulamadı')
+        return
+      }
     }
 
     const text = input
@@ -73,7 +119,7 @@ export default function AiChat({ isAdminMode = false }: { isAdminMode?: boolean 
 
     setSessions(prev => prev.map(s =>
       s.id === sid
-        ? { ...s, title: s.messages.length === 0 ? text.slice(0, 42) : s.title, messages: [...s.messages, { role: 'user', content: text }] }
+        ? { ...s, title: (s.messages.length === 0 && !isNew) ? text.slice(0, 42) : s.title, messages: [...s.messages, { role: 'user', content: text }] }
         : s
     ))
 

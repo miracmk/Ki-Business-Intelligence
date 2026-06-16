@@ -2,10 +2,15 @@ import type { FastifyPluginAsync } from 'fastify'
 import { z } from 'zod'
 import { db } from '../../lib/db.js'
 import { sql, eq, and, desc, asc } from 'drizzle-orm'
-import { tenants, kibiEntities, kibiTokenUsage, kibiSupportTickets, kibiModelConfigs, kibiInternalUsers, users, platformMetrics, crmConnections, platformConfigs } from '../../../db/schema.js'
+import { tenants, kibiEntities, kibiTokenUsage, kibiSupportTickets, kibiModelConfigs, kibiInternalUsers, users, platformMetrics, crmConnections, platformConfigs, platformVectorDocs } from '../../../db/schema.js'
 import { learnFromTicket } from '../../engine/kibi/support-pipeline.js'
 import { encrypt, decrypt } from '../../lib/crypto.js'
 import { invalidateModelCache, seedDefaultModelConfigs } from '../../engine/ai/model-config.js'
+import { PROVIDERS, getConfigKey } from '../../engine/ai/providers.js'
+import { invalidateProviderKeyCache } from '../../engine/ai/gateway.js'
+import { redis } from '../../lib/redis.js'
+import { qdrant, embedConfigured, invalidateEmbeddingModelCache } from '../../lib/qdrant.js'
+import { env } from '../../../config/env.js'
 
 export const adminRoutes: FastifyPluginAsync = async (app) => {
   app.addHook('preHandler', async (req, reply) => {
@@ -307,6 +312,216 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
     })
   })
 
+  // ── AI Provider Management ────────────────────────────────────────────────────
+  // Scope URL param: 'kibi' | 'entity-free'  (maps to DB scope 'platform' | 'entity_free')
+
+  function urlScopeToDb(s: string): 'kibi' | 'entity_free' | null {
+    if (s === 'kibi')        return 'kibi'
+    if (s === 'entity-free') return 'entity_free'
+    return null
+  }
+
+  // GET /admin/ai-providers/:scope — list all providers + isConfigured
+  app.get('/ai-providers/:scope', async (req, reply) => {
+    const { scope } = req.params as { scope: string }
+    const dbScope = urlScopeToDb(scope)
+    if (!dbScope) return reply.status(400).send({ error: 'Geçersiz scope' })
+
+    // Load all configured keys for this scope
+    const allRows = await db.select().from(platformConfigs)
+    const configuredSet = new Set(
+      allRows
+        .filter(r => r.key.startsWith(`ai_provider_${dbScope}_`) && r.value !== '')
+        .map(r => r.key.replace(`ai_provider_${dbScope}_`, ''))
+    )
+
+    const providers = PROVIDERS.map(p => ({
+      id:          p.id,
+      name:        p.name,
+      docsUrl:     p.docsUrl,
+      freeModels:  p.freeModels,
+      isConfigured: configuredSet.has(p.id),
+    }))
+
+    return reply.send({ providers })
+  })
+
+  // PUT /admin/ai-providers/:scope/:providerId — save API key
+  app.put('/ai-providers/:scope/:providerId', async (req, reply) => {
+    if ((req.user as any)?.role !== 'admin') return reply.status(403).send({ error: 'Sadece admin düzenleyebilir' })
+    const { scope, providerId } = req.params as { scope: string; providerId: string }
+    const dbScope = urlScopeToDb(scope)
+    if (!dbScope) return reply.status(400).send({ error: 'Geçersiz scope' })
+
+    const { apiKey } = req.body as { apiKey: string }
+    if (!apiKey?.trim()) return reply.status(400).send({ error: 'API key boş olamaz' })
+
+    const configKey = getConfigKey(providerId, dbScope)
+    const stored    = encrypt(apiKey.trim())
+    const label     = `${PROVIDERS.find(p => p.id === providerId)?.name ?? providerId} (${dbScope})`
+
+    await db.insert(platformConfigs)
+      .values({ key: configKey, value: stored, label, category: 'ai', isSecret: true, updatedAt: new Date() })
+      .onConflictDoUpdate({ target: platformConfigs.key, set: { value: stored, updatedAt: new Date() } })
+
+    invalidateProviderKeyCache(configKey)
+    return reply.send({ ok: true })
+  })
+
+  // DELETE /admin/ai-providers/:scope/:providerId — remove key
+  app.delete('/ai-providers/:scope/:providerId', async (req, reply) => {
+    if ((req.user as any)?.role !== 'admin') return reply.status(403).send({ error: 'Sadece admin silebilir' })
+    const { scope, providerId } = req.params as { scope: string; providerId: string }
+    const dbScope = urlScopeToDb(scope)
+    if (!dbScope) return reply.status(400).send({ error: 'Geçersiz scope' })
+
+    const configKey = getConfigKey(providerId, dbScope)
+    await db.delete(platformConfigs).where(eq(platformConfigs.key, configKey))
+    invalidateProviderKeyCache(configKey)
+    return reply.send({ ok: true })
+  })
+
+  // GET /admin/ai-providers/:scope/models — fetch model lists (Redis 30min cache)
+  app.get('/ai-providers/:scope/models', async (req, reply) => {
+    const { scope } = req.params as { scope: string }
+    const dbScope = urlScopeToDb(scope)
+    if (!dbScope) return reply.status(400).send({ error: 'Geçersiz scope' })
+
+    const allRows = await db.select().from(platformConfigs)
+    const configuredProviders = allRows
+      .filter(r => r.key.startsWith(`ai_provider_${dbScope}_`) && r.value !== '')
+      .map(r => ({ id: r.key.replace(`ai_provider_${dbScope}_`, ''), encryptedKey: r.value }))
+
+    // Also check legacy openrouter_api_key for kibi scope
+    if (dbScope === 'kibi' && !configuredProviders.find(p => p.id === 'openrouter')) {
+      const legacyRow = allRows.find(r => r.key === 'openrouter_api_key' && r.value !== '')
+      if (legacyRow) configuredProviders.push({ id: 'openrouter', encryptedKey: legacyRow.value })
+    }
+
+    const results: Array<{ provider: string; models: Array<{ id: string; name: string }> }> = []
+
+    for (const { id: providerId, encryptedKey } of configuredProviders) {
+      const cacheKey = `ki:models:${dbScope}:${providerId}`
+      const cached   = await redis.get(cacheKey).catch(() => null)
+      if (cached) {
+        try { results.push({ provider: providerId, models: JSON.parse(cached) }); continue }
+        catch { /* continue to fetch */ }
+      }
+
+      const providerDef = PROVIDERS.find(p => p.id === providerId)
+      if (!providerDef?.modelsPath) continue
+
+      try {
+        let apiKey: string
+        try { apiKey = decrypt(encryptedKey) } catch { continue }
+
+        const headers: Record<string, string> = {
+          'Content-Type': 'application/json',
+          ...providerDef.extraHeaders,
+          ...(providerDef.authHeader === 'x-api-key'
+            ? { 'x-api-key': apiKey }
+            : { 'Authorization': `Bearer ${apiKey}` }),
+        }
+
+        const controller = new AbortController()
+        const timer      = setTimeout(() => controller.abort(), 10_000)
+        let modelsRes: Response
+        try {
+          modelsRes = await fetch(`${providerDef.baseUrl}${providerDef.modelsPath}`, { headers, signal: controller.signal })
+        } finally {
+          clearTimeout(timer)
+        }
+
+        if (!modelsRes.ok) { console.warn(`[AI-PROVIDERS] ${providerId} models fetch ${modelsRes.status}`); continue }
+
+        const modelsData = await modelsRes.json() as any
+        let models: Array<{ id: string; name: string }> = []
+
+        if (providerId === 'openrouter') {
+          models = (modelsData.data ?? [])
+            .filter((m: any) => m.id.endsWith(':free'))
+            .map((m: any) => ({ id: m.id, name: m.name ?? m.id }))
+        } else if (providerId === 'anthropic') {
+          // Anthropic returns { data: [{ id, display_name }] }
+          models = (modelsData.data ?? []).map((m: any) => ({ id: m.id, name: m.display_name ?? m.id }))
+        } else if (providerId === 'google') {
+          // Google returns { models: [{ name: 'models/gemini-...' }] }
+          models = (modelsData.models ?? modelsData.data ?? []).map((m: any) => {
+            const id = (m.name ?? m.id ?? '').replace('models/', '')
+            return { id, name: m.displayName ?? id }
+          })
+        } else {
+          // OpenAI-compatible: { data: [{ id, object: 'model' }] }
+          models = (modelsData.data ?? [])
+            .filter((m: any) => m.object === 'model' || m.id)
+            .map((m: any) => ({ id: m.id, name: m.id }))
+        }
+
+        await redis.set(cacheKey, JSON.stringify(models), 'EX', 1800)
+        results.push({ provider: providerId, models })
+      } catch (e) {
+        console.warn(`[AI-PROVIDERS] ${providerId} models fetch failed:`, (e as Error).message)
+      }
+    }
+
+    return reply.send({ providers: results })
+  })
+
+  // GET /admin/ai-providers/:scope/roles — read kibi_model_configs for scope
+  app.get('/ai-providers/:scope/roles', async (req, reply) => {
+    const { scope } = req.params as { scope: string }
+    const dbScope = urlScopeToDb(scope)
+    if (!dbScope) return reply.status(400).send({ error: 'Geçersiz scope' })
+
+    const platformDbScope = dbScope === 'kibi' ? 'platform' : 'entity_free'
+    const configs = await db.select().from(kibiModelConfigs)
+      .where(eq(kibiModelConfigs.scope, platformDbScope))
+
+    return reply.send({ roles: configs })
+  })
+
+  // PUT /admin/ai-providers/:scope/roles — save role assignments
+  app.put('/ai-providers/:scope/roles', async (req, reply) => {
+    if ((req.user as any)?.role !== 'admin') return reply.status(403).send({ error: 'Sadece admin düzenleyebilir' })
+    const { scope } = req.params as { scope: string }
+    const dbScope = urlScopeToDb(scope)
+    if (!dbScope) return reply.status(400).send({ error: 'Geçersiz scope' })
+
+    const { roles } = req.body as {
+      roles: Record<string, { primary: string; fallback1?: string; fallback2?: string }>
+    }
+    if (!roles || typeof roles !== 'object') return reply.status(400).send({ error: 'roles zorunlu' })
+
+    const platformDbScope = dbScope === 'kibi' ? 'platform' : 'entity_free'
+
+    for (const [role, assignment] of Object.entries(roles)) {
+      if (!assignment.primary) continue
+      const existing = await db.query.kibiModelConfigs.findFirst({
+        where: (t, { and, eq }) => and(eq(t.scope, platformDbScope), eq(t.modelRole, role as any)),
+      })
+      const patch = {
+        primaryModel: assignment.primary,
+        fallback1:    assignment.fallback1 || null,
+        fallback2:    assignment.fallback2 || null,
+        fallback3:    null,
+        provider:     assignment.primary.split('::')[0] ?? 'openrouter',
+        isActive:     true,
+        updatedAt:    new Date(),
+      }
+      if (existing) {
+        await db.update(kibiModelConfigs).set(patch)
+          .where(and(eq(kibiModelConfigs.scope, platformDbScope), eq(kibiModelConfigs.modelRole, role as any)))
+      } else {
+        await db.insert(kibiModelConfigs).values({
+          scope: platformDbScope, modelRole: role as any, ...patch,
+        })
+      }
+      invalidateModelCache(role)
+    }
+
+    return reply.send({ ok: true })
+  })
+
   app.post('/seed', async (req, reply) => {
     const adminExists = await db.query.users.findFirst({ where: (t, { eq }) => eq(t.role, 'admin') })
     if (adminExists) return reply.status(400).send({ error: 'Admin already exists' })
@@ -318,5 +533,147 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
     if (!user) return reply.status(500).send({ error: 'Unable to create admin' })
     await db.insert(kibiInternalUsers).values({ userId: user.id, internalRole: 'admin', isActive: true })
     return reply.send({ ok: true, email, password })
+  })
+
+  // ─── Platform Vector Docs (KIBI AI Knowledge Base) ──────────────────────────
+
+  const PLATFORM_QDRANT_COLLECTION = env.QDRANT_COLLECTION
+
+  // GET /api/v1/admin/platform-vector-docs
+  app.get('/platform-vector-docs', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = req.user as { role: string }
+    if (!['admin', 'supervisor'].includes(user.role)) return reply.status(403).send({ error: 'Yetkisiz' })
+
+    const docs = await db.select({
+      id:          platformVectorDocs.id,
+      title:       platformVectorDocs.title,
+      content:     platformVectorDocs.content,
+      sourceType:  platformVectorDocs.sourceType,
+      isIndexed:   platformVectorDocs.isIndexed,
+      qdrantId:    platformVectorDocs.qdrantId,
+      vectorModel: platformVectorDocs.vectorModel,
+      tags:        platformVectorDocs.tags,
+      createdAt:   platformVectorDocs.createdAt,
+    }).from(platformVectorDocs).orderBy(asc(platformVectorDocs.createdAt))
+
+    return reply.send({ docs })
+  })
+
+  // POST /api/v1/admin/platform-vector-docs — create + embed + upsert to Qdrant
+  app.post('/platform-vector-docs', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = req.user as { sub: string; role: string }
+    if (!['admin'].includes(user.role)) return reply.status(403).send({ error: 'Yetkisiz' })
+
+    const { title, content, tags } = req.body as { title?: string; content?: string; tags?: string[] }
+    if (!title?.trim() || !content?.trim()) {
+      return reply.status(400).send({ error: 'Başlık ve içerik zorunlu' })
+    }
+
+    const [doc] = await db.insert(platformVectorDocs).values({
+      title:     title.trim(),
+      content:   content.trim(),
+      sourceType: 'manual',
+      tags:      tags ?? [],
+      createdBy: user.sub,
+    }).returning()
+
+    try {
+      const [vector] = await embedConfigured([content.trim()])
+      await qdrant.upsert(PLATFORM_QDRANT_COLLECTION, {
+        wait: true,
+        points: [{
+          id:      doc!.id,
+          vector:  vector!,
+          payload: { title: doc!.title, source: 'platform', sourceType: 'manual' },
+        }],
+      })
+      await db.update(platformVectorDocs)
+        .set({ qdrantId: doc!.id, isIndexed: true })
+        .where(eq(platformVectorDocs.id, doc!.id))
+    } catch (e: any) {
+      console.warn('[platform-vector-docs] Embedding error:', e.message)
+    }
+
+    return reply.status(201).send({ doc })
+  })
+
+  // PUT /api/v1/admin/platform-vector-docs/:id — update + reindex
+  app.put('/platform-vector-docs/:id', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = req.user as { role: string }
+    if (!['admin'].includes(user.role)) return reply.status(403).send({ error: 'Yetkisiz' })
+
+    const { id } = req.params as { id: string }
+    const { title, content, tags } = req.body as { title?: string; content?: string; tags?: string[] }
+
+    const existing = await db.query.platformVectorDocs.findFirst({ where: (t, { eq }) => eq(t.id, id) })
+    if (!existing) return reply.status(404).send({ error: 'Bulunamadı' })
+
+    const newContent = content?.trim() ?? existing.content
+    await db.update(platformVectorDocs)
+      .set({
+        title:     title?.trim() ?? existing.title,
+        content:   newContent,
+        tags:      tags ?? existing.tags,
+        isIndexed: false,
+        updatedAt: new Date(),
+      })
+      .where(eq(platformVectorDocs.id, id))
+
+    try {
+      const [vector] = await embedConfigured([newContent])
+      await qdrant.upsert(PLATFORM_QDRANT_COLLECTION, {
+        wait: true,
+        points: [{ id, vector: vector!, payload: { title: title?.trim() ?? existing.title, source: 'platform' } }],
+      })
+      await db.update(platformVectorDocs).set({ isIndexed: true }).where(eq(platformVectorDocs.id, id))
+    } catch (e: any) {
+      console.warn('[platform-vector-docs] Re-embed error:', e.message)
+    }
+
+    return reply.send({ ok: true })
+  })
+
+  // DELETE /api/v1/admin/platform-vector-docs/:id
+  app.delete('/platform-vector-docs/:id', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = req.user as { role: string }
+    if (!['admin'].includes(user.role)) return reply.status(403).send({ error: 'Yetkisiz' })
+
+    const { id } = req.params as { id: string }
+    const existing = await db.query.platformVectorDocs.findFirst({ where: (t, { eq }) => eq(t.id, id) })
+    if (!existing) return reply.status(404).send({ error: 'Bulunamadı' })
+
+    await db.delete(platformVectorDocs).where(eq(platformVectorDocs.id, id))
+    try {
+      await qdrant.delete(PLATFORM_QDRANT_COLLECTION, { wait: true, points: [id] })
+    } catch {}
+
+    return reply.send({ ok: true })
+  })
+
+  // POST /api/v1/admin/platform-vector-docs/reindex-all — re-embed all non-indexed docs
+  app.post('/platform-vector-docs/reindex-all', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = req.user as { role: string }
+    if (!['admin'].includes(user.role)) return reply.status(403).send({ error: 'Yetkisiz' })
+
+    // Invalidate cache so fresh embedding model is used
+    invalidateEmbeddingModelCache()
+
+    const docs = await db.select().from(platformVectorDocs)
+    let indexed = 0
+    for (const doc of docs) {
+      try {
+        const [vector] = await embedConfigured([doc.content])
+        await qdrant.upsert(PLATFORM_QDRANT_COLLECTION, {
+          wait: true,
+          points: [{ id: doc.id, vector: vector!, payload: { title: doc.title, source: 'platform' } }],
+        })
+        await db.update(platformVectorDocs).set({ isIndexed: true, qdrantId: doc.id }).where(eq(platformVectorDocs.id, doc.id))
+        indexed++
+      } catch (e: any) {
+        console.warn(`[reindex-all] ${doc.id} failed:`, e.message)
+      }
+    }
+
+    return reply.send({ ok: true, indexed, total: docs.length })
   })
 }

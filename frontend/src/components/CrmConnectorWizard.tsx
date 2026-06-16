@@ -43,6 +43,13 @@ const DB_FIELDS = [
   { key: 'name',     label: 'Bağlantı Adı',  type: 'text',     placeholder: 'Üretim Veritabanı'   },
 ]
 
+// Opsiyonel meta-tablo alanları (EAV / meta-schema yapısı için)
+const META_TABLE_FIELDS = [
+  { key: 'modulesTable', label: 'Modüller Tablosu',     placeholder: 'crm_modules veya tables_meta',   hint: 'Modül/tablo dizinini tutan tablo adı' },
+  { key: 'fieldsTable',  label: 'Field\'lar Tablosu',   placeholder: 'crm_fields veya columns_meta',   hint: 'Alan/kolon tanımlarını tutan tablo adı' },
+  { key: 'dataTable',    label: 'Veri Tablosu',         placeholder: 'crm_records veya data',          hint: 'Asıl client verilerini tutan tablo adı' },
+]
+
 const STEP_LABELS = ['Kaynak Seç', 'Bağlantı Kur', 'Yapıyı Gör', 'Modül Eşleştir', 'AI Konnektör', 'Onayla']
 
 // Regex-based module → table suggestion (no AI)
@@ -68,6 +75,7 @@ export default function CrmConnectorWizard({ onClose, onDone }: { onClose: () =>
   const [testStatus, setTestStatus]     = useState<'idle' | 'testing' | 'ok' | 'fail'>('idle')
   const [testMsg, setTestMsg]           = useState('')
   const [connectionId, setConnectionId] = useState('')
+  const [showMetaTables, setShowMetaTables] = useState(false)
 
   // Step 3 — scan
   const [scanLogs, setScanLogs]       = useState<LogLine[]>([])
@@ -75,6 +83,11 @@ export default function CrmConnectorWizard({ onClose, onDone }: { onClose: () =>
   const [scanDone, setScanDone]       = useState(false)
   const [modules, setModules]         = useState<ScannedModule[]>([])
   const [structureTab, setStructureTab] = useState<'modules' | 'fields' | 'samples'>('modules')
+
+  // Step 3.5 — direct import (skip mapping)
+  const [importDone,     setImportDone]     = useState(false)
+  const [importLoading,  setImportLoading]  = useState(false)
+  const [importResult,   setImportResult]   = useState<{ importedModules: number; importedFields: number } | null>(null)
 
   // Step 4 — module mapping
   const [userMappings, setUserMappings] = useState<Record<string, string>>({})
@@ -119,12 +132,30 @@ export default function CrmConnectorWizard({ onClose, onDone }: { onClose: () =>
         name: dbForm.name || 'DB Bağlantısı', dbType: 'postgresql',
         host: dbForm.host, port: Number(dbForm.port ?? 5432),
         database: dbForm.database, username: dbForm.username, password: dbForm.password, ssl: false,
+        modulesTable: dbForm.modulesTable || undefined,
+        fieldsTable:  dbForm.fieldsTable  || undefined,
+        dataTable:    dbForm.dataTable    || undefined,
       })
       setConnectionId(r.data.connection.id)
       setStep(3)
       startScan(r.data.connection.id)
     } catch (e: any) {
       setTestStatus('fail'); setTestMsg(e.response?.data?.error ?? 'Kayıt hatası')
+    }
+  }
+
+  // ── Direct import (skip mapping) ─────────────────────────────────────────
+  const importDirect = async () => {
+    if (!connectionId || importLoading) return
+    setImportLoading(true)
+    try {
+      const res = await api.post(`/crm/connections/${connectionId}/import-direct`)
+      setImportResult(res.data)
+      setImportDone(true)
+    } catch (e: any) {
+      alert(e.response?.data?.error ?? 'Import hatası')
+    } finally {
+      setImportLoading(false)
     }
   }
 
@@ -316,7 +347,7 @@ export default function CrmConnectorWizard({ onClose, onDone }: { onClose: () =>
 
           {/* ── STEP 2: DB form ──────────────────────────────────────────── */}
           {step === 2 && (
-            <div className="space-y-4 max-w-md">
+            <div className="space-y-4 max-w-lg">
               <p className="text-sm" style={{ color: 'var(--text-2)' }}>PostgreSQL veritabanı bağlantı bilgilerini girin.</p>
               {DB_FIELDS.map(f => (
                 <div key={f.key}>
@@ -327,6 +358,36 @@ export default function CrmConnectorWizard({ onClose, onDone }: { onClose: () =>
                     style={{ background: 'var(--surface-2)', border: '1px solid var(--border)', color: 'var(--text-1)' }} />
                 </div>
               ))}
+
+              {/* Meta-tablo alanları (EAV / meta-schema yapısı için opsiyonel) */}
+              <div>
+                <button type="button" onClick={() => setShowMetaTables(s => !s)}
+                  className="flex items-center gap-2 text-sm py-2"
+                  style={{ color: 'var(--accent)' }}>
+                  <Database size={13} />
+                  {showMetaTables ? 'Meta-Tablo Alanlarını Gizle' : 'Meta-Tablo Alanlarını Göster (EAV / özel şema)'}
+                </button>
+                {showMetaTables && (
+                  <div className="mt-3 space-y-3 pl-3" style={{ borderLeft: '2px solid var(--accent)' }}>
+                    <p className="text-xs" style={{ color: 'var(--text-3)' }}>
+                      Veritabanınız EAV (Entity-Attribute-Value) veya meta-şema yapısındaysa, modül dizinini, alan tanımlarını ve client verisini tutan tablolar farklı olabilir. Aşağıdaki alanları doldurun.
+                    </p>
+                    {META_TABLE_FIELDS.map(f => (
+                      <div key={f.key}>
+                        <label className="text-sm" style={{ color: 'var(--text-2)' }}>{f.label}
+                          <span className="ml-2 text-xs" style={{ color: 'var(--text-3)' }}>(opsiyonel)</span>
+                        </label>
+                        <p className="text-[11px] mb-1" style={{ color: 'var(--text-3)' }}>{f.hint}</p>
+                        <input type="text" placeholder={f.placeholder} value={dbForm[f.key] ?? ''}
+                          onChange={e => setDbForm(p => ({ ...p, [f.key]: e.target.value }))}
+                          className="w-full px-4 py-2.5 rounded-2xl text-sm outline-none font-mono"
+                          style={{ background: 'var(--surface-2)', border: '1px solid var(--border)', color: 'var(--text-1)' }} />
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
               {testMsg && (
                 <p className="text-sm flex items-center gap-2" style={{ color: testStatus === 'ok' ? 'var(--accent)' : '#f87171' }}>
                   {testStatus === 'ok' ? <CheckCircle size={14} /> : <AlertCircle size={14} />} {testMsg}
@@ -372,6 +433,21 @@ export default function CrmConnectorWizard({ onClose, onDone }: { onClose: () =>
                 <CheckCircle size={16} style={{ color: 'var(--accent)' }} />
                 <span className="text-sm font-medium" style={{ color: 'var(--accent)' }}>Tarama tamamlandı — {modules.length} modül bulundu</span>
               </div>
+
+              {/* Direct import success banner */}
+              {importDone && importResult && (
+                <div className="flex items-start gap-3 p-4 rounded-2xl"
+                  style={{ background: 'rgba(38,166,154,0.10)', border: '1px solid rgba(38,166,154,0.3)' }}>
+                  <CheckCircle size={16} style={{ color: 'var(--accent)', marginTop: 2 }} />
+                  <div>
+                    <p className="text-sm font-semibold" style={{ color: 'var(--accent)' }}>Eşleştirmesiz import tamamlandı</p>
+                    <p className="text-xs mt-0.5" style={{ color: 'var(--text-3)' }}>
+                      {importResult.importedModules} modül ve {importResult.importedFields} field KIBI DB'ye aktarıldı.
+                      Dashboard'dan CRM yapısı artık görünür.
+                    </p>
+                  </div>
+                </div>
+              )}
               {/* Tabs */}
               <div className="flex gap-2">
                 {(['modules', 'fields', 'samples'] as const).map(tab => (
@@ -653,11 +729,26 @@ export default function CrmConnectorWizard({ onClose, onDone }: { onClose: () =>
                 <Loader2 size={14} className="animate-spin inline mr-2" />Tarama devam ediyor...
               </span>
             )}
-            {step === 3 && scanDone && (
-              <button onClick={initMappings}
+            {step === 3 && scanDone && !importDone && (
+              <>
+                <button onClick={importDirect} disabled={importLoading}
+                  className="flex items-center gap-2 px-5 py-2.5 rounded-2xl text-sm font-medium disabled:opacity-50"
+                  style={{ background: 'rgba(139,92,246,0.15)', color: '#a78bfa', border: '1px solid rgba(139,92,246,0.3)' }}>
+                  {importLoading ? <Loader2 size={14} className="animate-spin" /> : <Database size={14} />}
+                  Eşleştirmesiz İçe Aktar
+                </button>
+                <button onClick={initMappings}
+                  className="flex items-center gap-2 px-6 py-2.5 rounded-2xl text-sm font-medium"
+                  style={{ background: 'var(--accent)', color: '#fff' }}>
+                  Modülleri Eşleştir <ChevronRight size={16} />
+                </button>
+              </>
+            )}
+            {step === 3 && scanDone && importDone && (
+              <button onClick={onDone}
                 className="flex items-center gap-2 px-6 py-2.5 rounded-2xl text-sm font-medium"
                 style={{ background: 'var(--accent)', color: '#fff' }}>
-                Modülleri Eşleştir <ChevronRight size={16} />
+                <CheckCircle size={14} /> Tamamla
               </button>
             )}
             {step === 4 && (

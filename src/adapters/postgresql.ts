@@ -50,6 +50,26 @@ export class PostgreSqlAdapter extends CrmAdapter {
   }
 
   async getModules(): Promise<CrmModule[]> {
+    const c = this.credentials as PgConnectionCreds & { modulesTable?: string }
+    if (c.modulesTable) {
+      const client = await this.pool.connect()
+      try {
+        const { rows, fields } = await client.query(`SELECT * FROM "${c.modulesTable}"`)
+        if (rows.length === 0) return []
+        const colNames = fields.map(f => f.name)
+        const apiNameCol = colNames.find(n => /api_name|table_name|name|id|code/i.test(n)) ?? colNames[0]
+        const labelCol   = colNames.find(n => /label|title|module_name|description/i.test(n)) ?? colNames[1] ?? apiNameCol
+
+        return rows.map(r => ({
+          apiName:  String(r[apiNameCol] ?? ''),
+          label:    String(r[labelCol] ?? r[apiNameCol] ?? ''),
+          singular: String(r[apiNameCol] ?? '').replace(/_s$/, '').replace(/_/g, ' '),
+        })).filter(m => !!m.apiName)
+      } finally {
+        client.release()
+      }
+    }
+
     const client = await this.pool.connect()
     try {
       const { rows } = await client.query<{ table_name: string; comment: string | null }>(`
@@ -72,6 +92,36 @@ export class PostgreSqlAdapter extends CrmAdapter {
   }
 
   async getModuleFields(module: string): Promise<any[]> {
+    const c = this.credentials as PgConnectionCreds & { fieldsTable?: string }
+    if (c.fieldsTable) {
+      const client = await this.pool.connect()
+      try {
+        const checkRes = await client.query(`SELECT * FROM "${c.fieldsTable}" LIMIT 1`)
+        const colNames = checkRes.fields.map(f => f.name)
+        const moduleCol = colNames.find(n => /module_api_name|module|table_name|table/i.test(n)) ?? colNames[0]
+        const apiNameCol = colNames.find(n => /api_name|column_name|name|id|code/i.test(n)) ?? colNames[1] ?? colNames[0]
+        const labelCol   = colNames.find(n => /field_label|label|title|description/i.test(n)) ?? colNames[2] ?? apiNameCol
+        const typeCol    = colNames.find(n => /data_type|type|datatype/i.test(n)) ?? colNames[3] ?? colNames[0]
+
+        const { rows } = await client.query(
+          `SELECT * FROM "${c.fieldsTable}" WHERE "${moduleCol}" = $1`,
+          [module]
+        )
+
+        return rows.map(r => ({
+          apiName:       String(r[apiNameCol] ?? ''),
+          label:         String(r[labelCol] ?? r[apiNameCol] ?? ''),
+          dataType:      String(r[typeCol] ?? 'text'),
+          fieldType:     String(r[typeCol] ?? 'text'),
+          isMandatory:   false,
+          isReadOnly:    false,
+          isCustomField: false,
+        })).filter(f => !!f.apiName)
+      } finally {
+        client.release()
+      }
+    }
+
     const client = await this.pool.connect()
     try {
       const { rows } = await client.query<{
@@ -125,6 +175,48 @@ export class PostgreSqlAdapter extends CrmAdapter {
   }
 
   async search(params: SearchParams): Promise<CrmRecord[]> {
+    const c = this.credentials as PgConnectionCreds & { dataTable?: string }
+    if (c.dataTable) {
+      const client = await this.pool.connect()
+      try {
+        const page    = params.page    ?? 1
+        const perPage = params.perPage ?? 200
+        const offset  = (page - 1) * perPage
+
+        const checkRes = await client.query(`SELECT * FROM "${c.dataTable}" LIMIT 1`)
+        const colNames = checkRes.fields.map(f => f.name)
+        const moduleCol = colNames.find(n => /module_api_name|module|table_name|table/i.test(n)) ?? colNames[0]
+        const idCol     = colNames.find(n => /crm_id|record_id|id|uuid/i.test(n)) ?? colNames[0]
+        const dataCol   = colNames.find(n => /data|json|payload/i.test(n))
+
+        const { rows } = await client.query(
+          `SELECT * FROM "${c.dataTable}" WHERE "${moduleCol}" = $1 LIMIT $2 OFFSET $3`,
+          [params.module, perPage, offset]
+        )
+
+        return rows.map(row => {
+          let recordData: Record<string, unknown> = {}
+          if (dataCol && typeof row[dataCol] === 'object') {
+            recordData = row[dataCol] as Record<string, unknown>
+          } else {
+            recordData = row
+          }
+          const id = String(row[idCol] ?? recordData['id'] ?? recordData['ID'] ?? '')
+          return {
+            id,
+            module: params.module,
+            crm_id: id || JSON.stringify(row).slice(0, 40),
+            crm_id_field: idCol,
+            data: recordData,
+            createdTime: row['created_at']?.toString() ?? row['createdat']?.toString(),
+            modifiedTime: row['updated_at']?.toString() ?? row['updatedat']?.toString(),
+          }
+        })
+      } finally {
+        client.release()
+      }
+    }
+
     const client = await this.pool.connect()
     try {
       const page    = params.page    ?? 1

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import {
   Database, Brain, User, MessageSquare, CreditCard, Shield, Users,
-  Plus, Trash2, Copy, Eye, EyeOff, QrCode, RefreshCw,
+  Plus, Trash2, Copy, QrCode, RefreshCw,
   AlertTriangle, CheckCircle, XCircle, X, Camera, Save,
   Mail, Phone, MapPin, Building2, ExternalLink, UserPlus, Wand2, Zap, History,
 } from 'lucide-react'
@@ -595,6 +595,138 @@ function TestBadge({ status, error }: { status: TestStatus; error: string }) {
   )
 }
 
+// ─── Support Agent Panel ──────────────────────────────────────────────────────
+function SupportAgentPanel() {
+  const [agents, setAgents] = useState<any[]>([])
+  const [form, setForm] = useState({
+    channelPreference: 'email',
+    waPhone: '', telegramChatId: '', notificationEmail: '', weight: 1,
+  })
+  const [saving, setSaving] = useState(false)
+  const [saved, setSaved] = useState(false)
+
+  useEffect(() => {
+    api.get('/support/agents').then(r => {
+      setAgents(r.data.agents ?? [])
+    }).catch(() => {})
+  }, [])
+
+  const register = async () => {
+    setSaving(true)
+    try {
+      await api.post('/support/agents', form)
+      const r = await api.get('/support/agents')
+      setAgents(r.data.agents ?? [])
+      setSaved(true)
+      setTimeout(() => setSaved(false), 2000)
+    } catch { /* non-fatal */ } finally {
+      setSaving(false)
+    }
+  }
+
+  const updateWeight = async (agentId: string, weight: number) => {
+    await api.put(`/support/agents/${agentId}/weight`, { weight }).catch(() => {})
+    const r = await api.get('/support/agents')
+    setAgents(r.data.agents ?? [])
+  }
+
+  return (
+    <div className="p-5 rounded-2xl space-y-4" style={{ background: 'var(--surface-modal)', border: '1px solid var(--border)' }}>
+      <div>
+        <h3 className="font-semibold text-sm" style={{ color: 'var(--text-1)' }}>Destek Agent Ayarları</h3>
+        <p className="text-xs mt-0.5" style={{ color: 'var(--text-3)' }}>
+          Harici kanallardan (WA/TG/IG/Email) gelen biletler round-robin ile agent'lara dağıtılır.
+        </p>
+      </div>
+
+      {/* Registration form */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 p-4 rounded-xl" style={{ background: 'var(--surface-2)', border: '1px solid var(--border)' }}>
+        <div>
+          <label className="text-xs mb-1 block" style={{ color: 'var(--text-3)' }}>Bildirim Kanalı Tercihi</label>
+          <select value={form.channelPreference} onChange={e => setForm(f => ({ ...f, channelPreference: e.target.value }))}
+            className="w-full px-3 py-2 rounded-xl text-sm outline-none"
+            style={{ background: 'var(--surface-modal)', color: 'var(--text-2)', border: '1px solid var(--border)' }}>
+            <option value="email">E-posta</option>
+            <option value="telegram">Telegram</option>
+            <option value="whatsapp">WhatsApp</option>
+          </select>
+        </div>
+        {form.channelPreference === 'whatsapp' && (
+          <div>
+            <label className="text-xs mb-1 block" style={{ color: 'var(--text-3)' }}>WA Telefon (E.164)</label>
+            <input value={form.waPhone} onChange={e => setForm(f => ({ ...f, waPhone: e.target.value }))}
+              placeholder="+905551234567"
+              className="w-full px-3 py-2 rounded-xl text-sm outline-none"
+              style={{ background: 'var(--surface-modal)', color: 'var(--text-1)', border: '1px solid var(--border)' }} />
+          </div>
+        )}
+        {form.channelPreference === 'telegram' && (
+          <div>
+            <label className="text-xs mb-1 block" style={{ color: 'var(--text-3)' }}>Telegram Chat ID</label>
+            <input value={form.telegramChatId} onChange={e => setForm(f => ({ ...f, telegramChatId: e.target.value }))}
+              placeholder="123456789"
+              className="w-full px-3 py-2 rounded-xl text-sm outline-none"
+              style={{ background: 'var(--surface-modal)', color: 'var(--text-1)', border: '1px solid var(--border)' }} />
+          </div>
+        )}
+        {form.channelPreference === 'email' && (
+          <div>
+            <label className="text-xs mb-1 block" style={{ color: 'var(--text-3)' }}>Bildirim E-postası</label>
+            <input type="email" value={form.notificationEmail} onChange={e => setForm(f => ({ ...f, notificationEmail: e.target.value }))}
+              placeholder="agent@sirket.com"
+              className="w-full px-3 py-2 rounded-xl text-sm outline-none"
+              style={{ background: 'var(--surface-modal)', color: 'var(--text-1)', border: '1px solid var(--border)' }} />
+          </div>
+        )}
+        <div className="sm:col-span-2 flex justify-end">
+          <button onClick={register} disabled={saving}
+            className="px-4 py-2 rounded-xl text-sm font-medium transition-all disabled:opacity-50"
+            style={{ background: 'rgba(38,166,154,0.85)', color: '#fff' }}>
+            {saved ? '✓ Kaydedildi' : saving ? 'Kaydediliyor…' : 'Destek Agent Olarak Kayıt / Güncelle'}
+          </button>
+        </div>
+      </div>
+
+      {/* Agent list */}
+      {agents.length > 0 && (
+        <div className="rounded-2xl overflow-hidden" style={{ border: '1px solid var(--border)' }}>
+          <div className="px-4 py-2 text-xs font-semibold" style={{ background: 'var(--surface-2)', color: 'var(--text-3)', borderBottom: '1px solid var(--border)' }}>
+            AKTİF DESTEK AGENT'LARI ({agents.filter(a => a.isActive).length})
+          </div>
+          {agents.map((a: any) => (
+            <div key={a.id} className="flex items-center gap-3 px-4 py-3" style={{ borderBottom: '1px solid var(--border)' }}>
+              <div className="w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold flex-shrink-0"
+                style={{ background: 'rgba(38,166,154,0.15)', color: 'var(--accent)' }}>
+                {(a.userName ?? a.userEmail ?? '?')[0]?.toUpperCase()}
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-medium truncate" style={{ color: 'var(--text-1)' }}>{a.userName || a.userEmail}</p>
+                <p className="text-xs" style={{ color: 'var(--text-3)' }}>
+                  {a.channelPreference === 'telegram' ? `✈️ TG: ${a.telegramChatId || '—'}` :
+                   a.channelPreference === 'whatsapp' ? `💬 WA: ${a.waPhone || '—'}` :
+                   `📧 ${a.notificationEmail || a.userEmail || '—'}`}
+                </p>
+              </div>
+              <div className="flex items-center gap-2 flex-shrink-0">
+                <span className="text-[10px]" style={{ color: 'var(--text-3)' }}>Ağırlık</span>
+                <select value={a.weight} onChange={e => updateWeight(a.id, Number(e.target.value))}
+                  className="text-xs px-2 py-1 rounded-lg outline-none"
+                  style={{ background: 'var(--surface-2)', color: 'var(--text-2)', border: '1px solid var(--border)' }}>
+                  {[1,2,3,4,5,6,7,8,9,10].map(w => <option key={w} value={w}>{w}</option>)}
+                </select>
+                <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${a.isActive ? 'text-green-400' : 'text-gray-400'}`}
+                  style={{ background: a.isActive ? 'rgba(34,197,94,0.1)' : 'var(--surface-2)' }}>
+                  {a.isActive ? 'Aktif' : 'Pasif'}
+                </span>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ─── Main component ───────────────────────────────────────────────────────────
 export default function Settings() {
   const [activeTab, setActiveTab] = useState('account')
@@ -658,7 +790,22 @@ export default function Settings() {
   const [openRouterModels, setOpenRouterModels] = useState<OpenRouterModel[]>([])
   const [loadingModels, setLoadingModels] = useState(false)
 
-  const [showApiKey, setShowApiKey] = useState(false)
+  // New multi-provider state
+  const [aiProviders,   setAiProviders]   = useState<any[]>([])
+  const [aiModelGroups, setAiModelGroups] = useState<any[]>([])
+  const [loadingAiProv, setLoadingAiProv] = useState(false)
+  const [addingKeyFor,  setAddingKeyFor]  = useState<string | null>(null)
+  const [newKeyInput,   setNewKeyInput]   = useState('')
+  const [savingProvKey, setSavingProvKey] = useState(false)
+
+  // Vector docs
+  const [vectorDocs,        setVectorDocs]        = useState<any[]>([])
+  const [loadingVectorDocs, setLoadingVectorDocs] = useState(false)
+  const [showAddDoc,        setShowAddDoc]        = useState(false)
+  const [newDocTitle,       setNewDocTitle]       = useState('')
+  const [newDocContent,     setNewDocContent]     = useState('')
+  const [savingDoc,         setSavingDoc]         = useState(false)
+
   const [showCrmModal, setShowCrmModal] = useState(false)
   const [showCrmWizard, setShowCrmWizard] = useState(false)
   const [expandedConnId, setExpandedConnId] = useState<string | null>(null)
@@ -792,6 +939,83 @@ export default function Settings() {
     }
   }
 
+  const loadAiProviders = async () => {
+    setLoadingAiProv(true)
+    try {
+      const [provRes, modRes] = await Promise.allSettled([
+        api.get('/tenants/ai-providers'),
+        api.get('/tenants/ai-providers/all-models'),
+      ])
+      if (provRes.status === 'fulfilled') setAiProviders(provRes.value.data.providers ?? [])
+      if (modRes.status === 'fulfilled') setAiModelGroups(modRes.value.data.providers ?? [])
+    } catch { /* ignore */ } finally {
+      setLoadingAiProv(false)
+    }
+  }
+
+  const saveProviderKey = async (providerId: string) => {
+    if (!newKeyInput.trim()) return
+    setSavingProvKey(true)
+    try {
+      await api.put(`/tenants/ai-providers/${providerId}`, { apiKey: newKeyInput.trim() })
+      showSuccess('API key kaydedildi')
+      setAddingKeyFor(null)
+      setNewKeyInput('')
+      await loadAiProviders()
+    } catch (e: any) {
+      setError(e.response?.data?.error || 'Kaydedilemedi')
+    } finally {
+      setSavingProvKey(false)
+    }
+  }
+
+  const deleteProviderKey = async (providerId: string) => {
+    try {
+      await api.delete(`/tenants/ai-providers/${providerId}`)
+      showSuccess('Key silindi')
+      await loadAiProviders()
+    } catch (e: any) {
+      setError(e.response?.data?.error || 'Silinemedi')
+    }
+  }
+
+  const loadVectorDocs = async () => {
+    setLoadingVectorDocs(true)
+    try {
+      const res = await api.get('/tenants/vector-docs')
+      setVectorDocs(res.data.docs ?? [])
+    } catch { /* ignore */ } finally {
+      setLoadingVectorDocs(false)
+    }
+  }
+
+  const saveVectorDoc = async () => {
+    if (!newDocTitle.trim() || !newDocContent.trim()) return
+    setSavingDoc(true)
+    try {
+      await api.post('/tenants/vector-docs', { title: newDocTitle.trim(), content: newDocContent.trim() })
+      showSuccess('Doküman eklendi ve vektöre indexlendi')
+      setNewDocTitle('')
+      setNewDocContent('')
+      setShowAddDoc(false)
+      await loadVectorDocs()
+    } catch (e: any) {
+      setError(e.response?.data?.error || 'Kaydedilemedi')
+    } finally {
+      setSavingDoc(false)
+    }
+  }
+
+  const deleteVectorDoc = async (id: string) => {
+    try {
+      await api.delete(`/tenants/vector-docs/${id}`)
+      showSuccess('Doküman silindi')
+      await loadVectorDocs()
+    } catch (e: any) {
+      setError(e.response?.data?.error || 'Silinemedi')
+    }
+  }
+
   useEffect(() => {
     loadData()
     // Handle OAuth callback redirect
@@ -814,6 +1038,8 @@ export default function Settings() {
     if (activeTab === 'ai') {
       loadAiConfig()
       loadOpenRouterModels()
+      loadAiProviders()
+      loadVectorDocs()
     }
     if (activeTab === 'channels') {
       loadChannelConfigs()
@@ -1251,50 +1477,6 @@ export default function Settings() {
     alert('Kopyalandı!')
   }
 
-  const modelInList = (modelId: string) => {
-    if (!openRouterModels.length) return true
-    return openRouterModels.some(m => m.id === modelId)
-  }
-
-  const ModelSelect = ({
-    value,
-    onChange,
-    label,
-  }: {
-    value: string
-    onChange: (v: string) => void
-    label: string
-  }) => {
-    const inList = modelInList(value)
-    return (
-      <div>
-        <div className="flex items-center gap-2 mb-1">
-          <label className="text-gray-400 text-sm">{label}</label>
-          {!inList && value && (
-            <span className="flex items-center gap-1 px-1.5 py-0.5 bg-amber-900/30 text-amber-400 rounded text-xs">
-              <AlertTriangle size={10} />
-              Free listesinden çıkarıldı
-            </span>
-          )}
-        </div>
-        <select
-          value={value}
-          onChange={e => onChange(e.target.value)}
-          className="w-full px-3 py-2 bg-[#0a0a0a] border border-[#2a2a2a] rounded-lg text-white text-sm"
-        >
-          {value && !openRouterModels.some(m => m.id === value) && (
-            <option value={value}>{value} ⚠</option>
-          )}
-          {openRouterModels.map(m => (
-            <option key={m.id} value={m.id}>
-              {m.name || m.id} — {m.contextLength > 0 ? `${Math.round(m.contextLength / 1000)}k ctx` : '?'}
-            </option>
-          ))}
-        </select>
-      </div>
-    )
-  }
-
   const tabs = [
     { id: 'account',    label: 'Hesap',           icon: User },
     { id: 'ai',         label: 'AI Modeli',        icon: Brain },
@@ -1480,161 +1662,268 @@ export default function Settings() {
 
       {/* ── AI tab ── */}
       {activeTab === 'ai' && (
-        <div className="space-y-6">
+        <div className="space-y-5">
           {/* Admin notice */}
           {(userRole === 'admin' || userRole === 'supervisor') && !tenant?.tenant && (
-            <div className="p-5 bg-blue-900/20 border border-blue-800/40 rounded-xl flex items-start gap-3">
-              <Brain size={20} className="text-blue-400 mt-0.5 flex-shrink-0" />
+            <div className="p-4 rounded-xl flex items-start gap-3" style={{ background: 'rgba(99,102,241,0.08)', border: '1px solid rgba(99,102,241,0.25)' }}>
+              <Brain size={18} className="mt-0.5 flex-shrink-0" style={{ color: '#818cf8' }} />
               <div>
-                <p className="text-blue-300 font-medium text-sm mb-1">Platform AI Ayarları</p>
-                <p className="text-blue-400/70 text-sm">Admin kullanıcılar için entity AI yapılandırması Platform Ayarları üzerinden yapılır.</p>
-                <Link to="/app/admin/settings" className="mt-2 inline-flex items-center gap-1 text-blue-400 text-sm hover:text-blue-300">
-                  Platform Ayarlarına Git <ExternalLink size={12} />
+                <p className="font-medium text-sm mb-0.5" style={{ color: '#a5b4fc' }}>Platform AI Ayarları</p>
+                <p className="text-sm" style={{ color: '#6366f1' }}>Admin kullanıcılar için AI yapılandırması Platform Ayarları üzerinden yapılır.</p>
+                <Link to="/app/admin/settings" className="mt-1.5 inline-flex items-center gap-1 text-sm hover:opacity-80" style={{ color: '#818cf8' }}>
+                  Platform Ayarlarına Git <ExternalLink size={11} />
                 </Link>
               </div>
             </div>
           )}
-          <div className="p-6 bg-[#111111] rounded-xl border border-[#2a2a2a]">
-            <div className="flex items-center justify-between mb-6">
-              <h3 className="text-lg font-semibold text-white">Entity AI Modeli Ayarları</h3>
-              <button
-                onClick={refreshModels}
-                disabled={loadingModels}
-                className="flex items-center gap-2 px-3 py-1.5 bg-[#222] hover:bg-[#2a2a2a] text-gray-300 rounded-lg text-sm disabled:opacity-50 transition-colors"
-              >
-                <RefreshCw size={14} className={loadingModels ? 'animate-spin' : ''} />
-                Modelleri Yenile
+
+          {/* ── Provider cards ── */}
+          <div className="rounded-2xl p-5" style={{ background: 'var(--surface-modal)', border: '1px solid var(--border)' }}>
+            <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
+              <div>
+                <h3 className="font-bold" style={{ color: 'var(--text-1)' }}>AI Sağlayıcıları</h3>
+                <p className="text-xs mt-0.5" style={{ color: 'var(--text-3)' }}>Kendi API key'inizi girerek platform sağlayıcılarını override edebilirsiniz</p>
+              </div>
+              <button onClick={loadAiProviders} disabled={loadingAiProv}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs"
+                style={{ background: 'var(--surface-modal-2)', border: '1px solid var(--border)', color: 'var(--text-2)' }}>
+                <RefreshCw size={12} className={loadingAiProv ? 'animate-spin' : ''} /> Yenile
               </button>
             </div>
 
-            <div className="space-y-4 max-w-md mb-8">
-              <div>
-                <label className="text-gray-400 text-sm mb-1 block">Sağlayıcı</label>
-                <select
-                  value={aiConfig.provider}
-                  onChange={e => setAiConfig({ ...aiConfig, provider: e.target.value })}
-                  className="w-full px-3 py-2 bg-[#0a0a0a] border border-[#2a2a2a] rounded-lg text-white text-sm"
-                >
-                  <option value="openrouter">OpenRouter (Önerilen — Ücretsiz modeller)</option>
-                  <option value="openai">OpenAI</option>
-                  <option value="anthropic">Anthropic</option>
-                  <option value="google">Google</option>
-                  <option value="mistral">Mistral</option>
-                  <option value="groq">Groq</option>
-                </select>
-              </div>
-              <div>
-                <label className="text-gray-400 text-sm mb-1 block">API Anahtarı</label>
-                <div className="relative">
-                  <input
-                    type={showApiKey ? 'text' : 'password'}
-                    value={aiConfig.apiKey}
-                    onChange={e => setAiConfig({ ...aiConfig, apiKey: e.target.value })}
-                    placeholder="Boş bırakırsanız platform ücretsiz key kullanılır"
-                    className="w-full px-3 py-2 bg-[#0a0a0a] border border-[#2a2a2a] rounded-lg text-white text-sm pr-12"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setShowApiKey(!showApiKey)}
-                    className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-white"
-                  >
-                    {showApiKey ? <EyeOff size={16} /> : <Eye size={16} />}
-                  </button>
-                </div>
-              </div>
-            </div>
+            {loadingAiProv
+              ? <div className="text-center py-6 text-sm" style={{ color: 'var(--text-3)' }}>Yükleniyor...</div>
+              : (
+                <div className="space-y-2">
+                  {/* kibi_free special card */}
+                  {(() => {
+                    const kf = aiProviders.find(p => p.id === 'kibi_free')
+                    if (!kf) return null
+                    return (
+                      <div className="rounded-xl p-4" style={{ background: 'rgba(38,166,154,0.06)', border: '1px solid rgba(38,166,154,0.25)' }}>
+                        <div className="flex items-start gap-3">
+                          <div className="w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0" style={{ background: 'linear-gradient(135deg, var(--accent), var(--forest))' }}>
+                            <Zap size={16} className="text-white" />
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="font-semibold" style={{ color: 'var(--text-1)' }}>KIBI Ücretsiz Altyapısı</span>
+                              <span className="text-[10px] px-2 py-0.5 rounded-full" style={{ background: 'rgba(38,166,154,0.15)', color: 'var(--accent)' }}>Platform Sağlıyor</span>
+                            </div>
+                            <p className="text-xs mt-1" style={{ color: 'var(--text-3)' }}>
+                              KIBI'nin yönettiği paylaşımlı AI altyapısı. Herhangi bir API key gerektirmez. Yüksek kullanımda rate limit'e girebilir.
+                            </p>
+                            <div className="flex items-center gap-1.5 mt-2 p-2 rounded-lg" style={{ background: 'rgba(251,191,36,0.08)', border: '1px solid rgba(251,191,36,0.20)' }}>
+                              <AlertTriangle size={12} style={{ color: '#fbbf24', flexShrink: 0 }} />
+                              <span className="text-[11px]" style={{ color: '#fbbf24' }}>Paylaşımlı altyapı — yoğun dönemlerde yavaşlayabilir</span>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    )
+                  })()}
 
-            {loadingModels && (
-              <div className="flex items-center gap-2 text-gray-500 text-sm mb-6">
-                <RefreshCw size={14} className="animate-spin" />
-                Modeller yükleniyor...
-              </div>
-            )}
-
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-              {/* DB Analysis */}
-              <div className="space-y-4">
-                <div className="flex items-center gap-2 pb-2 border-b border-[#2a2a2a]">
-                  <div className="w-2 h-2 rounded-full" style={{ background: 'var(--accent)' }}></div>
-                  <h4 className="text-white font-medium text-sm">DB Analiz</h4>
-                </div>
-                <span className="text-gray-500 text-xs block -mt-2">SQL · Yapısal sorgulama</span>
-                <ModelSelect label="Birincil" value={aiConfig.analysisModel} onChange={v => setAiConfig({ ...aiConfig, analysisModel: v })} />
-                <ModelSelect label="Yedek 1"  value={aiConfig.analysisF1}    onChange={v => setAiConfig({ ...aiConfig, analysisF1: v })} />
-                <ModelSelect label="Yedek 2"  value={aiConfig.analysisF2}    onChange={v => setAiConfig({ ...aiConfig, analysisF2: v })} />
-              </div>
-              {/* Vector Analysis */}
-              <div className="space-y-4">
-                <div className="flex items-center gap-2 pb-2 border-b border-[#2a2a2a]">
-                  <div className="w-2 h-2 rounded-full bg-purple-500"></div>
-                  <h4 className="text-white font-medium text-sm">Vektör Analiz</h4>
-                </div>
-                <span className="text-gray-500 text-xs block -mt-2">Qdrant · Semantik arama</span>
-                <ModelSelect label="Birincil" value={aiConfig.vectorModel} onChange={v => setAiConfig({ ...aiConfig, vectorModel: v })} />
-                <ModelSelect label="Yedek 1"  value={aiConfig.vectorF1}   onChange={v => setAiConfig({ ...aiConfig, vectorF1: v })} />
-                <ModelSelect label="Yedek 2"  value={aiConfig.vectorF2}   onChange={v => setAiConfig({ ...aiConfig, vectorF2: v })} />
-              </div>
-              {/* Conversation */}
-              <div className="space-y-4">
-                <div className="flex items-center gap-2 pb-2 border-b border-[#2a2a2a]">
-                  <div className="w-2 h-2 rounded-full bg-green-500"></div>
-                  <h4 className="text-white font-medium text-sm">Konuşma</h4>
-                </div>
-                <span className="text-gray-500 text-xs block -mt-2">Müşteri yanıtları · Doğal dil</span>
-                <ModelSelect label="Birincil" value={aiConfig.conversationModel}    onChange={v => setAiConfig({ ...aiConfig, conversationModel: v })} />
-                <ModelSelect label="Yedek 1"  value={aiConfig.conversationFallback} onChange={v => setAiConfig({ ...aiConfig, conversationFallback: v })} />
-                <ModelSelect label="Yedek 2"  value={aiConfig.conversationF2}       onChange={v => setAiConfig({ ...aiConfig, conversationF2: v })} />
-              </div>
-            </div>
-
-            {openRouterModels.length > 0 && (() => {
-              const staleModels = [
-                aiConfig.analysisModel, aiConfig.analysisF1, aiConfig.analysisF2,
-                aiConfig.vectorModel, aiConfig.vectorF1, aiConfig.vectorF2,
-                aiConfig.conversationModel, aiConfig.conversationFallback, aiConfig.conversationF2,
-              ].filter(m => m && !modelInList(m))
-              if (!staleModels.length) return null
-              return (
-                <div className="mt-6 p-4 bg-amber-900/20 border border-amber-800/50 rounded-lg flex items-start gap-3">
-                  <AlertTriangle size={16} className="text-amber-400 mt-0.5 shrink-0" />
-                  <div>
-                    <p className="text-amber-300 text-sm font-medium mb-1">Bazı modeller artık ücretsiz listesinde yok</p>
-                    <p className="text-amber-400/80 text-xs">{staleModels.join(' · ')}</p>
-                    <p className="text-amber-400/60 text-xs mt-1">Bu modeller hata verebilir. Aktif listeden yeni model seçin.</p>
-                  </div>
+                  {/* Other providers */}
+                  {aiProviders.filter(p => p.id !== 'kibi_free').map((p: any) => (
+                    <div key={p.id} className="rounded-xl p-3.5" style={{ background: 'var(--surface-modal-2)', border: '1px solid var(--border)' }}>
+                      <div className="flex items-center justify-between gap-3 flex-wrap">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="text-sm font-medium" style={{ color: p.source === 'none' ? 'var(--text-3)' : 'var(--text-1)' }}>{p.name}</span>
+                              {p.source === 'own' && (
+                                <span className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full" style={{ background: 'rgba(38,166,154,0.15)', color: 'var(--accent)' }}>
+                                  <CheckCircle size={9} /> Kendi Anahtarınız
+                                </span>
+                              )}
+                              {p.source === 'platform' && (
+                                <span className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full" style={{ background: 'rgba(148,163,184,0.12)', color: 'var(--text-3)' }}>
+                                  Platform sağlıyor
+                                </span>
+                              )}
+                              {p.freeModels && <span className="text-[10px] px-1.5 py-0.5 rounded-full" style={{ background: 'rgba(74,222,128,0.12)', color: '#4ade80' }}>Ücretsiz</span>}
+                            </div>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2 flex-shrink-0">
+                          <button onClick={() => { setAddingKeyFor(p.id === addingKeyFor ? null : p.id); setNewKeyInput('') }}
+                            className="text-xs px-3 py-1.5 rounded-lg transition-colors"
+                            style={{ background: 'rgba(38,166,154,0.10)', color: 'var(--accent)', border: '1px solid rgba(38,166,154,0.20)' }}>
+                            {p.source === 'own' ? 'Güncelle' : 'Kendi Key\'ini Ekle'}
+                          </button>
+                          {p.source === 'own' && (
+                            <button onClick={() => deleteProviderKey(p.id)}
+                              className="p-1.5 rounded-lg"
+                              style={{ background: 'rgba(239,68,68,0.08)', color: '#f87171', border: '1px solid rgba(239,68,68,0.15)' }}>
+                              <Trash2 size={12} />
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                      {addingKeyFor === p.id && (
+                        <div className="mt-3 flex gap-2">
+                          <input type="password" value={newKeyInput} onChange={e => setNewKeyInput(e.target.value)}
+                            placeholder={`${p.name} API key...`}
+                            className="flex-1 px-3 py-2 rounded-lg text-sm outline-none"
+                            style={{ background: 'var(--surface-modal)', border: '1px solid var(--accent)', color: 'var(--text-1)' }} />
+                          <button onClick={() => saveProviderKey(p.id)} disabled={savingProvKey || !newKeyInput.trim()}
+                            className="flex items-center gap-1 px-3 py-2 rounded-lg text-xs text-white disabled:opacity-50"
+                            style={{ background: 'linear-gradient(135deg, var(--accent), var(--forest))' }}>
+                            <Save size={12} /> {savingProvKey ? '...' : 'Kaydet'}
+                          </button>
+                          <button onClick={() => { setAddingKeyFor(null); setNewKeyInput('') }}
+                            className="px-3 py-2 rounded-lg text-xs"
+                            style={{ background: 'var(--surface-modal-2)', color: 'var(--text-2)', border: '1px solid var(--border)' }}>
+                            İptal
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  ))}
                 </div>
               )
-            })()}
+            }
+          </div>
 
-            <div className="flex justify-end mt-6">
-              <button onClick={saveAiConfig} className="px-5 py-2 bg-[#6366f1] hover:bg-[#4f46e5] text-white rounded-lg text-sm font-medium transition-colors">
-                Kaydet
+          {/* ── Model assignments (existing tri-model) ── */}
+          <div className="rounded-2xl p-5" style={{ background: 'var(--surface-modal)', border: '1px solid var(--border)' }}>
+            <div className="flex items-center justify-between mb-5 flex-wrap gap-2">
+              <h3 className="font-bold" style={{ color: 'var(--text-1)' }}>Model Ataması</h3>
+              <button onClick={refreshModels} disabled={loadingModels}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs"
+                style={{ background: 'var(--surface-modal-2)', border: '1px solid var(--border)', color: 'var(--text-2)' }}>
+                <RefreshCw size={12} className={loadingModels ? 'animate-spin' : ''} /> Modelleri Yenile
+              </button>
+            </div>
+
+            <datalist id="ai-models-list">
+              <option value="kibi_free::default" label="KIBI Ücretsiz Altyapısı" />
+              {aiModelGroups.flatMap((g: any) => g.models ?? []).map((m: any) => (
+                <option key={m.id} value={m.id} label={m.name ?? m.id} />
+              ))}
+              {openRouterModels.map(m => <option key={m.id} value={m.id} label={m.name} />)}
+            </datalist>
+
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
+              {[
+                { key: 'analysisModel', f1: 'analysisF1', f2: 'analysisF2', label: 'DB Analiz', desc: 'SQL · Yapısal sorgulama', color: 'var(--accent)' },
+                { key: 'vectorModel',   f1: 'vectorF1',   f2: 'vectorF2',   label: 'Vektör Analiz', desc: 'Qdrant · Semantik arama', color: '#a855f7' },
+                { key: 'conversationModel', f1: 'conversationFallback', f2: 'conversationF2', label: 'Konuşma', desc: 'Müşteri yanıtları', color: '#22c55e' },
+              ].map(col => (
+                <div key={col.key} className="space-y-3">
+                  <div className="flex items-center gap-2 pb-2" style={{ borderBottom: `2px solid ${col.color}30` }}>
+                    <div className="w-2 h-2 rounded-full" style={{ background: col.color }} />
+                    <span className="font-medium text-sm" style={{ color: 'var(--text-1)' }}>{col.label}</span>
+                  </div>
+                  <span className="text-xs block -mt-1" style={{ color: 'var(--text-3)' }}>{col.desc}</span>
+                  {[
+                    { field: col.key,  label: 'Birincil' },
+                    { field: col.f1,   label: 'Yedek 1'  },
+                    { field: col.f2,   label: 'Yedek 2'  },
+                  ].map(({ field, label: fLabel }) => (
+                    <div key={field}>
+                      <label className="text-xs block mb-1" style={{ color: 'var(--text-3)' }}>{fLabel}</label>
+                      <input list="ai-models-list"
+                        value={(aiConfig as any)[field] ?? ''}
+                        onChange={e => setAiConfig(p => ({ ...p, [field]: e.target.value }))}
+                        placeholder="provider::model veya model-id"
+                        className="w-full px-3 py-2 rounded-lg text-xs outline-none font-mono"
+                        style={{ background: 'var(--surface-modal-2)', color: 'var(--text-1)', border: '1px solid var(--border)' }} />
+                    </div>
+                  ))}
+                </div>
+              ))}
+            </div>
+
+            <div className="flex justify-end mt-5">
+              <button onClick={saveAiConfig}
+                className="flex items-center gap-1.5 px-5 py-2 rounded-xl text-sm font-medium text-white"
+                style={{ background: 'linear-gradient(135deg, var(--accent), var(--forest))' }}>
+                <Save size={13} /> Kaydet
               </button>
             </div>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            {[
-              { name: 'Base', price: '$1.000/ay', features: ['1.500 entity garantisi', 'Özel eğitilmiş model', 'E-posta destek'] },
-              { name: 'Pro', price: '$3.000/ay', features: ['Sınırsız entity', 'Öncelikli destek', 'Özel fine-tuning'] },
-              { name: 'Enterprise', price: 'Özel fiyat', features: ['SLA garantisi', 'Dedicated instance', '7/24 destek'] },
-            ].map((plan, i) => (
-              <div key={i} className="p-6 bg-[#111111] rounded-xl border border-[#2a2a2a]">
-                <h4 className="text-lg font-semibold text-white mb-2">{plan.name}</h4>
-                <p className="text-2xl font-bold text-[#6366f1] mb-4">{plan.price}</p>
-                <ul className="space-y-2 mb-6">
-                  {plan.features.map((f, j) => (
-                    <li key={j} className="text-gray-400 text-sm flex items-center gap-2">
-                      <div className="w-1.5 h-1.5 bg-[#6366f1] rounded-full"></div>
-                      {f}
-                    </li>
-                  ))}
-                </ul>
-                <a href="mailto:sales@kibusiness.co" className="block w-full py-2 text-center border border-[#6366f1] text-[#6366f1] rounded-lg text-sm hover:bg-[#6366f1]/10">
-                  İletişime Geç
-                </a>
+          {/* ── Vector Docs (Entity Knowledge Base) ── */}
+          <div className="rounded-2xl p-5" style={{ background: 'var(--surface-modal)', border: '1px solid var(--border)' }}>
+            <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
+              <div>
+                <h3 className="font-bold" style={{ color: 'var(--text-1)' }}>Vektör Tabanı</h3>
+                <p className="text-xs mt-0.5" style={{ color: 'var(--text-3)' }}>Şirket dokümanlarınızı yükleyin — AI arama sırasında anlamsal olarak eşleştirilir</p>
               </div>
-            ))}
+              <div className="flex items-center gap-2">
+                <button onClick={loadVectorDocs} disabled={loadingVectorDocs}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs"
+                  style={{ background: 'var(--surface-modal-2)', border: '1px solid var(--border)', color: 'var(--text-2)' }}>
+                  <RefreshCw size={12} className={loadingVectorDocs ? 'animate-spin' : ''} /> Yenile
+                </button>
+                <button onClick={() => setShowAddDoc(v => !v)}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs text-white"
+                  style={{ background: 'linear-gradient(135deg, var(--accent), var(--forest))' }}>
+                  <Plus size={12} /> Doküman Ekle
+                </button>
+              </div>
+            </div>
+
+            {showAddDoc && (
+              <div className="mb-4 p-4 rounded-xl space-y-3" style={{ background: 'var(--surface-modal-2)', border: '1px solid var(--border)' }}>
+                <input type="text" value={newDocTitle} onChange={e => setNewDocTitle(e.target.value)}
+                  placeholder="Doküman başlığı..."
+                  className="w-full px-3 py-2 rounded-lg text-sm outline-none"
+                  style={{ background: 'var(--surface-modal)', border: '1px solid var(--accent)', color: 'var(--text-1)' }} />
+                <textarea value={newDocContent} onChange={e => setNewDocContent(e.target.value)}
+                  placeholder="İçerik (ürün bilgisi, politika, SSS, prosedür...)&#10;Ne kadar detaylı olursa AI o kadar iyi arama yapar."
+                  rows={5}
+                  className="w-full px-3 py-2 rounded-lg text-sm outline-none resize-y"
+                  style={{ background: 'var(--surface-modal)', border: '1px solid var(--border)', color: 'var(--text-1)' }} />
+                <div className="flex gap-2 justify-end">
+                  <button onClick={() => { setShowAddDoc(false); setNewDocTitle(''); setNewDocContent('') }}
+                    className="px-4 py-2 rounded-lg text-xs"
+                    style={{ background: 'var(--surface-modal)', color: 'var(--text-2)', border: '1px solid var(--border)' }}>
+                    İptal
+                  </button>
+                  <button onClick={saveVectorDoc} disabled={savingDoc || !newDocTitle.trim() || !newDocContent.trim()}
+                    className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs text-white disabled:opacity-50"
+                    style={{ background: 'linear-gradient(135deg, var(--accent), var(--forest))' }}>
+                    <Save size={12} /> {savingDoc ? 'Kaydediliyor...' : 'Kaydet & Vektörle'}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {loadingVectorDocs
+              ? <div className="text-center py-6 text-sm" style={{ color: 'var(--text-3)' }}>Yükleniyor...</div>
+              : vectorDocs.length === 0
+                ? <div className="text-center py-8" style={{ color: 'var(--text-3)' }}>
+                    <Database size={28} className="mx-auto mb-2 opacity-30" />
+                    <p className="text-sm">Henüz doküman eklenmedi</p>
+                    <p className="text-xs mt-1 opacity-70">Ürün açıklamaları, politikalar, SSS gibi içerikleri ekleyin</p>
+                  </div>
+                : <div className="space-y-2">
+                    {vectorDocs.map((doc: any) => (
+                      <div key={doc.id} className="flex items-start justify-between gap-3 p-3 rounded-xl"
+                        style={{ background: 'var(--surface-modal-2)', border: '1px solid var(--border)' }}>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="text-sm font-medium truncate" style={{ color: 'var(--text-1)' }}>{doc.title}</span>
+                            {doc.isIndexed
+                              ? <span className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-full" style={{ background: 'rgba(38,166,154,0.12)', color: 'var(--accent)' }}>
+                                  <CheckCircle size={9} /> İndexlendi
+                                </span>
+                              : <span className="text-[10px] px-1.5 py-0.5 rounded-full" style={{ background: 'rgba(251,191,36,0.10)', color: '#fbbf24' }}>Bekliyor</span>
+                            }
+                          </div>
+                          <p className="text-xs mt-0.5 line-clamp-2" style={{ color: 'var(--text-3)' }}>{doc.content}</p>
+                        </div>
+                        <button onClick={() => deleteVectorDoc(doc.id)}
+                          className="p-1.5 rounded-lg flex-shrink-0"
+                          style={{ background: 'rgba(239,68,68,0.08)', color: '#f87171', border: '1px solid rgba(239,68,68,0.15)' }}>
+                          <Trash2 size={13} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+            }
           </div>
         </div>
       )}
@@ -1958,28 +2247,59 @@ export default function Settings() {
               <p className="text-sm text-center py-6" style={{ color: 'var(--text-3)' }}>Henüz ekip üyesi yok</p>
             ) : (
               <div className="space-y-2">
-                {teamMembers.map((m: any) => (
-                  <div key={m.userId ?? m.id} className="flex items-center justify-between px-4 py-3 rounded-xl"
-                    style={{ background: 'var(--surface-2)', border: '1px solid var(--border)' }}>
-                    <div className="flex items-center gap-3">
-                      <div className="w-8 h-8 rounded-full flex items-center justify-center text-sm font-semibold"
-                        style={{ background: 'rgba(45,138,107,0.15)', color: 'var(--forest)' }}>
-                        {(m.name ?? m.email ?? '?')[0].toUpperCase()}
+                {teamMembers.map((m: any) => {
+                  const isSubUser = m.role === 'entity_sub'
+                  const canManage = userRole === 'entity_main' || userRole === 'admin' || userRole === 'supervisor'
+                  const hasCrmPerm = m.permissions?.viewCrmStructure === true
+
+                  const toggleCrmPerm = async () => {
+                    try {
+                      await api.put(`/crm/users/${m.userId ?? m.id}/structure-permission`, { allow: !hasCrmPerm })
+                      api.get('/tenants/me/members').then(r => setTeamMembers(r.data.members ?? [])).catch(() => {})
+                    } catch { /* non-fatal */ }
+                  }
+
+                  return (
+                    <div key={m.userId ?? m.id} className="px-4 py-3 rounded-xl"
+                      style={{ background: 'var(--surface-2)', border: '1px solid var(--border)' }}>
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-3">
+                          <div className="w-8 h-8 rounded-full flex items-center justify-center text-sm font-semibold"
+                            style={{ background: 'rgba(45,138,107,0.15)', color: 'var(--forest)' }}>
+                            {(m.name ?? m.email ?? '?')[0].toUpperCase()}
+                          </div>
+                          <div>
+                            <p className="text-sm font-medium" style={{ color: 'var(--text-1)' }}>{m.name || m.email}</p>
+                            {m.name && <p className="text-xs" style={{ color: 'var(--text-3)' }}>{m.email}</p>}
+                          </div>
+                        </div>
+                        <span className="px-2 py-1 rounded-lg text-xs capitalize"
+                          style={{ background: 'var(--surface-modal)', color: 'var(--text-3)', border: '1px solid var(--border)' }}>
+                          {m.role?.replace('entity_', '') ?? 'üye'}
+                        </span>
                       </div>
-                      <div>
-                        <p className="text-sm font-medium" style={{ color: 'var(--text-1)' }}>{m.name || m.email}</p>
-                        {m.name && <p className="text-xs" style={{ color: 'var(--text-3)' }}>{m.email}</p>}
-                      </div>
+                      {/* CRM yapısı yetki toggle — sadece entity_sub için */}
+                      {isSubUser && canManage && (
+                        <div className="flex items-center justify-between mt-2 pt-2" style={{ borderTop: '1px solid var(--border)' }}>
+                          <span className="text-xs" style={{ color: 'var(--text-3)' }}>CRM Yapısı Görme Yetkisi</span>
+                          <button
+                            onClick={toggleCrmPerm}
+                            className="relative inline-flex h-5 w-9 items-center rounded-full transition-colors"
+                            style={{ background: hasCrmPerm ? 'var(--accent)' : 'var(--surface-3)', border: '1px solid var(--border)' }}>
+                            <span className="inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform"
+                              style={{ transform: `translateX(${hasCrmPerm ? '18px' : '2px'})` }} />
+                          </button>
+                        </div>
+                      )}
                     </div>
-                    <span className="px-2 py-1 rounded-lg text-xs capitalize"
-                      style={{ background: 'var(--surface-modal)', color: 'var(--text-3)', border: '1px solid var(--border)' }}>
-                      {m.role?.replace('entity_', '') ?? 'üye'}
-                    </span>
-                  </div>
-                ))}
+                  )
+                })}
               </div>
             )}
           </div>
+
+          {/* Support Agent Settings */}
+          <SupportAgentPanel />
         </div>
       )}
 

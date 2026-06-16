@@ -58,6 +58,11 @@ const schema = z.object({
 
   // ── Telegram bot (optional) ───────────────────────────────────────────────
   TELEGRAM_BOT_TOKEN: z.string().optional(),
+
+  // ── Ki Wallet (internal VPS network) ─────────────────────────────────────
+  KI_WALLET_URL:          z.string().url().optional(),
+  KI_WALLET_INTERNAL_KEY: z.string().optional(),
+  KI_WALLET_TOPUP_URL:    z.string().url().optional(),
 })
 
 function loadEnv() {

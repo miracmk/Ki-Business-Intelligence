@@ -796,3 +796,38 @@ entity_{slug}.crm_contacts / crm_companies / crm_deals / erp_products
 ---
 
 *Son güncelleme: YFZ 1-18 tamamlandı. 6 adımlı CRM konnektör sihirbazı: kullanıcı modül eşleştirmesi (Adım 4), AI sadece field mapping yapar (Adım 5 SSE), örnek veri 3 sekmeli yapı görüntüsü (Adım 3), entity tablo garantisi (ensureEntityTable), dark-mode uyumlu dropdown'lar. 23 Mayıs 2026.*
+
+---
+
+#### YFZ 19 — Çok Provider'lı AI Gateway + Provider Yönetimi
+
+**Mimari:**
+- Konfigürasyon A (KIBI AI): `platform_configs` → `ai_provider_kibi_{providerId}`
+- Konfigürasyon B (Entity Free Tier): `platform_configs` → `ai_provider_entity_free_{providerId}`
+- Konfigürasyon C (Entity Özel): `ai_configs.settings.providerKeys[providerId]` (entity başına)
+- Gateway öncelik: C → B → A (entity kendi key'i varsa onu kullan)
+
+**Yeni dosyalar:**
+- [x] `src/engine/ai/providers.ts` — 10 provider tanımı (openrouter, openai, anthropic, google, mistral, groq, together, fireworks, deepseek, cohere). `getConfigKey()`, `parseModelString()`, `buildModelString()`, `KIBI_FREE_MODEL` sabit.
+- [x] `src/engine/ai/gateway.ts` — `aiComplete(model, messages, tenantId?, opts?)` yeni routing fonksiyonu. 5dk in-memory key cache. Anthropic özel header (`x-api-key`). 15s timeout. Eski `AiGateway` sınıfı korundu (agent.ts backward compat).
+
+**Admin endpoint'leri (`/admin/ai-providers/:scope/`):**
+- [x] `GET /admin/ai-providers/kibi` → provider listesi + isConfigured
+- [x] `PUT /admin/ai-providers/kibi/:providerId` → { apiKey } kaydet (AES-256-GCM)
+- [x] `DELETE /admin/ai-providers/kibi/:providerId` → key sil
+- [x] `GET /admin/ai-providers/kibi/models` → tüm konfigüre provider'lardan model listesi (Redis 30dk cache `ki:models:kibi:{id}`)
+- [x] `GET /admin/ai-providers/kibi/roles` → kibi_model_configs scope=platform
+- [x] `PUT /admin/ai-providers/kibi/roles` → rol ataması kaydet
+- Aynı endpoint seti `/admin/ai-providers/entity-free/` scope için de mevcut
+
+**Entity endpoint'leri (`/tenants/ai-providers`):**
+- [x] `GET /tenants/ai-providers` → own keys (source:'own') + entity_free platform keys (source:'platform') + kibi_free sanal seçenek
+- [x] `PUT /tenants/ai-providers/:providerId` → entity kendi key'ini kaydeder (`ai_configs.settings.providerKeys`)
+- [x] `DELETE /tenants/ai-providers/:providerId` → entity kendi key'ini siler
+- [x] `GET /tenants/ai-providers/all-models` → modeller: own + entity_free + kibi_free::default listenin başında
+
+**Frontend:**
+- [x] `PlatformSettings.tsx` AI tab → iki alt sekme: "KIBI AI" ve "Entity Free Tier". Paylaşımlı `AiProviderPanel` bileşeni (provider kartları, model havuzu, rol atama dropdown'ları).
+- [x] `Settings.tsx` AI tab → provider kartları (kendi key'i / platform sağlıyor / yok), model atama `input[list]` ile tüm sağlayıcılardan.
+
+**Deploy:** `npm run build` → `✓ built in 5.57s` → `docker compose restart ki_api` → `🚀 Ki Platform running`

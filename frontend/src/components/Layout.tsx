@@ -5,7 +5,7 @@ import {
   LayoutDashboard, FolderOpen, LifeBuoy, Settings, LogOut,
   Sun, Moon, Menu, X, ChevronDown, ChevronRight,
   MessageSquare, Bot, Settings2, BarChart3, Database,
-  Bell, CheckCheck,
+  Bell, CheckCheck, Wallet,
 } from 'lucide-react'
 import api from '../lib/api'
 
@@ -287,6 +287,14 @@ export default function Layout() {
           style={linkStyle(activeLink('/app/support'))}
           onMouseEnter={hoverIn} onMouseLeave={e => hoverOut(e, activeLink('/app/support'))}>
           <LifeBuoy size={17} /><span className="text-sm font-medium">Destek</span>
+        </Link>
+
+        {/* Ki Wallet */}
+        <Link to="/app/wallet"
+          className="flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all duration-200"
+          style={linkStyle(activeLink('/app/wallet'))}
+          onMouseEnter={hoverIn} onMouseLeave={e => hoverOut(e, activeLink('/app/wallet'))}>
+          <Wallet size={17} /><span className="text-sm font-medium">Ki Wallet</span>
         </Link>
 
         {/* Settings */}

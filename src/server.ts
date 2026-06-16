@@ -26,6 +26,7 @@ import { adminRoutes }         from './api/routes/admin.js'
 import { kibiRoutes }         from './api/routes/kibi.js'
 import { fileRoutes }         from './api/routes/files.js'
 import { notificationRoutes } from './api/routes/notifications.js'
+import { walletRoutes }       from './api/routes/wallet.js'
 import { webhookRoutes }      from './api/webhooks/index.js'
 
 const FRONTEND_DIST = process.env['FRONTEND_DIST'] ?? '/app/frontend/dist'
@@ -100,6 +101,7 @@ await app.register(async (api) => {
   await api.register(kibiRoutes,          { prefix: '/kibi' })
   await api.register(fileRoutes,          { prefix: '/files' })
   await api.register(notificationRoutes,  { prefix: '/notifications' })
+  await api.register(walletRoutes,        { prefix: '/wallet' })
 }, { prefix: '/api/v1' })
 
 await app.register(webhookRoutes, { prefix: '/webhooks' })

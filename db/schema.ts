@@ -320,9 +320,11 @@ export const kibiSupportTickets = pgTable('kibi_support_tickets', {
   resolutionSummary: text('resolution_summary'),
   solutionSteps:   jsonb('solution_steps').$type<Record<string, unknown>[]>(),
   kibiAttempted:   boolean('kibi_attempted').notNull().default(false),
-  escalatedTo:     uuid('escalated_to'),
-  escalatedAt:     timestamp('escalated_at', { withTimezone: true }),
-  openedAt:        timestamp('opened_at', { withTimezone: true }).notNull().defaultNow(),
+  escalatedTo:       uuid('escalated_to'),
+  escalatedAt:       timestamp('escalated_at', { withTimezone: true }),
+  externalContactId: varchar('external_contact_id', { length: 255 }), // WA phone / TG chat_id / IG id / email
+  assignedAgentId:   uuid('assigned_agent_id').references(() => users.id, { onDelete: 'set null' }),
+  openedAt:          timestamp('opened_at', { withTimezone: true }).notNull().defaultNow(),
   closedAt:        timestamp('closed_at', { withTimezone: true }),
   firstResponseAt: timestamp('first_response_at', { withTimezone: true }),
   slaDeadline:     timestamp('sla_deadline', { withTimezone: true }),
@@ -1013,6 +1015,21 @@ export const crmRelatedLists = pgTable('crm_related_lists', {
   uniqueIdx: uniqueIndex('crm_related_lists_unique_idx').on(t.connectionId, t.moduleApiName, t.apiName),
 }))
 
+// Platform-level vector documents (KIBI AI knowledge base)
+export const platformVectorDocs = pgTable('platform_vector_docs', {
+  id:          uuid('id').primaryKey().defaultRandom(),
+  title:       varchar('title', { length: 500 }).notNull(),
+  content:     text('content').notNull(),
+  sourceType:  varchar('source_type', { length: 50 }).notNull().default('manual'),
+  qdrantId:    varchar('qdrant_id', { length: 100 }),
+  isIndexed:   boolean('is_indexed').notNull().default(false),
+  vectorModel: varchar('vector_model', { length: 150 }),
+  tags:        jsonb('tags').$type<string[]>().default([]),
+  createdBy:   uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
+  createdAt:   timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt:   timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+})
+
 // Knowledge base entries (auto-updated from conversations)
 export const knowledgeEntries = pgTable('knowledge_entries', {
   id:         uuid('id').primaryKey().defaultRandom(),
@@ -1132,3 +1149,104 @@ export interface ToolCall {
   arguments: Record<string, unknown>
   result?:   unknown
 }
+
+// ─── Ki Wallet ────────────────────────────────────────────────────────────────
+// One wallet per entity, linked by email + walletId (crypto-wallet standard)
+export const kibiWallets = pgTable('kibi_wallets', {
+  id:            uuid('id').primaryKey().defaultRandom(),
+  entityId:      uuid('entity_id').notNull().references(() => kibiEntities.id, { onDelete: 'cascade' }),
+  email:         varchar('email', { length: 255 }).notNull(),
+  walletId:      varchar('wallet_id', { length: 100 }).notNull(),
+  balanceKiCoin: numeric('balance_ki_coin', { precision: 20, scale: 8 }).notNull().default('0'),
+  balanceUsd:    numeric('balance_usd', { precision: 15, scale: 2 }).notNull().default('0'),
+  lastSyncAt:    timestamp('last_sync_at', { withTimezone: true }),
+  createdAt:     timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt:     timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({
+  entityIdx: uniqueIndex('kibi_wallets_entity_idx').on(t.entityId),
+  emailIdx:  index('kibi_wallets_email_idx').on(t.email),
+  walletIdx: uniqueIndex('kibi_wallets_wallet_id_idx').on(t.walletId),
+}))
+
+export const kibiWalletTransactions = pgTable('kibi_wallet_transactions', {
+  id:            uuid('id').primaryKey().defaultRandom(),
+  walletId:      uuid('wallet_id').notNull().references(() => kibiWallets.id, { onDelete: 'cascade' }),
+  entityId:      uuid('entity_id').notNull().references(() => kibiEntities.id, { onDelete: 'cascade' }),
+  type:          varchar('type', { length: 20 }).notNull(), // 'charge' | 'topup' | 'refund'
+  amountKiCoin:  numeric('amount_ki_coin', { precision: 20, scale: 8 }).notNull(),
+  amountUsd:     numeric('amount_usd', { precision: 15, scale: 2 }).notNull(),
+  description:   varchar('description', { length: 500 }),
+  balanceAfter:  numeric('balance_after', { precision: 20, scale: 8 }),
+  metadata:      jsonb('metadata').$type<Record<string, unknown>>().default({}),
+  createdAt:     timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({
+  walletIdx: index('kibi_wallet_txns_wallet_idx').on(t.walletId),
+  entityIdx: index('kibi_wallet_txns_entity_idx').on(t.entityId),
+  timeIdx:   index('kibi_wallet_txns_time_idx').on(t.walletId, t.createdAt),
+}))
+
+// ─── Pricing Packages (new tiered structure) ──────────────────────────────────
+export const kibiPricingPackages = pgTable('kibi_pricing_packages', {
+  id:                    uuid('id').primaryKey().defaultRandom(),
+  tier:                  integer('tier').notNull(),           // 1=minimal, 2=fluent, 3=top, 4=payg
+  name:                  varchar('name', { length: 100 }).notNull(),
+  displayName:           varchar('display_name', { length: 255 }).notNull(),
+  description:           text('description'),
+  // Token guarantees (input/output/context)
+  guaranteedTokensInput:  bigint('guaranteed_tokens_input',  { mode: 'number' }).notNull().default(0),
+  guaranteedTokensOutput: bigint('guaranteed_tokens_output', { mode: 'number' }).notNull().default(0),
+  guaranteedTokensContext:bigint('guaranteed_tokens_context',{ mode: 'number' }).notNull().default(0),
+  // User limits
+  minUsers:              integer('min_users').notNull().default(1),
+  maxUsers:              integer('max_users').notNull().default(5),    // supervisor + sub + external
+  // Pricing — formula: (guaranteed_tokens * 1.30) + 100
+  basePriceUsd:          numeric('base_price_usd', { precision: 10, scale: 2 }).notNull(),
+  tokenMarkup:           numeric('token_markup', { precision: 5, scale: 2 }).notNull().default('1.30'),
+  // Pay-as-you-go specific: token_price * 1.50 from Ki Wallet
+  isPayAsYouGo:          boolean('is_pay_as_you_go').notNull().default(false),
+  paygTokenMultiplier:   numeric('payg_token_multiplier', { precision: 5, scale: 2 }).notNull().default('1.50'),
+  // Model tier allowed
+  allowedModelTier:      varchar('allowed_model_tier', { length: 20 }).notNull().default('free'), // 'free' | 'mid' | 'top'
+  // Ki Wallet payment
+  acceptsKiWallet:       boolean('accepts_ki_wallet').notNull().default(true),
+  isActive:              boolean('is_active').notNull().default(true),
+  sortOrder:             integer('sort_order').notNull().default(0),
+  createdAt:             timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt:             timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({
+  tierIdx: uniqueIndex('kibi_pricing_packages_tier_idx').on(t.tier),
+}))
+
+// ─── Support Agents ───────────────────────────────────────────────────────────
+export const kibiSupportAgents = pgTable('kibi_support_agents', {
+  id:                  uuid('id').primaryKey().defaultRandom(),
+  entityId:            uuid('entity_id').notNull().references(() => kibiEntities.id, { onDelete: 'cascade' }),
+  userId:              uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  isActive:            boolean('is_active').notNull().default(true),
+  channelPreference:   varchar('channel_preference', { length: 30 }).notNull().default('email'),
+  waPhone:             varchar('wa_phone', { length: 30 }),
+  telegramChatId:      varchar('telegram_chat_id', { length: 50 }),
+  notificationEmail:   varchar('notification_email', { length: 255 }),
+  weight:              integer('weight').notNull().default(1),
+  assignedCount:       integer('assigned_count').notNull().default(0),
+  createdAt:           timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt:           timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({
+  entityUserIdx: uniqueIndex('kibi_support_agents_entity_user_idx').on(t.entityId, t.userId),
+  entityActiveIdx: index('kibi_support_agents_entity_active_idx').on(t.entityId, t.isActive),
+}))
+
+export const kibiSupportAgentsRelations = relations(kibiSupportAgents, ({ one }) => ({
+  entity: one(kibiEntities, { fields: [kibiSupportAgents.entityId], references: [kibiEntities.id] }),
+  user:   one(users,         { fields: [kibiSupportAgents.userId],   references: [users.id] }),
+}))
+
+export const kibiWalletsRelations = relations(kibiWallets, ({ one, many }) => ({
+  entity:       one(kibiEntities, { fields: [kibiWallets.entityId], references: [kibiEntities.id] }),
+  transactions: many(kibiWalletTransactions),
+}))
+
+export const kibiWalletTransactionsRelations = relations(kibiWalletTransactions, ({ one }) => ({
+  wallet: one(kibiWallets, { fields: [kibiWalletTransactions.walletId], references: [kibiWallets.id] }),
+  entity: one(kibiEntities, { fields: [kibiWalletTransactions.entityId], references: [kibiEntities.id] }),
+}))

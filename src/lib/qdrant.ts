@@ -1,5 +1,10 @@
 import { QdrantClient } from '@qdrant/js-client-rest'
 import { env } from '../../config/env.js'
+import { db } from './db.js'
+import { kibiModelConfigs } from '../../db/schema.js'
+import { and, eq } from 'drizzle-orm'
+import { aiEmbed } from '../engine/ai/gateway.js'
+import { parseModelString } from '../engine/ai/providers.js'
 
 export const qdrant = new QdrantClient({
   url:    env.QDRANT_URL,
@@ -14,6 +19,51 @@ export const COLLECTIONS = {
 export async function ensureQdrantConnection() {
   await qdrant.getCollections()
   console.log('✓ Qdrant connected')
+}
+
+// ── Configurable embedding via kibi_model_configs (role='qdrant_search') ─────
+let _embeddingModelCache: { model: string; ts: number } | null = null
+const EMBED_MODEL_TTL = 5 * 60 * 1000
+
+async function resolveEmbeddingModel(): Promise<string | null> {
+  if (_embeddingModelCache && Date.now() - _embeddingModelCache.ts < EMBED_MODEL_TTL) {
+    return _embeddingModelCache.model
+  }
+  try {
+    const rows = await db.select({ primaryModel: kibiModelConfigs.primaryModel })
+      .from(kibiModelConfigs)
+      .where(and(
+        eq(kibiModelConfigs.scope, 'platform'),
+        eq(kibiModelConfigs.modelRole, 'qdrant_search'),
+      ))
+      .limit(1)
+    const model = rows[0]?.primaryModel ?? null
+    if (model) _embeddingModelCache = { model, ts: Date.now() }
+    return model
+  } catch {
+    return null
+  }
+}
+
+/** Invalidate embedding model cache (call after admin updates qdrant_search role) */
+export function invalidateEmbeddingModelCache() {
+  _embeddingModelCache = null
+}
+
+/**
+ * Embed using the admin-configured model (kibi_model_configs: scope=platform, role=qdrant_search).
+ * Falls back to the hardcoded BAAI/bge-m3 via HF pipeline if no model is configured.
+ */
+export async function embedConfigured(texts: string[]): Promise<number[][]> {
+  const configuredModel = await resolveEmbeddingModel()
+  if (configuredModel) {
+    const parsed = parseModelString(configuredModel)
+    if (parsed) {
+      return aiEmbed(texts, configuredModel, null)
+    }
+  }
+  // Fall back to legacy HF pipeline
+  return embed(texts)
 }
 
 // ── HuggingFace embeddings (free, same as n8n used: BAAI/bge-m3) ─────────────

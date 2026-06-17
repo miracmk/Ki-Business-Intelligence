@@ -130,6 +130,8 @@ export function UniversalConnectorWizard({ onClose, onDone }: { onClose: () => v
   const [testMsg, setTestMsg]           = useState('')
   const [connectionId, setConnectionId] = useState('')
   const [showMetaTables, setShowMetaTables] = useState(false)
+  const [detecting, setDetecting]       = useState(false)
+  const [detectedTypeInfo, setDetectedTypeInfo] = useState<{ type: string; confidence: string; reason?: string; aiUsed: boolean } | null>(null)
 
   // Step 3 — scan
   const [scanLogs, setScanLogs]         = useState<LogLine[]>([])
@@ -170,13 +172,26 @@ export function UniversalConnectorWizard({ onClose, onDone }: { onClose: () => v
 
   // ── Step 2 actions ───────────────────────────────────────────────────────
   const testConnection = async () => {
-    setTestStatus('testing'); setTestMsg('')
+    setTestStatus('testing'); setTestMsg(''); setDetectedTypeInfo(null)
     try {
       const r = await api.post('/crm/db-test', {
         host: dbForm.host, port: Number(dbForm.port ?? 5432),
         database: dbForm.database, username: dbForm.username, password: dbForm.password, ssl: false,
       })
       setTestStatus('ok'); setTestMsg(`Bağlantı başarılı! ${(r.data.tables ?? []).length} tablo bulundu.`)
+
+      // AI detect source type
+      setDetecting(true)
+      try {
+        const d = await api.post('/crm/db-detect-type', {
+          host: dbForm.host, port: Number(dbForm.port ?? 5432),
+          database: dbForm.database, username: dbForm.username, password: dbForm.password, ssl: false,
+        })
+        const info = { type: d.data.detectedType, confidence: d.data.confidence, reason: d.data.reason, aiUsed: d.data.aiUsed }
+        setDetectedTypeInfo(info)
+        if (info.type && info.type !== 'generic') setSourceType(info.type)
+      } catch { /* ignore detect error */ }
+      setDetecting(false)
     } catch (e: any) {
       setTestStatus('fail'); setTestMsg(e.response?.data?.error ?? 'Bağlantı başarısız')
     }
@@ -478,6 +493,21 @@ export function UniversalConnectorWizard({ onClose, onDone }: { onClose: () => v
                 <p className="text-sm flex items-center gap-2" style={{ color: testStatus === 'ok' ? 'var(--accent)' : '#f87171' }}>
                   {testStatus === 'ok' ? <CheckCircle size={14} /> : <AlertCircle size={14} />} {testMsg}
                 </p>
+              )}
+              {detecting && (
+                <p className="text-sm flex items-center gap-2" style={{ color: 'var(--text-3)' }}>
+                  <Loader2 size={13} className="animate-spin" /> AI sistem tipi tespit ediyor...
+                </p>
+              )}
+              {detectedTypeInfo && (
+                <div className="p-3 rounded-xl" style={{ background: detectedTypeInfo.aiUsed ? 'rgba(139,92,246,0.1)' : 'rgba(38,166,154,0.08)', border: `1px solid ${detectedTypeInfo.aiUsed ? 'rgba(139,92,246,0.3)' : 'rgba(38,166,154,0.2)'}` }}>
+                  <p className="text-sm font-medium" style={{ color: detectedTypeInfo.aiUsed ? '#a78bfa' : 'var(--accent)' }}>
+                    {detectedTypeInfo.aiUsed ? '✦ AI' : '◎ Regex'} tespit etti: <strong>{SOURCE_TYPES.find(s => s.id === detectedTypeInfo.type)?.label ?? detectedTypeInfo.type}</strong>
+                    <span className="ml-2 text-xs opacity-70">({detectedTypeInfo.confidence})</span>
+                  </p>
+                  {detectedTypeInfo.reason && <p className="text-xs mt-1" style={{ color: 'var(--text-3)' }}>{detectedTypeInfo.reason}</p>}
+                  <p className="text-xs mt-1" style={{ color: 'var(--text-3)' }}>Kaynak tipi otomatik seçildi. Değiştirmek için Adım 1'e dönebilirsiniz.</p>
+                </div>
               )}
               <button onClick={testConnection} disabled={testStatus === 'testing'}
                 className="w-full py-3 rounded-2xl text-sm font-medium"

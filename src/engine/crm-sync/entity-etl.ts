@@ -47,7 +47,12 @@ export async function runEntityEtl(connectionId: string): Promise<EtlResult> {
   try {
     await ensureEtlTables(pool, entity.entityDbSchema)
 
-    // v2: use connector config if available
+    // v3: role-based mirror connector (PostgreSQL direct → entity schema)
+    if (conn.connectorConfig && (conn.connectorConfig as any).roles && conn.crmType === 'postgresql') {
+      return runMirrorEtl(pool, connectionId, entity.entityDbSchema, conn.connectorConfig as any, conn.credentials)
+    }
+
+    // v2: use connector config if available (CRM API → crm_records → entity tables)
     if (conn.connectorConfig) {
       return runConnectorEtl(pool, connectionId, entity.entityDbSchema, conn.crmType, conn.connectorConfig)
     }
@@ -62,6 +67,101 @@ export async function runEntityEtl(connectionId: string): Promise<EtlResult> {
   } finally {
     await pool.end()
   }
+}
+
+// ── v3: Role-based Mirror ETL (PostgreSQL source → entity schema, direct copy) ─
+
+async function runMirrorEtl(
+  entityPool: Pool,
+  connectionId: string,
+  schemaName: string,
+  config: { mappings: Array<{ sourceModule: string; targetTable: string; role: string }> },
+  encryptedCreds: string,
+): Promise<EtlResult> {
+  const result: EtlResult = { ok: true, rows: 0, mirrored: 0, tables: [] }
+  const creds = decryptJson<any>(encryptedCreds)
+
+  const srcPool = new Pool({
+    host: creds.host, port: Number(creds.port ?? 5432),
+    database: creds.database, user: creds.username, password: creds.password,
+    ssl: creds.ssl ? { rejectUnauthorized: false } : false,
+    max: 2, connectionTimeoutMillis: 10000,
+  })
+
+  try {
+    const mappings = (config.mappings ?? []).filter(m => m.targetTable && m.role !== '')
+
+    for (const mapping of mappings) {
+      const sourceTable = mapping.sourceModule
+      const targetTable = mapping.targetTable
+
+      const { rows: cols } = await srcPool.query<{ column_name: string; data_type: string }>(
+        `SELECT column_name, data_type FROM information_schema.columns
+         WHERE table_schema = 'public' AND table_name = $1 ORDER BY ordinal_position`,
+        [sourceTable]
+      )
+      if (cols.length === 0) continue
+
+      const colDefs = cols.map(c => `"${c.column_name}" ${mirrorPgType(c.data_type)}`).join(', ')
+      await entityPool.query(`
+        CREATE TABLE IF NOT EXISTS "${schemaName}"."${targetTable}" (
+          ${colDefs},
+          _ki_synced_at TIMESTAMPTZ DEFAULT NOW()
+        )
+      `)
+      await entityPool.query(`TRUNCATE TABLE "${schemaName}"."${targetTable}"`)
+
+      const colNames = cols.map(c => `"${c.column_name}"`).join(', ')
+      const BATCH = 200
+      let offset = 0
+
+      while (true) {
+        const { rows: srcRows } = await srcPool.query(
+          `SELECT ${colNames} FROM "${sourceTable}" ORDER BY 1 LIMIT $1 OFFSET $2`,
+          [BATCH, offset]
+        )
+        if (srcRows.length === 0) break
+
+        const valueStrings: string[] = []
+        const allVals: unknown[] = []
+        let paramIdx = 1
+        for (const row of srcRows) {
+          valueStrings.push(`(${cols.map(() => `$${paramIdx++}`).join(', ')})`)
+          allVals.push(...cols.map(c => row[c.column_name] ?? null))
+        }
+        await entityPool.query(
+          `INSERT INTO "${schemaName}"."${targetTable}" (${colNames}) VALUES ${valueStrings.join(', ')}`,
+          allVals
+        )
+
+        result.mirrored += srcRows.length
+        result.rows += srcRows.length
+        offset += BATCH
+        if (srcRows.length < BATCH) break
+      }
+
+      if (!result.tables.includes(targetTable)) result.tables.push(targetTable)
+    }
+  } catch (err: any) {
+    result.ok = false
+    result.error = err.message
+  } finally {
+    await srcPool.end().catch(() => {})
+  }
+
+  return result
+}
+
+function mirrorPgType(dataType: string): string {
+  const map: Record<string, string> = {
+    'character varying': 'TEXT', 'character': 'TEXT', 'text': 'TEXT',
+    'integer': 'BIGINT', 'bigint': 'BIGINT', 'smallint': 'INTEGER',
+    'numeric': 'NUMERIC', 'real': 'REAL', 'double precision': 'DOUBLE PRECISION',
+    'boolean': 'BOOLEAN', 'jsonb': 'JSONB', 'json': 'JSONB',
+    'timestamp with time zone': 'TIMESTAMPTZ', 'timestamp without time zone': 'TIMESTAMP',
+    'date': 'DATE', 'uuid': 'TEXT', 'inet': 'TEXT', 'bytea': 'TEXT',
+  }
+  return map[dataType] ?? 'TEXT'
 }
 
 // ── v2: Connector-based ETL ───────────────────────────────────────────────────

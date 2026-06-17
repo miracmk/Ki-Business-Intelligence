@@ -1101,6 +1101,111 @@ Output ONLY JSON: {"mappings":[{"sourceModule":"str","targetTable":"str","fields
     return reply.send({ ok: true, userId, viewCrmStructure: allow })
   })
 
+  // ── GET /crm/connections/:id/entity-tables — list actual entity schema tables ─
+  app.get('/connections/:id/entity-tables', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const { id } = req.params as { id: string }
+    const user = req.user as { sub: string; tenantId: string }
+    const conn = await db.query.crmConnections.findFirst({
+      where: (t, { and, eq }) => and(eq(t.id, id), eq(t.tenantId, user.tenantId)),
+    })
+    if (!conn) return reply.status(404).send({ error: 'Connection not found' })
+
+    const entity = await db.query.kibiEntities.findFirst({
+      where: (t, { eq }) => eq(t.entityId, user.tenantId),
+    })
+    if (!entity?.entityDbSchema) return reply.send({ tables: [], schema: null })
+
+    const { Pool: PgPool } = await import('pg')
+    const pool = new PgPool({ connectionString: env.DATABASE_URL, max: 1 })
+    try {
+      const { rows: tableRows } = await pool.query<{ table_name: string }>(
+        `SELECT table_name FROM information_schema.tables WHERE table_schema = $1 AND table_type = 'BASE TABLE' ORDER BY table_name`,
+        [entity.entityDbSchema]
+      )
+      const tables: Array<{ name: string; count: number }> = []
+      for (const { table_name } of tableRows) {
+        if (table_name.startsWith('_ki_') || table_name === 'crm_raw_mirror') continue
+        try {
+          const { rows } = await pool.query(`SELECT COUNT(*) AS n FROM "${entity.entityDbSchema}"."${table_name}"`)
+          tables.push({ name: table_name, count: parseInt(rows[0]?.n ?? '0') })
+        } catch { /* skip if table unreadable */ }
+      }
+      return reply.send({ tables, schema: entity.entityDbSchema })
+    } finally {
+      await pool.end()
+    }
+  })
+
+  // ── POST /crm/db-detect-type — AI detects if DB is CRM/ERP/Accounting/Generic ─
+  app.post('/db-detect-type', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const { host, port = 5432, database, username, password, ssl = false } = req.body as {
+      host: string; port?: number; database: string; username: string; password: string; ssl?: boolean
+    }
+    if (!host || !database || !username) return reply.status(400).send({ error: 'host, database, username zorunlu' })
+
+    try {
+      const { Client } = await import('pg')
+      const client = new Client({
+        host, port: Number(port), database, user: username, password,
+        ssl: ssl ? { rejectUnauthorized: false } : false,
+        connectionTimeoutMillis: 5000,
+      })
+      await client.connect()
+      const { rows } = await client.query<{ table_name: string; n: string }>(
+        `SELECT t.table_name,
+                (SELECT COUNT(*) FROM information_schema.columns c WHERE c.table_schema='public' AND c.table_name=t.table_name)::text AS n
+         FROM information_schema.tables t WHERE t.table_schema='public' AND t.table_type='BASE TABLE' ORDER BY t.table_name LIMIT 80`
+      )
+      await client.end()
+      const tableList = rows.map(r => `${r.table_name}(${r.n} cols)`).join(', ')
+
+      let detectedType = detectTypeByNames(rows.map(r => r.table_name))
+      let aiUsed = false
+
+      if (env.OPENROUTER_API_KEY) {
+        try {
+          const prompt = `Veritabanı tablo listesine bakarak sistemin türünü tespit et.
+
+Tablolar: ${tableList}
+
+Seçenekler:
+- crm-db: CRM (Zoho, HubSpot, Salesforce export) — modül kataloğu + alan tanım + kayıt tabloları (EAV)
+- erp-db: ERP (SAP, Odoo, Netsis) — belge başlığı + satır + stok + muhasebe
+- acc-db: Muhasebe SaaS (Paraşüt, Xero, Logo) — fatura + ödeme + yevmiye
+- generic: Diğer
+
+SADECE JSON döndür: {"type":"crm-db","confidence":"high","reason":"..."}`
+
+          const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${env.OPENROUTER_API_KEY}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              model: 'nvidia/llama-3.1-nemotron-70b-instruct:free',
+              messages: [{ role: 'user', content: prompt }],
+              temperature: 0.1, max_tokens: 200,
+            }),
+            signal: AbortSignal.timeout(12000),
+          })
+          const aiData = await res.json() as any
+          const raw = aiData.choices?.[0]?.message?.content ?? ''
+          const match = raw.match(/\{[\s\S]*\}/)
+          if (match) {
+            const parsed = JSON.parse(match[0])
+            if (['crm-db', 'erp-db', 'acc-db', 'generic'].includes(parsed.type)) {
+              detectedType = parsed.type
+              aiUsed = true
+              return reply.send({ detectedType, confidence: parsed.confidence ?? 'medium', reason: parsed.reason, aiUsed, tableCount: rows.length })
+            }
+          }
+        } catch { /* ignore AI error, use fallback */ }
+      }
+
+      return reply.send({ detectedType, confidence: 'low', aiUsed, tableCount: rows.length })
+    } catch (e: any) {
+      return reply.status(400).send({ error: e.message })
+    }
+  })
+
   // ── YFZ 19-21 / FAZ B — Connector AI Catalog + Analysis + Pipeline Logging ──
 
   // GET /crm/connections/:id/catalog — entity_data_catalog'dan kayıtları döndür
@@ -1312,6 +1417,14 @@ function buildFallbackMappingsFromUserMap(promptModules: Array<{ sourceModule: s
       return { sourceField: f.name, targetField: 'custom_fields', transform: 'custom', customFieldKey: f.name }
     }),
   }))
+}
+
+function detectTypeByNames(tableNames: string[]): string {
+  const names = tableNames.join(' ').toLowerCase()
+  if (/crm_module|crm_field|crm_record|crm_related/.test(names)) return 'crm-db'
+  if (/order|invoice|shipment|journal|fatura|siparis|yevmiye|stok|depo/.test(names)) return 'erp-db'
+  if (/payment|ledger|odeme|defter|expense|payable|receivable/.test(names)) return 'acc-db'
+  return 'generic'
 }
 
 function buildFallbackMappings(modules: any[], _sourceType: string) {

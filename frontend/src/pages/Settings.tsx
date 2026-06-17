@@ -2007,7 +2007,7 @@ export default function Settings() {
                     try {
                       const [hRes, eRes] = await Promise.all([
                         api.get(`/crm/connections/${conn.id}/sync-history`).catch(() => ({ data: { jobs: [] } })),
-                        api.get(`/crm/connections/${conn.id}/entity-data`).catch(() => ({ data: {} })),
+                        api.get(`/crm/connections/${conn.id}/entity-tables`).catch(() => ({ data: { tables: [] } })),
                       ])
                       setConnSyncHistory(p => ({ ...p, [conn.id]: hRes.data.jobs ?? [] }))
                       setConnEntityData(p => ({ ...p, [conn.id]: eRes.data }))
@@ -2060,15 +2060,23 @@ export default function Settings() {
                         {/* Entity data preview */}
                         {entityData && (
                           <div>
-                            <p className="text-xs font-semibold text-gray-400 mb-2">Entity Veritabanı</p>
-                            <div className="grid gap-2 sm:grid-cols-4">
-                              {(['crm_contacts', 'crm_companies', 'crm_deals', 'erp_products'] as const).map(tbl => (
-                                <div key={tbl} className="p-3 rounded-lg text-center" style={{ background: 'var(--surface-2)', border: '1px solid var(--border)' }}>
-                                  <p className="text-lg font-bold" style={{ color: 'var(--accent)' }}>{entityData[tbl]?.count ?? 0}</p>
-                                  <p className="text-xs mt-0.5" style={{ color: 'var(--text-3)' }}>{tbl}</p>
+                            <p className="text-xs font-semibold text-gray-400 mb-2">
+                              Entity Veritabanı
+                              {entityData.schema && <span className="ml-2 font-mono opacity-50">{entityData.schema}</span>}
+                            </p>
+                            {(entityData.tables ?? []).length === 0
+                              ? <p className="text-xs" style={{ color: 'var(--text-3)' }}>Henüz tablo yok — "Onayla ve Kaydet" ile ETL başlatın</p>
+                              : (
+                                <div className="grid gap-2" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))' }}>
+                                  {(entityData.tables as Array<{ name: string; count: number }>).map(tbl => (
+                                    <div key={tbl.name} className="p-3 rounded-lg text-center" style={{ background: 'var(--surface-2)', border: '1px solid var(--border)' }}>
+                                      <p className="text-lg font-bold" style={{ color: 'var(--accent)' }}>{tbl.count.toLocaleString('tr-TR')}</p>
+                                      <p className="text-xs mt-0.5 font-mono" style={{ color: 'var(--text-3)', wordBreak: 'break-all' }}>{tbl.name}</p>
+                                    </div>
+                                  ))}
                                 </div>
-                              ))}
-                            </div>
+                              )
+                            }
                           </div>
                         )}
 

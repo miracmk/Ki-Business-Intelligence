@@ -522,6 +522,75 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
     return reply.send({ ok: true })
   })
 
+  // POST /admin/ai-providers/:scope/test-model — ping a specific model with a minimal request
+  app.post('/ai-providers/:scope/test-model', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const { scope } = req.params as { scope: string }
+    const dbScope = urlScopeToDb(scope)
+    if (!dbScope) return reply.status(400).send({ error: 'Geçersiz scope' })
+
+    const { model } = req.body as { model: string }
+    if (!model) return reply.status(400).send({ error: 'model zorunlu (format: provider::modelId)' })
+
+    const [providerId, ...modelParts] = model.split('::')
+    const modelId = modelParts.join('::')
+    if (!providerId || !modelId) return reply.status(400).send({ error: 'Geçersiz model formatı (beklenen: provider::modelId)' })
+
+    const providerDef = PROVIDERS.find(p => p.id === providerId)
+    if (!providerDef) return reply.status(400).send({ error: `Bilinmeyen sağlayıcı: ${providerId}` })
+
+    const allRows = await db.select().from(platformConfigs)
+    const configKey = `ai_provider_${dbScope}_${providerId}`
+    let encryptedKey = allRows.find(r => r.key === configKey)?.value ?? ''
+
+    // Fallback: legacy openrouter key for kibi scope
+    if (!encryptedKey && dbScope === 'kibi' && providerId === 'openrouter') {
+      encryptedKey = allRows.find(r => r.key === 'openrouter_api_key')?.value ?? ''
+    }
+    if (!encryptedKey) return reply.status(400).send({ error: `${providerDef.name} için API key yapılandırılmamış` })
+
+    let apiKey: string
+    try { apiKey = decrypt(encryptedKey) } catch { return reply.status(500).send({ error: 'API key çözümlenemedi' }) }
+
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      ...providerDef.extraHeaders,
+      ...(providerDef.authHeader === 'x-api-key'
+        ? { 'x-api-key': apiKey }
+        : { 'Authorization': `Bearer ${apiKey}` }),
+    }
+
+    // Anthropic uses a different request body format
+    const isAnthropic = providerId === 'anthropic'
+    const body = isAnthropic
+      ? JSON.stringify({ model: modelId, max_tokens: 1, messages: [{ role: 'user', content: 'ping' }] })
+      : JSON.stringify({ model: modelId, max_tokens: 1, messages: [{ role: 'user', content: 'ping' }] })
+
+    const pingPath = isAnthropic ? '/messages' : '/chat/completions'
+
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 15_000)
+    const t0 = Date.now()
+
+    try {
+      const res = await fetch(`${providerDef.baseUrl}${pingPath}`, {
+        method: 'POST', headers, body, signal: controller.signal,
+      })
+      clearTimeout(timer)
+      const latencyMs = Date.now() - t0
+
+      if (res.ok || res.status === 200) {
+        return reply.send({ ok: true, latencyMs, status: res.status })
+      }
+
+      const errBody = await res.text().catch(() => '')
+      return reply.send({ ok: false, latencyMs, status: res.status, error: errBody.slice(0, 200) })
+    } catch (e: any) {
+      clearTimeout(timer)
+      const latencyMs = Date.now() - t0
+      return reply.send({ ok: false, latencyMs, error: e.name === 'AbortError' ? 'Zaman aşımı (15s)' : e.message })
+    }
+  })
+
   app.post('/seed', async (req, reply) => {
     const adminExists = await db.query.users.findFirst({ where: (t, { eq }) => eq(t.role, 'admin') })
     if (adminExists) return reply.status(400).send({ error: 'Admin already exists' })

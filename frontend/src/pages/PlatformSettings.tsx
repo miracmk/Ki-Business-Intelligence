@@ -272,6 +272,18 @@ function AiProviderPanel({
   const [editKey,      setEditKey]      = useState('')
   const [savingKey,    setSavingKey]    = useState(false)
   const [sectionOpen,  setSectionOpen]  = useState<Record<string, boolean>>({})
+  const [pingStatus,   setPingStatus]   = useState<Record<string, { ok: boolean; latencyMs?: number; error?: string } | 'loading'>>({})
+
+  const pingModel = async (role: string, model: string) => {
+    if (!model) return
+    setPingStatus(p => ({ ...p, [role]: 'loading' }))
+    try {
+      const r = await api.post(`${baseEndpoint}/test-model`, { model })
+      setPingStatus(p => ({ ...p, [role]: { ok: r.data.ok, latencyMs: r.data.latencyMs, error: r.data.error } }))
+    } catch (e: any) {
+      setPingStatus(p => ({ ...p, [role]: { ok: false, error: e.response?.data?.error ?? e.message } }))
+    }
+  }
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -527,9 +539,34 @@ function AiProviderPanel({
                       { field: 'primary', label: 'Primary Model', required: true },
                       { field: 'fb1',     label: 'Fallback 1',   required: false },
                       { field: 'fb2',     label: 'Fallback 2',   required: false },
-                    ].map(({ field, label: fLabel, required }) => (
+                    ].map(({ field, label: fLabel, required }) => {
+                      const isPrimary = field === 'primary'
+                      const currentVal = edit[field as keyof typeof edit]
+                      const ping = pingStatus[role]
+                      return (
                       <div key={field}>
-                        <label className="text-[11px] mb-1 block" style={{ color: 'var(--text-3)' }}>{fLabel}{required ? ' *' : ''}</label>
+                        <div className="flex items-center justify-between mb-1">
+                          <label className="text-[11px]" style={{ color: 'var(--text-3)' }}>{fLabel}{required ? ' *' : ''}</label>
+                          {isPrimary && currentVal && (
+                            <div className="flex items-center gap-2">
+                              {ping === 'loading' && <span className="text-[10px] animate-pulse" style={{ color: 'var(--text-3)' }}>test ediliyor...</span>}
+                              {ping && ping !== 'loading' && (
+                                <span className="text-[10px] font-mono px-1.5 py-0.5 rounded-full"
+                                  style={{
+                                    background: ping.ok ? 'rgba(34,197,94,0.1)' : 'rgba(239,68,68,0.1)',
+                                    color: ping.ok ? '#4ade80' : '#f87171',
+                                  }}>
+                                  {ping.ok ? `✓ ${ping.latencyMs}ms` : `✗ ${ping.error?.slice(0,40) ?? 'hata'}`}
+                                </span>
+                              )}
+                              <button onClick={() => pingModel(role, currentVal)}
+                                className="text-[10px] px-2 py-0.5 rounded-lg border transition-all"
+                                style={{ borderColor: 'var(--border)', color: 'var(--text-3)', background: 'var(--surface-2)' }}>
+                                Ping
+                              </button>
+                            </div>
+                          )}
+                        </div>
                         <select
                           value={edit[field as keyof typeof edit]}
                           onChange={e => setRoleEdits(p => ({ ...p, [role]: { ...edit, [field]: e.target.value } }))}
@@ -551,7 +588,8 @@ function AiProviderPanel({
                           className="w-full px-3 py-1.5 rounded-lg text-[11px] outline-none font-mono mt-1"
                           style={{ background: 'var(--surface-modal-2)', color: 'var(--text-1)', border: '1px solid var(--border)' }} />
                       </div>
-                    ))}
+                    )
+                  })}
                   </div>
                 )}
                 {isOpen && !isAdmin && saved?.primaryModel && (

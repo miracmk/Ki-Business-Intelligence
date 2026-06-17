@@ -49,12 +49,12 @@ export async function runEntityEtl(connectionId: string): Promise<EtlResult> {
 
     // v3: role-based mirror connector (PostgreSQL direct → entity schema)
     if (conn.connectorConfig && (conn.connectorConfig as any).roles && conn.crmType === 'postgresql') {
-      return runMirrorEtl(pool, connectionId, entity.entityDbSchema, conn.connectorConfig as any, conn.credentials)
+      return await runMirrorEtl(pool, connectionId, entity.entityDbSchema, conn.connectorConfig as any, conn.credentials)
     }
 
     // v2: use connector config if available (CRM API → crm_records → entity tables)
     if (conn.connectorConfig) {
-      return runConnectorEtl(pool, connectionId, entity.entityDbSchema, conn.crmType, conn.connectorConfig)
+      return await runConnectorEtl(pool, connectionId, entity.entityDbSchema, conn.crmType, conn.connectorConfig)
     }
 
     // v1 fallback
@@ -90,6 +90,7 @@ async function runMirrorEtl(
 
   try {
     const mappings = (config.mappings ?? []).filter(m => m.targetTable && m.role !== '')
+    console.log(`[MirrorETL] connectionId=${connectionId} schema=${schemaName} mappings=${mappings.length} creds_keys=${Object.keys(creds).join(',')}`)
 
     for (const mapping of mappings) {
       const sourceTable = mapping.sourceModule
@@ -100,6 +101,7 @@ async function runMirrorEtl(
          WHERE table_schema = 'public' AND table_name = $1 ORDER BY ordinal_position`,
         [sourceTable]
       )
+      console.log(`[MirrorETL] Table ${sourceTable}: ${cols.length} columns found`)
       if (cols.length === 0) continue
 
       const colDefs = cols.map(c => `"${c.column_name}" ${mirrorPgType(c.data_type)}`).join(', ')
@@ -143,12 +145,14 @@ async function runMirrorEtl(
       if (!result.tables.includes(targetTable)) result.tables.push(targetTable)
     }
   } catch (err: any) {
+    console.error(`[MirrorETL] ERROR:`, err.message)
     result.ok = false
     result.error = err.message
   } finally {
     await srcPool.end().catch(() => {})
   }
 
+  console.log(`[MirrorETL] Result: mirrored=${result.mirrored} tables=[${result.tables.join(',')}] ok=${result.ok} error=${result.error ?? ''}`)
   return result
 }
 

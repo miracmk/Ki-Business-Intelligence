@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback } from 'react'
+import type { Dispatch, SetStateAction } from 'react'
 import { Navigate } from 'react-router-dom'
 import {
   Database, MessageSquare, BarChart3, Brain,
@@ -8,6 +9,39 @@ import {
 } from 'lucide-react'
 import api from '../lib/api'
 import { useAuth } from '../store/auth'
+
+// ─── Provider display metadata ───────────────────────────────────────────────
+const PROVIDER_META: Record<string, { name: string; color: string; abbr: string }> = {
+  openrouter:  { name: 'OpenRouter',   color: '#6366f1', abbr: 'OR' },
+  openai:      { name: 'OpenAI',       color: '#10a37f', abbr: 'OA' },
+  anthropic:   { name: 'Anthropic',    color: '#d97706', abbr: 'AN' },
+  google:      { name: 'Google',       color: '#4285f4', abbr: 'GO' },
+  mistral:     { name: 'Mistral AI',   color: '#ff7000', abbr: 'MI' },
+  groq:        { name: 'Groq',         color: '#f55036', abbr: 'GQ' },
+  together:    { name: 'Together AI',  color: '#7c3aed', abbr: 'TG' },
+  fireworks:   { name: 'Fireworks AI', color: '#ec4899', abbr: 'FW' },
+  deepseek:    { name: 'DeepSeek',     color: '#0ea5e9', abbr: 'DS' },
+  cohere:      { name: 'Cohere',       color: '#39d353', abbr: 'CO' },
+  cerebras:    { name: 'Cerebras',     color: '#f97316', abbr: 'CB' },
+  cloudflare:  { name: 'Cloudflare',   color: '#f6821f', abbr: 'CF' },
+  alibaba:     { name: 'Alibaba (QWen)',color: '#ff6a00', abbr: 'AL' },
+  huggingface: { name: 'Hugging Face', color: '#ffd21e', abbr: 'HF' },
+}
+function providerName(id: string) { return PROVIDER_META[id]?.name ?? id.charAt(0).toUpperCase() + id.slice(1) }
+function ProviderBadge({ id, size = 20 }: { id: string; size?: number }) {
+  const meta = PROVIDER_META[id]
+  return (
+    <span style={{
+      display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+      width: size, height: size, borderRadius: 6,
+      background: meta?.color ?? '#888',
+      fontSize: size * 0.38, fontWeight: 700, color: '#fff',
+      flexShrink: 0, letterSpacing: '-0.5px',
+    }}>
+      {meta?.abbr ?? id.slice(0,2).toUpperCase()}
+    </span>
+  )
+}
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 interface Connection {
@@ -251,6 +285,91 @@ interface AiProviderInfo {
 interface ModelGroup  { provider: string; models: Array<{ id: string; name: string }> }
 interface RoleConfig  { modelRole: string; primaryModel: string; fallback1?: string; fallback2?: string }
 
+// ─── ModelCombobox — searchable model picker ──────────────────────────────────
+function ModelCombobox({
+  value, onChange, modelGroups, placeholder, searchKey, modelSearch, setModelSearch,
+}: {
+  value: string
+  onChange: (val: string) => void
+  modelGroups: ModelGroup[]
+  placeholder: string
+  searchKey: string
+  modelSearch: Record<string, string>
+  setModelSearch: Dispatch<SetStateAction<Record<string, string>>>
+}) {
+  const [open, setOpen] = useState(false)
+  const q = (modelSearch[searchKey] ?? '').toLowerCase()
+
+  const filtered = modelGroups.flatMap(g =>
+    g.models
+      .filter(m => !q || m.id.toLowerCase().includes(q) || g.provider.toLowerCase().includes(q))
+      .map(m => ({ ...m, provider: g.provider }))
+  ).slice(0, 50)
+
+  const grouped = modelGroups
+    .map(g => ({
+      provider: g.provider,
+      models: g.models.filter(m => !q || m.id.toLowerCase().includes(q) || g.provider.toLowerCase().includes(q)),
+    }))
+    .filter(g => g.models.length > 0)
+
+  return (
+    <div className="relative">
+      <div className="flex items-center gap-1" style={{ border: '1px solid var(--border)', borderRadius: 8, background: 'var(--surface-modal)', overflow: 'hidden' }}>
+        {value && (() => {
+          const prov = value.split('::')[0]
+          return <span className="ml-2 flex-shrink-0"><ProviderBadge id={prov} size={16} /></span>
+        })()}
+        <input
+          value={open ? (modelSearch[searchKey] ?? '') : value}
+          onChange={e => {
+            setModelSearch(p => ({ ...p, [searchKey]: e.target.value }))
+            onChange(e.target.value)
+            if (!open) setOpen(true)
+          }}
+          onFocus={() => { setOpen(true); setModelSearch(p => ({ ...p, [searchKey]: '' })) }}
+          onBlur={() => setTimeout(() => setOpen(false), 150)}
+          placeholder={open ? 'Ara...' : placeholder}
+          className="flex-1 px-3 py-2 text-xs outline-none font-mono"
+          style={{ background: 'transparent', color: 'var(--text-1)' }}
+        />
+        {value && (
+          <button onClick={() => { onChange(''); setModelSearch(p => ({ ...p, [searchKey]: '' })) }}
+            className="px-2 text-xs" style={{ color: 'var(--text-3)' }}>×</button>
+        )}
+        <button onClick={() => setOpen(o => !o)} className="px-2" style={{ color: 'var(--text-3)' }}>
+          <ChevronDown size={12} />
+        </button>
+      </div>
+      {open && (
+        <div className="absolute left-0 right-0 z-50 mt-1 rounded-xl overflow-hidden shadow-2xl max-h-64 overflow-y-auto"
+          style={{ background: 'var(--surface-modal)', border: '1px solid var(--border)' }}>
+          {filtered.length === 0
+            ? <div className="px-3 py-4 text-xs text-center" style={{ color: 'var(--text-3)' }}>Eşleşen model yok</div>
+            : grouped.map(g => (
+              <div key={g.provider}>
+                <div className="flex items-center gap-2 px-3 py-1.5 sticky top-0"
+                  style={{ background: 'var(--surface-2)', borderBottom: '1px solid var(--border)' }}>
+                  <ProviderBadge id={g.provider} size={16} />
+                  <span className="text-[11px] font-semibold" style={{ color: 'var(--text-2)' }}>{providerName(g.provider)}</span>
+                </div>
+                {g.models.slice(0, 20).map(m => (
+                  <button key={m.id}
+                    onMouseDown={() => { onChange(`${g.provider}::${m.id}`); setModelSearch(p => ({ ...p, [searchKey]: '' })); setOpen(false) }}
+                    className="w-full text-left px-3 py-1.5 text-[11px] font-mono transition-all"
+                    style={{ color: value === `${g.provider}::${m.id}` ? 'var(--accent)' : 'var(--text-1)', background: value === `${g.provider}::${m.id}` ? 'rgba(38,166,154,0.08)' : '' }}>
+                    {m.id}
+                  </button>
+                ))}
+              </div>
+            ))
+          }
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ─── AiProviderPanel ─────────────────────────────────────────────────────────
 function AiProviderPanel({
   scope, baseEndpoint, isAdmin, showToast,
@@ -271,8 +390,10 @@ function AiProviderPanel({
   const [editingId,    setEditingId]    = useState<string | null>(null)
   const [editKey,      setEditKey]      = useState('')
   const [savingKey,    setSavingKey]    = useState(false)
-  const [sectionOpen,  setSectionOpen]  = useState<Record<string, boolean>>({})
-  const [pingStatus,   setPingStatus]   = useState<Record<string, { ok: boolean; latencyMs?: number; error?: string } | 'loading'>>({})
+  const [sectionOpen,   setSectionOpen]   = useState<Record<string, boolean>>({})
+  const [poolExpanded,  setPoolExpanded]  = useState<Record<string, boolean>>({})
+  const [pingStatus,    setPingStatus]    = useState<Record<string, { ok: boolean; latencyMs?: number; error?: string } | 'loading'>>({})
+  const [modelSearch,   setModelSearch]   = useState<Record<string, string>>({})
 
   const pingModel = async (role: string, model: string) => {
     if (!model) return
@@ -379,10 +500,11 @@ function AiProviderPanel({
           {providers.map(p => (
             <div key={p.id} className="rounded-xl p-3.5" style={{ background: 'var(--surface-2)', border: '1px solid var(--border)' }}>
               <div className="flex items-center justify-between gap-3 flex-wrap">
-                <div className="flex items-center gap-2 min-w-0">
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <ProviderBadge id={p.id} size={28} />
                   <div className="min-w-0">
                     <div className="flex items-center gap-2 flex-wrap">
-                      <span className="text-sm font-medium" style={{ color: 'var(--text-1)' }}>{p.name}</span>
+                      <span className="text-sm font-medium" style={{ color: 'var(--text-1)' }}>{providerName(p.id)}</span>
                       {p.isConfigured
                         ? <span className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full" style={{ background: 'rgba(38,166,154,0.15)', color: 'var(--accent)' }}><CheckCircle size={9}/> Bağlı</span>
                         : <span className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full" style={{ background: 'rgba(251,191,36,0.10)', color: '#fbbf24' }}><AlertCircle size={9}/> Yapılandırılmadı</span>
@@ -465,25 +587,46 @@ function AiProviderPanel({
         {modelGroups.length === 0
           ? <p className="text-sm text-center py-6" style={{ color: 'var(--text-3)' }}>Modelleri yüklemek için "Modelleri Yükle" butonuna basın.</p>
           : (
-            <div className="space-y-3">
-              {modelGroups.map(g => (
-                <div key={g.provider}>
-                  <div className="text-xs font-semibold mb-1 px-1" style={{ color: 'var(--text-2)' }}>{g.provider}</div>
-                  <div className="rounded-xl overflow-hidden" style={{ border: '1px solid var(--border)' }}>
-                    {g.models.slice(0, 10).map(m => (
-                      <div key={m.id} className="flex items-center gap-2 px-3 py-1.5 border-b last:border-0" style={{ background: 'var(--surface-2)', borderColor: 'var(--border)' }}>
-                        <span className="text-[11px] font-mono truncate" style={{ color: 'var(--text-1)' }}>{m.id}</span>
-                        {m.name !== m.id && <span className="text-[10px] truncate" style={{ color: 'var(--text-3)' }}>{m.name}</span>}
+            <div className="space-y-2">
+              {modelGroups.map(g => {
+                const expanded = poolExpanded[g.provider] ?? false
+                const shown = expanded ? g.models : g.models.slice(0, 5)
+                return (
+                  <div key={g.provider} className="rounded-xl overflow-hidden" style={{ border: '1px solid var(--border)' }}>
+                    {/* Provider header — clickable to expand/collapse */}
+                    <button
+                      onClick={() => setPoolExpanded(p => ({ ...p, [g.provider]: !p[g.provider] }))}
+                      className="w-full flex items-center justify-between gap-3 px-3 py-2.5"
+                      style={{ background: 'var(--surface-2)' }}>
+                      <div className="flex items-center gap-2">
+                        <ProviderBadge id={g.provider} size={22} />
+                        <span className="text-xs font-semibold" style={{ color: 'var(--text-1)' }}>{providerName(g.provider)}</span>
+                        <span className="text-[10px] px-1.5 py-0.5 rounded-full" style={{ background: 'rgba(38,166,154,0.12)', color: 'var(--accent)' }}>
+                          {g.models.length} model
+                        </span>
+                      </div>
+                      {expanded
+                        ? <ChevronDown size={13} style={{ color: 'var(--text-3)' }} />
+                        : <ChevronRight size={13} style={{ color: 'var(--text-3)' }} />}
+                    </button>
+                    {/* Model list */}
+                    {shown.map((m, i) => (
+                      <div key={m.id} className="flex items-center gap-2 px-3 py-1.5"
+                        style={{ background: i % 2 === 0 ? 'var(--surface)' : 'var(--surface-2)', borderTop: '1px solid var(--border)' }}>
+                        <span className="text-[11px] font-mono truncate flex-1" style={{ color: 'var(--text-1)' }}>{m.id}</span>
+                        {m.name !== m.id && <span className="text-[10px] truncate max-w-[120px]" style={{ color: 'var(--text-3)' }}>{m.name}</span>}
                       </div>
                     ))}
-                    {g.models.length > 10 && (
-                      <div className="px-3 py-1.5 text-[10px]" style={{ background: 'var(--surface-2)', color: 'var(--text-3)' }}>
-                        +{g.models.length - 10} model daha
-                      </div>
+                    {g.models.length > 5 && (
+                      <button onClick={() => setPoolExpanded(p => ({ ...p, [g.provider]: !p[g.provider] }))}
+                        className="w-full px-3 py-1.5 text-[10px] text-center transition-all"
+                        style={{ background: 'var(--surface-2)', color: 'var(--accent)', borderTop: '1px solid var(--border)' }}>
+                        {expanded ? '▲ Gizle' : `+${g.models.length - 5} model daha göster`}
+                      </button>
                     )}
                   </div>
-                </div>
-              ))}
+                )
+              })}
             </div>
           )
         }
@@ -519,20 +662,44 @@ function AiProviderPanel({
             const isOpen = sectionOpen[role] ?? false
             return (
               <div key={role} className="rounded-xl overflow-hidden" style={{ border: '1px solid var(--border)' }}>
-                <button onClick={() => setSectionOpen(p => ({ ...p, [role]: !p[role] }))}
-                  className="w-full flex items-center justify-between gap-3 px-4 py-3"
-                  style={{ background: 'var(--surface-2)' }}>
-                  <div className="flex items-center gap-3 min-w-0">
-                    <span className="text-sm font-medium" style={{ color: 'var(--text-1)' }}>{label}</span>
-                    {saved?.primaryModel
-                      ? <span className="text-[11px] font-mono truncate max-w-[200px]" style={{ color: 'var(--accent)' }}>{saved.primaryModel}</span>
-                      : <span className="text-xs" style={{ color: 'var(--text-3)' }}>— seçilmedi —</span>}
-                  </div>
-                  <div className="flex items-center gap-2 flex-shrink-0">
-                    {saved?.primaryModel && <span className="text-[10px] px-1.5 py-0.5 rounded-full" style={{ background: 'rgba(34,197,94,0.1)', color: '#4ade80' }}>Kayıtlı</span>}
-                    {isOpen ? <ChevronDown size={13} style={{ color: 'var(--text-3)' }} /> : <ChevronRight size={13} style={{ color: 'var(--text-3)' }} />}
-                  </div>
-                </button>
+                <div className="flex items-center" style={{ background: 'var(--surface-2)' }}>
+                  <button onClick={() => setSectionOpen(p => ({ ...p, [role]: !p[role] }))}
+                    className="flex-1 flex items-center justify-between gap-3 px-4 py-3 min-w-0">
+                    <div className="flex items-center gap-3 min-w-0">
+                      <span className="text-sm font-medium flex-shrink-0" style={{ color: 'var(--text-1)' }}>{label}</span>
+                      {saved?.primaryModel
+                        ? <span className="text-[11px] font-mono truncate max-w-[180px]" style={{ color: 'var(--accent)' }}>{saved.primaryModel}</span>
+                        : <span className="text-xs" style={{ color: 'var(--text-3)' }}>— seçilmedi —</span>}
+                    </div>
+                    <div className="flex items-center gap-2 flex-shrink-0">
+                      {saved?.primaryModel && <span className="text-[10px] px-1.5 py-0.5 rounded-full" style={{ background: 'rgba(34,197,94,0.1)', color: '#4ade80' }}>Kayıtlı</span>}
+                      {isOpen ? <ChevronDown size={13} style={{ color: 'var(--text-3)' }} /> : <ChevronRight size={13} style={{ color: 'var(--text-3)' }} />}
+                    </div>
+                  </button>
+                  {/* Ping on header — always visible when saved model exists */}
+                  {saved?.primaryModel && !isOpen && isAdmin && (
+                    <div className="flex items-center gap-1.5 px-3 flex-shrink-0">
+                      {pingStatus[role] === 'loading' && (
+                        <RefreshCw size={11} className="animate-spin" style={{ color: 'var(--text-3)' }} />
+                      )}
+                      {pingStatus[role] && pingStatus[role] !== 'loading' && (
+                        <span className="text-[10px] font-mono px-1 py-0.5 rounded"
+                          style={{
+                            background: (pingStatus[role] as any).ok ? 'rgba(34,197,94,0.1)' : 'rgba(239,68,68,0.1)',
+                            color: (pingStatus[role] as any).ok ? '#4ade80' : '#f87171',
+                          }}>
+                          {(pingStatus[role] as any).ok ? `✓ ${(pingStatus[role] as any).latencyMs}ms` : '✗'}
+                        </span>
+                      )}
+                      <button
+                        onClick={e => { e.stopPropagation(); pingModel(role, saved.primaryModel!) }}
+                        className="text-[10px] px-2 py-1 rounded-lg border transition-all"
+                        style={{ borderColor: 'var(--border)', color: 'var(--text-3)', background: 'var(--surface)' }}>
+                        Ping
+                      </button>
+                    </div>
+                  )}
+                </div>
                 {isOpen && isAdmin && (
                   <div className="px-4 pb-4 pt-3 space-y-3" style={{ background: 'var(--surface)' }}>
                     {[
@@ -567,26 +734,16 @@ function AiProviderPanel({
                             </div>
                           )}
                         </div>
-                        <select
+                        {/* Searchable model combobox */}
+                        <ModelCombobox
                           value={edit[field as keyof typeof edit]}
-                          onChange={e => setRoleEdits(p => ({ ...p, [role]: { ...edit, [field]: e.target.value } }))}
-                          className="w-full px-3 py-2 rounded-lg text-xs outline-none"
-                          style={{ background: 'var(--surface-modal)', color: 'var(--text-1)', border: '1px solid var(--border)' }}>
-                          <option value="" style={{ background: 'var(--surface-modal)', color: 'var(--text-1)' }}>— seçin —</option>
-                          {modelGroups.map(g => (
-                            <optgroup key={g.provider} label={g.provider} style={{ background: 'var(--surface-modal)', color: 'var(--text-2)' }}>
-                              {g.models.map(m => (
-                                <option key={m.id} value={m.id} style={{ background: 'var(--surface-modal)', color: 'var(--text-1)' }}>{m.id}</option>
-                              ))}
-                            </optgroup>
-                          ))}
-                        </select>
-                        <input list={`model-pool-${scope}`}
-                          value={edit[field as keyof typeof edit]}
-                          onChange={e => setRoleEdits(p => ({ ...p, [role]: { ...edit, [field]: e.target.value } }))}
-                          placeholder={required ? 'provider::model — zorunlu' : 'opsiyonel yedek'}
-                          className="w-full px-3 py-1.5 rounded-lg text-[11px] outline-none font-mono mt-1"
-                          style={{ background: 'var(--surface-modal-2)', color: 'var(--text-1)', border: '1px solid var(--border)' }} />
+                          onChange={val => setRoleEdits(p => ({ ...p, [role]: { ...edit, [field]: val } }))}
+                          modelGroups={modelGroups}
+                          placeholder={required ? 'Ara veya yaz: provider::model' : 'Opsiyonel yedek'}
+                          searchKey={`${role}-${field}`}
+                          modelSearch={modelSearch}
+                          setModelSearch={setModelSearch}
+                        />
                       </div>
                     )
                   })}

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Wallet, ArrowUpRight, ArrowDownRight, ExternalLink, RefreshCw, Plus } from 'lucide-react'
+import { Wallet, ArrowUpRight, ArrowDownRight, ExternalLink, RefreshCw, Plus, AlertTriangle, Calendar, Users, MessageSquare } from 'lucide-react'
 import api from '../lib/api'
 import { useAuth } from '../store/auth'
 
@@ -37,6 +37,26 @@ interface Package {
   isPayAsYouGo: boolean
   paygTokenMultiplier: string
   allowedModelTier: string
+  monthlyMessageLimit: number | null
+  perMessagePriceUsd: string
+  overageMessagePriceUsd: string
+  extraSubUserPriceUsd: string
+  maxDebtTokens: number
+}
+
+interface BillingStatus {
+  planName: string
+  nextBillingAt: string | null
+  billingCycleStart: string | null
+  extraSubUsers: number
+  debtTokens: number
+  isBillingRestricted: boolean
+  messagesUsedThisMonth: number
+  monthlyMessageLimit: number | null
+  basePriceUsd: number
+  perMessagePriceUsd: number
+  overageMessagePriceUsd: number
+  extraSubUserPriceUsd: number
 }
 
 const TIER_COLORS: Record<number, string> = {
@@ -123,13 +143,14 @@ export default function KiWallet() {
   const { user } = useAuth()
   const isMain = ['entity_main', 'admin', 'supervisor'].includes((user as any)?.role ?? '')
 
-  const [wallet,       setWallet]       = useState<WalletData | null>(null)
-  const [transactions, setTransactions] = useState<Transaction[]>([])
-  const [packages,     setPackages]     = useState<Package[]>([])
-  const [topUpUrl,     setTopUpUrl]     = useState<string | null>(null)
-  const [loading,      setLoading]      = useState(true)
-  const [showRegister, setShowRegister] = useState(false)
-  const [syncing,      setSyncing]      = useState(false)
+  const [wallet,         setWallet]         = useState<WalletData | null>(null)
+  const [transactions,   setTransactions]   = useState<Transaction[]>([])
+  const [packages,       setPackages]       = useState<Package[]>([])
+  const [billingStatus,  setBillingStatus]  = useState<BillingStatus | null>(null)
+  const [topUpUrl,       setTopUpUrl]       = useState<string | null>(null)
+  const [loading,        setLoading]        = useState(true)
+  const [showRegister,   setShowRegister]   = useState(false)
+  const [syncing,        setSyncing]        = useState(false)
 
   const loadWallet = async () => {
     try {
@@ -153,16 +174,27 @@ export default function KiWallet() {
     } catch { /* non-fatal */ }
   }
 
+  const loadBillingStatus = async () => {
+    try {
+      const res = await api.get('/wallet/billing-status')
+      setBillingStatus(res.data)
+    } catch { /* non-fatal */ }
+  }
+
   useEffect(() => {
-    Promise.all([loadWallet(), loadTransactions(), loadPackages()])
+    Promise.all([loadWallet(), loadTransactions(), loadPackages(), loadBillingStatus()])
       .finally(() => setLoading(false))
   }, [])
 
   const refreshBalance = async () => {
     setSyncing(true)
-    await loadWallet()
-    await loadTransactions()
+    await Promise.all([loadWallet(), loadTransactions(), loadBillingStatus()])
     setSyncing(false)
+  }
+
+  const PLAN_LABELS: Record<string, string> = {
+    free: 'Ücretsiz', basic: 'Başlangıç', premium: 'Premium',
+    enterprise: 'Kurumsal', custom_models: 'Özel Modeller',
   }
 
   if (loading) {
@@ -186,6 +218,119 @@ export default function KiWallet() {
           <p className="text-xs" style={{ color: 'var(--text-3)' }}>KIBI AI kullanım ödemeleri · Ki Coin bakiyesi</p>
         </div>
       </div>
+
+      {/* Billing restriction warning */}
+      {billingStatus?.isBillingRestricted && (
+        <div className="rounded-2xl p-4 flex items-start gap-3"
+          style={{ background: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.3)' }}>
+          <AlertTriangle size={18} className="text-red-400 mt-0.5 flex-shrink-0" />
+          <div>
+            <p className="text-sm font-semibold text-red-400">Hesap Kısıtlandı</p>
+            <p className="text-xs text-red-300 mt-0.5">
+              Token borç limitinize ({(billingStatus.debtTokens ?? 0).toLocaleString('tr-TR')} / 100.000 token) ulaştınız.
+              Ki Wallet bakiyenizi yükleyin ve yetkili ödeme yapıldığında kısıtlama kaldırılacaktır.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* Billing status card */}
+      {billingStatus && (
+        <div className="rounded-2xl p-5 space-y-4"
+          style={{ background: 'var(--surface-2)', border: '1px solid var(--border)' }}>
+          <div className="flex items-center justify-between">
+            <p className="text-xs font-semibold" style={{ color: 'var(--text-3)' }}>FATURA DURUMU</p>
+            {billingStatus.planName && (
+              <span className="text-xs font-semibold px-2 py-0.5 rounded-full"
+                style={{ background: 'rgba(38,166,154,0.15)', color: 'var(--accent)' }}>
+                {PLAN_LABELS[billingStatus.planName] ?? billingStatus.planName}
+              </span>
+            )}
+          </div>
+
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            {/* Next billing */}
+            <div className="flex flex-col gap-1">
+              <div className="flex items-center gap-1.5">
+                <Calendar size={13} style={{ color: 'var(--text-3)' }} />
+                <span className="text-[10px] uppercase font-semibold" style={{ color: 'var(--text-3)' }}>Sonraki Fatura</span>
+              </div>
+              <p className="text-sm font-semibold" style={{ color: 'var(--text-1)' }}>
+                {billingStatus.nextBillingAt
+                  ? new Date(billingStatus.nextBillingAt).toLocaleDateString('tr-TR')
+                  : '—'}
+              </p>
+              <p className="text-[10px]" style={{ color: 'var(--text-3)' }}>
+                ${billingStatus.basePriceUsd.toFixed(2)}/ay base
+              </p>
+            </div>
+
+            {/* Messages */}
+            <div className="flex flex-col gap-1">
+              <div className="flex items-center gap-1.5">
+                <MessageSquare size={13} style={{ color: 'var(--text-3)' }} />
+                <span className="text-[10px] uppercase font-semibold" style={{ color: 'var(--text-3)' }}>Mesaj Kullanımı</span>
+              </div>
+              {billingStatus.monthlyMessageLimit !== null ? (
+                <>
+                  <p className="text-sm font-semibold" style={{ color: 'var(--text-1)' }}>
+                    {billingStatus.messagesUsedThisMonth} / {billingStatus.monthlyMessageLimit}
+                  </p>
+                  <div className="h-1.5 rounded-full overflow-hidden" style={{ background: 'var(--border)' }}>
+                    <div className="h-full rounded-full transition-all"
+                      style={{
+                        width: `${Math.min(100, (billingStatus.messagesUsedThisMonth / billingStatus.monthlyMessageLimit) * 100)}%`,
+                        background: billingStatus.messagesUsedThisMonth >= billingStatus.monthlyMessageLimit
+                          ? 'rgba(239,68,68,0.8)' : 'var(--accent)',
+                      }} />
+                  </div>
+                  {billingStatus.messagesUsedThisMonth >= billingStatus.monthlyMessageLimit && (
+                    <p className="text-[10px] text-orange-400">Limit aşıldı — $0.03/mesaj ücretlendirilir</p>
+                  )}
+                </>
+              ) : (
+                <>
+                  <p className="text-sm font-semibold" style={{ color: 'var(--text-1)' }}>
+                    {billingStatus.messagesUsedThisMonth} mesaj
+                  </p>
+                  <p className="text-[10px]" style={{ color: 'var(--text-3)' }}>
+                    ${billingStatus.perMessagePriceUsd.toFixed(3)}/mesaj
+                  </p>
+                </>
+              )}
+            </div>
+
+            {/* Extra sub-users */}
+            <div className="flex flex-col gap-1">
+              <div className="flex items-center gap-1.5">
+                <Users size={13} style={{ color: 'var(--text-3)' }} />
+                <span className="text-[10px] uppercase font-semibold" style={{ color: 'var(--text-3)' }}>Ek Kullanıcı</span>
+              </div>
+              <p className="text-sm font-semibold" style={{ color: 'var(--text-1)' }}>
+                {billingStatus.extraSubUsers ?? 0} kişi
+              </p>
+              <p className="text-[10px]" style={{ color: 'var(--text-3)' }}>
+                ${billingStatus.extraSubUserPriceUsd.toFixed(0)}/kişi/ay
+              </p>
+            </div>
+
+            {/* Token debt */}
+            <div className="flex flex-col gap-1">
+              <div className="flex items-center gap-1.5">
+                <AlertTriangle size={13} style={{ color: (billingStatus.debtTokens ?? 0) > 0 ? 'rgb(251,191,36)' : 'var(--text-3)' }} />
+                <span className="text-[10px] uppercase font-semibold" style={{ color: 'var(--text-3)' }}>Token Borcu</span>
+              </div>
+              <p className="text-sm font-semibold"
+                style={{ color: (billingStatus.debtTokens ?? 0) > 0 ? 'rgb(251,191,36)' : 'var(--text-1)' }}>
+                {(billingStatus.debtTokens ?? 0).toLocaleString('tr-TR')}
+              </p>
+              <p className="text-[10px]" style={{ color: 'var(--text-3)' }}>
+                maks. 100.000 token
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
 
       {!wallet ? (
         /* No wallet linked yet */
@@ -289,83 +434,75 @@ export default function KiWallet() {
       {/* Pricing Packages */}
       <div>
         <h2 className="text-sm font-semibold mb-4" style={{ color: 'var(--text-1)' }}>Fiyatlandırma Paketleri</h2>
-        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-3">
           {packages.map(pkg => (
-            <div key={pkg.id} className="rounded-2xl p-5 flex flex-col"
+            <div key={pkg.id} className="rounded-2xl p-4 flex flex-col"
               style={{ background: TIER_COLORS[pkg.tier] ?? 'var(--surface-2)', border: `1px solid ${TIER_BORDER[pkg.tier] ?? 'var(--border)'}` }}>
-              <div className="flex items-center justify-between mb-3">
-                <span className="text-xs font-bold px-2 py-0.5 rounded-full"
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-[10px] font-bold px-2 py-0.5 rounded-full"
                   style={{ background: TIER_BORDER[pkg.tier], color: TIER_TEXT[pkg.tier] }}>
-                  Tier {pkg.tier}
+                  {pkg.name?.toUpperCase()}
                 </span>
                 {pkg.isPayAsYouGo && (
-                  <span className="text-[10px] font-semibold" style={{ color: TIER_TEXT[pkg.tier] }}>Pay-as-You-Go</span>
+                  <span className="text-[10px] font-semibold" style={{ color: TIER_TEXT[pkg.tier] }}>PAYG</span>
                 )}
               </div>
 
-              <h3 className="text-base font-bold" style={{ color: TIER_TEXT[pkg.tier] }}>{pkg.displayName}</h3>
-              <p className="text-xs mt-1 flex-1" style={{ color: 'var(--text-3)' }}>{pkg.description}</p>
+              <h3 className="text-sm font-bold" style={{ color: TIER_TEXT[pkg.tier] }}>{pkg.displayName}</h3>
+              <p className="text-[10px] mt-1 flex-1" style={{ color: 'var(--text-3)' }}>{pkg.description}</p>
 
-              <div className="mt-4 space-y-1.5">
-                {!pkg.isPayAsYouGo ? (
-                  <>
-                    <div className="flex justify-between text-xs">
-                      <span style={{ color: 'var(--text-3)' }}>Giriş Token</span>
-                      <span style={{ color: 'var(--text-2)' }}>{(pkg.guaranteedTokensInput / 1000).toFixed(0)}K/ay</span>
-                    </div>
-                    <div className="flex justify-between text-xs">
-                      <span style={{ color: 'var(--text-3)' }}>Çıkış Token</span>
-                      <span style={{ color: 'var(--text-2)' }}>{(pkg.guaranteedTokensOutput / 1000).toFixed(0)}K/ay</span>
-                    </div>
-                    <div className="flex justify-between text-xs">
-                      <span style={{ color: 'var(--text-3)' }}>Kullanıcı</span>
-                      <span style={{ color: 'var(--text-2)' }}>{pkg.minUsers}–{pkg.maxUsers} kişi</span>
-                    </div>
-                    <div className="flex justify-between text-xs">
-                      <span style={{ color: 'var(--text-3)' }}>Model Kalitesi</span>
-                      <span style={{ color: 'var(--text-2)' }} className="capitalize">{pkg.allowedModelTier}</span>
-                    </div>
-                  </>
-                ) : (
-                  <>
-                    <div className="flex justify-between text-xs">
-                      <span style={{ color: 'var(--text-3)' }}>Fiyatlandırma</span>
-                      <span style={{ color: 'var(--text-2)' }}>Token × {pkg.paygTokenMultiplier}</span>
-                    </div>
-                    <div className="flex justify-between text-xs">
-                      <span style={{ color: 'var(--text-3)' }}>Model Seçimi</span>
-                      <span style={{ color: 'var(--text-2)' }}>Serbest</span>
-                    </div>
-                    <div className="flex justify-between text-xs">
-                      <span style={{ color: 'var(--text-3)' }}>Ödeme</span>
-                      <span style={{ color: 'var(--text-2)' }}>Ki Wallet</span>
-                    </div>
-                  </>
+              <div className="mt-3 space-y-1.5">
+                <div className="flex justify-between text-[11px]">
+                  <span style={{ color: 'var(--text-3)' }}>Kullanıcı</span>
+                  <span style={{ color: 'var(--text-2)' }}>
+                    {pkg.maxUsers >= 9999 ? 'Sınırsız' : `${pkg.minUsers}–${pkg.maxUsers}`}
+                  </span>
+                </div>
+                <div className="flex justify-between text-[11px]">
+                  <span style={{ color: 'var(--text-3)' }}>Mesaj/ay</span>
+                  <span style={{ color: 'var(--text-2)' }}>
+                    {pkg.monthlyMessageLimit != null ? pkg.monthlyMessageLimit.toLocaleString('tr-TR') : '—'}
+                  </span>
+                </div>
+                {pkg.isPayAsYouGo && (
+                  <div className="flex justify-between text-[11px]">
+                    <span style={{ color: 'var(--text-3)' }}>Mesaj fiyatı</span>
+                    <span style={{ color: 'var(--text-2)' }}>
+                      ${parseFloat(pkg.perMessagePriceUsd || '0').toFixed(3)}
+                    </span>
+                  </div>
                 )}
+                <div className="flex justify-between text-[11px]">
+                  <span style={{ color: 'var(--text-3)' }}>Aşım/mesaj</span>
+                  <span style={{ color: 'var(--text-2)' }}>
+                    ${parseFloat(pkg.overageMessagePriceUsd || '0.03').toFixed(3)}
+                  </span>
+                </div>
+                <div className="flex justify-between text-[11px]">
+                  <span style={{ color: 'var(--text-3)' }}>Ek kullanıcı</span>
+                  <span style={{ color: 'var(--text-2)' }}>
+                    ${parseFloat(pkg.extraSubUserPriceUsd || '25').toFixed(0)}/ay
+                  </span>
+                </div>
               </div>
 
-              <div className="mt-4 pt-3" style={{ borderTop: `1px solid ${TIER_BORDER[pkg.tier]}` }}>
-                {pkg.isPayAsYouGo ? (
-                  <p className="text-sm font-bold" style={{ color: TIER_TEXT[pkg.tier] }}>
-                    Kullandığın kadar öde
-                  </p>
-                ) : (
-                  <p className="text-xl font-bold" style={{ color: TIER_TEXT[pkg.tier] }}>
-                    ${parseFloat(pkg.basePriceUsd).toFixed(0)}
-                    <span className="text-xs font-normal ml-1" style={{ color: 'var(--text-3)' }}>/ay</span>
-                  </p>
-                )}
-                <p className="text-[10px] mt-0.5" style={{ color: 'var(--text-3)' }}>
-                  {pkg.isPayAsYouGo
-                    ? 'Garantili token yok, tam esneklik'
-                    : `Formül: (${(pkg.guaranteedTokensInput / 1000).toFixed(0)}K token × ${pkg.tokenMarkup}) + $100`}
+              <div className="mt-3 pt-2.5" style={{ borderTop: `1px solid ${TIER_BORDER[pkg.tier]}` }}>
+                <p className="text-lg font-bold" style={{ color: TIER_TEXT[pkg.tier] }}>
+                  ${parseFloat(pkg.basePriceUsd).toFixed(0)}
+                  <span className="text-[11px] font-normal ml-1" style={{ color: 'var(--text-3)' }}>/ay</span>
+                  {pkg.isPayAsYouGo && (
+                    <span className="text-[10px] font-normal ml-1 block" style={{ color: 'var(--text-3)' }}>
+                      + ${parseFloat(pkg.perMessagePriceUsd || '0').toFixed(3)}/mesaj
+                    </span>
+                  )}
                 </p>
               </div>
             </div>
           ))}
         </div>
         <p className="text-xs mt-3" style={{ color: 'var(--text-3)' }}>
-          * Fiyatlandırma formülü: (Garanti Edilen Token × 1.30) + $100. Pay-as-you-go: gerçek kullanım × 1.50 (Ki Wallet bakiyesinden tahsilat).
+          * Limit aşımları $0.03/mesaj olarak Ki Wallet'tan tahsil edilir. Ek kullanıcı eklemek için Ki Wallet bakiyesi gerekir.
+          Token borcu 100.000 tokeni aşarsa hesap kısıtlanır.
         </p>
       </div>
 

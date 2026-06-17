@@ -2,12 +2,12 @@ import type { FastifyPluginAsync } from 'fastify'
 import { z } from 'zod'
 import { db } from '../../lib/db.js'
 import { sql, eq, and, desc, asc } from 'drizzle-orm'
-import { tenants, kibiEntities, kibiTokenUsage, kibiSupportTickets, kibiModelConfigs, kibiInternalUsers, users, platformMetrics, crmConnections, platformConfigs, platformVectorDocs, aiPipelineLogs } from '../../../db/schema.js'
+import { tenants, kibiEntities, kibiTokenUsage, kibiSupportTickets, kibiSupportMessages, kibiModelConfigs, kibiInternalUsers, users, platformMetrics, crmConnections, platformConfigs, platformVectorDocs, aiPipelineLogs, kibiWallets } from '../../../db/schema.js'
 import { learnFromTicket } from '../../engine/kibi/support-pipeline.js'
 import { encrypt, decrypt } from '../../lib/crypto.js'
 import { invalidateModelCache, seedDefaultModelConfigs } from '../../engine/ai/model-config.js'
 import { PROVIDERS, getConfigKey } from '../../engine/ai/providers.js'
-import { invalidateProviderKeyCache } from '../../engine/ai/gateway.js'
+import { invalidateProviderKeyCache, aiComplete, CONVERSATION_MODELS } from '../../engine/ai/gateway.js'
 import { redis } from '../../lib/redis.js'
 import { qdrant, embedConfigured, invalidateEmbeddingModelCache, vectorSearch } from '../../lib/qdrant.js'
 import { env } from '../../../config/env.js'
@@ -50,7 +50,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
     }
     const where = filters.length ? `WHERE ${filters.join(' AND ')}` : ''
     const offset = (Number(page) - 1) * Number(limit)
-    const rows = await db.execute(sql.raw(`SELECT e.*, t.name AS tenant_name, u.email AS owner_email FROM kibi_entities e JOIN tenants t ON e.entity_id = t.id LEFT JOIN tenant_memberships m ON m.tenant_id = t.id LEFT JOIN users u ON u.id = m.user_id ${where} ORDER BY e.created_at DESC LIMIT ${Number(limit)} OFFSET ${offset}`))
+    const rows = await db.execute(sql.raw(`SELECT e.*, t.name AS tenant_name, t.is_active AS tenant_is_active, u.email AS owner_email, u.phone AS owner_phone, w.balance_usd, w.balance_ki_coin FROM kibi_entities e JOIN tenants t ON e.entity_id = t.id LEFT JOIN tenant_memberships m ON m.tenant_id = t.id AND m.role = 'entity_main' LEFT JOIN users u ON u.id = m.user_id LEFT JOIN kibi_wallets w ON w.entity_id = e.id ${where} ORDER BY e.created_at DESC LIMIT ${Number(limit)} OFFSET ${offset}`))
     return { entities: rows.rows }
   })
 
@@ -285,9 +285,9 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
     const { entityId } = req.params as { entityId: string }
     const { planName } = req.body as { planName: string }
 
-    const validPlans = ['free', 'starter', 'growth', 'enterprise']
+    const validPlans = ['free', 'basic', 'premium', 'enterprise', 'custom_models']
     if (!validPlans.includes(planName)) {
-      return reply.status(400).send({ error: 'Geçersiz plan. Geçerli değerler: free, starter, growth, enterprise' })
+      return reply.status(400).send({ error: 'Geçersiz plan. Geçerli değerler: free, basic, premium, enterprise, custom_models' })
     }
 
     const entity = await db.query.kibiEntities.findFirst({ where: (t, { eq }) => eq(t.id, entityId) })
@@ -300,25 +300,89 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
     return reply.send({ ok: true, entityId, planName })
   })
 
-  // GET /admin/plans — list plan definitions (hardcoded limits)
-  app.get('/plans', async (_req, reply) => {
-    return reply.send({
-      plans: [
-        { name: 'free',       displayName: 'Ücretsiz',     maxMonthlyAiMessages: 100,  maxCrmRecords: 1000,  monthlyPriceUsd: 0 },
-        { name: 'starter',    displayName: 'Başlangıç',    maxMonthlyAiMessages: 500,  maxCrmRecords: 10000, monthlyPriceUsd: 29 },
-        { name: 'growth',     displayName: 'Büyüme',       maxMonthlyAiMessages: 2000, maxCrmRecords: 50000, monthlyPriceUsd: 79 },
-        { name: 'enterprise', displayName: 'Kurumsal',     maxMonthlyAiMessages: -1,   maxCrmRecords: -1,    monthlyPriceUsd: 199 },
-      ],
+  // PUT /admin/entities/:entityId/status — toggle entity active/passive
+  app.put('/entities/:entityId/status', async (req, reply) => {
+    const { entityId } = req.params as { entityId: string }
+    const { isActive } = req.body as { isActive: boolean }
+
+    const entity = await db.query.kibiEntities.findFirst({ where: (t, { eq }) => eq(t.id, entityId) })
+    if (!entity) return reply.status(404).send({ error: 'Entity bulunamadı' })
+
+    await db.update(tenants)
+      .set({ isActive: Boolean(isActive) })
+      .where(eq(tenants.id, entity.entityId))
+
+    return reply.send({ ok: true, entityId, isActive })
+  })
+
+  // POST /admin/support/tickets/:id/ai-draft — KIBI AI platform-level draft (no entity tenantId required)
+  app.post('/support/tickets/:id/ai-draft', async (req, reply) => {
+    const { id } = req.params as { id: string }
+
+    const ticket = await db.query.kibiSupportTickets.findFirst({
+      where: (t, { eq }) => eq(t.id, id),
     })
+    if (!ticket) return reply.status(404).send({ error: 'Ticket bulunamadı' })
+
+    const [messages, entity] = await Promise.all([
+      db.query.kibiSupportMessages.findMany({
+        where: (t, { eq }) => eq(t.ticketId, id),
+        orderBy: (t, { asc }) => [asc(t.createdAt)],
+        limit: 20,
+      }),
+      db.query.kibiEntities.findFirst({ where: (t, { eq }) => eq(t.id, ticket.entityId) }),
+    ])
+
+    const history = messages
+      .map(m => `${m.senderType === 'customer' ? 'Müşteri' : 'Destek'}: ${m.content ?? ''}`)
+      .join('\n')
+
+    const prompt = `Sen KIBI platformunun destek yöneticisisin. Aşağıdaki destek ticket'ı için profesyonel, nazik ve çözüm odaklı bir Türkçe yanıt taslağı hazırla.
+
+Entity: ${entity?.companyName ?? 'Bilinmiyor'}
+Ticket Konusu: ${ticket.subject}
+Kategori: ${(ticket as any).categoryL1 ?? 'Genel'}
+
+Sohbet Geçmişi:
+${history || '(Henüz mesaj yok)'}
+
+Sadece yanıt metnini yaz, başka açıklama ekleme.`
+
+    try {
+      const result = await aiComplete(CONVERSATION_MODELS[0], [{ role: 'user', content: prompt }])
+      return reply.send({ draft: result.content })
+    } catch (e: any) {
+      return reply.status(500).send({ error: 'AI taslak oluşturulamadı: ' + e.message })
+    }
+  })
+
+  // GET /admin/plans — plan definitions from DB (kibi_pricing_packages)
+  app.get('/plans', async (_req, reply) => {
+    const packages = await db.query.kibiPricingPackages.findMany({
+      where: (t, { eq }) => eq(t.isActive, true),
+      orderBy: (t, { asc }) => [asc(t.sortOrder)],
+    })
+    return reply.send({ plans: packages })
   })
 
   // ── AI Provider Management ────────────────────────────────────────────────────
-  // Scope URL param: 'kibi' | 'entity-free'  (maps to DB scope 'platform' | 'entity_free')
+  // Scope URL param → DB key scope (for platform_configs keys) + model scope (for kibi_model_configs)
 
-  function urlScopeToDb(s: string): 'kibi' | 'entity_free' | null {
-    if (s === 'kibi')        return 'kibi'
-    if (s === 'entity-free') return 'entity_free'
-    return null
+  const SCOPE_MAP: Record<string, { keyScope: string; modelScope: string }> = {
+    'kibi':                 { keyScope: 'kibi',                 modelScope: 'platform'               },
+    'entity-free':          { keyScope: 'entity_free',          modelScope: 'entity_free'            },
+    'entity-basic':         { keyScope: 'entity_basic',         modelScope: 'entity_basic'           },
+    'entity-premium':       { keyScope: 'entity_premium',       modelScope: 'entity_premium'         },
+    'entity-enterprise':    { keyScope: 'entity_enterprise',    modelScope: 'entity_enterprise'      },
+    'entity-custom-models': { keyScope: 'entity_custom_models', modelScope: 'entity_custom_models'   },
+  }
+
+  function urlScopeToDb(s: string): string | null {
+    return SCOPE_MAP[s]?.keyScope ?? null
+  }
+
+  function urlScopeToModelScope(s: string): string | null {
+    return SCOPE_MAP[s]?.modelScope ?? null
   }
 
   // GET /admin/ai-providers/:scope — list all providers + isConfigured
@@ -470,12 +534,11 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
   // GET /admin/ai-providers/:scope/roles — read kibi_model_configs for scope
   app.get('/ai-providers/:scope/roles', async (req, reply) => {
     const { scope } = req.params as { scope: string }
-    const dbScope = urlScopeToDb(scope)
-    if (!dbScope) return reply.status(400).send({ error: 'Geçersiz scope' })
+    const modelScope = urlScopeToModelScope(scope)
+    if (!modelScope) return reply.status(400).send({ error: 'Geçersiz scope' })
 
-    const platformDbScope = dbScope === 'kibi' ? 'platform' : 'entity_free'
     const configs = await db.select().from(kibiModelConfigs)
-      .where(eq(kibiModelConfigs.scope, platformDbScope))
+      .where(eq(kibiModelConfigs.scope, modelScope))
 
     return reply.send({ roles: configs })
   })
@@ -484,20 +547,18 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
   app.put('/ai-providers/:scope/roles', async (req, reply) => {
     if ((req.user as any)?.role !== 'admin') return reply.status(403).send({ error: 'Sadece admin düzenleyebilir' })
     const { scope } = req.params as { scope: string }
-    const dbScope = urlScopeToDb(scope)
-    if (!dbScope) return reply.status(400).send({ error: 'Geçersiz scope' })
+    const modelScope = urlScopeToModelScope(scope)
+    if (!modelScope) return reply.status(400).send({ error: 'Geçersiz scope' })
 
     const { roles } = req.body as {
       roles: Record<string, { primary: string; fallback1?: string; fallback2?: string }>
     }
     if (!roles || typeof roles !== 'object') return reply.status(400).send({ error: 'roles zorunlu' })
 
-    const platformDbScope = dbScope === 'kibi' ? 'platform' : 'entity_free'
-
     for (const [role, assignment] of Object.entries(roles)) {
       if (!assignment.primary) continue
       const existing = await db.query.kibiModelConfigs.findFirst({
-        where: (t, { and, eq }) => and(eq(t.scope, platformDbScope), eq(t.modelRole, role as any)),
+        where: (t, { and, eq }) => and(eq(t.scope, modelScope), eq(t.modelRole, role as any)),
       })
       const patch = {
         primaryModel: assignment.primary,
@@ -510,10 +571,10 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
       }
       if (existing) {
         await db.update(kibiModelConfigs).set(patch)
-          .where(and(eq(kibiModelConfigs.scope, platformDbScope), eq(kibiModelConfigs.modelRole, role as any)))
+          .where(and(eq(kibiModelConfigs.scope, modelScope), eq(kibiModelConfigs.modelRole, role as any)))
       } else {
         await db.insert(kibiModelConfigs).values({
-          scope: platformDbScope, modelRole: role as any, ...patch,
+          scope: modelScope, modelRole: role as any, ...patch,
         })
       }
       invalidateModelCache(role)

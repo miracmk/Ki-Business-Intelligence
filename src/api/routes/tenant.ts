@@ -1,8 +1,8 @@
 import type { FastifyPluginAsync } from 'fastify'
 import { db } from '../../lib/db.js'
-import { aiConfigs, emailConfigs, tenantMemberships, tenants, users, platformConfigs, kibiModelConfigs, knowledgeEntries } from '../../../db/schema.js'
+import { aiConfigs, emailConfigs, tenantMemberships, tenants, users, platformConfigs, kibiModelConfigs, knowledgeEntries, kibiEntities } from '../../../db/schema.js'
 import { encryptJson, decryptJson, encrypt, decrypt } from '../../lib/crypto.js'
-import { eq, and } from 'drizzle-orm'
+import { eq, and, count as sqlCount } from 'drizzle-orm'
 import { getPlanUsage, PLAN_DEFS } from '../../lib/plan-limits.js'
 import nodemailer from 'nodemailer'
 import * as argon2 from 'argon2'
@@ -12,6 +12,7 @@ import { PROVIDERS, getConfigKey, KIBI_FREE_MODEL } from '../../engine/ai/provid
 import { invalidateProviderKeyCache } from '../../engine/ai/gateway.js'
 import { redis } from '../../lib/redis.js'
 import { qdrant, embedConfigured } from '../../lib/qdrant.js'
+import { chargeAndAddSubUser, getEntityPackage } from '../../engine/billing/billing.js'
 
 const isUUID = (s: string | null | undefined): s is string =>
   !!s && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)
@@ -454,8 +455,10 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
 
     return reply.send({
       members: memberships.map(m => ({
-        userId: m.userId,
-        role: m.role,
+        userId:                m.userId,
+        role:                  m.role,
+        messageLimit:          m.messageLimit ?? null,
+        messagesUsedThisMonth: m.messagesUsedThisMonth ?? 0,
         ...(memberMap[m.userId] ?? {}),
       })),
     })
@@ -472,6 +475,43 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
 
     const tenant = await db.query.tenants.findFirst({ where: (t, { eq }) => eq(t.id, user.tenantId) })
     const tenantSettings = (tenant?.settings ?? {}) as Record<string, any>
+
+    // ── Plan limit + wallet gate for sub-user roles ───────────────────────
+    const isSubUserRole = ['entity_sub', 'entity_supervisor', 'entity_external'].includes(inviteRole)
+    if (isSubUserRole && user.role === 'entity_main') {
+      const entity = await db.query.kibiEntities.findFirst({
+        where: (t, { eq }) => eq(t.entityId, user.tenantId),
+        columns: { id: true, planName: true, extraSubUsers: true },
+      })
+
+      if (entity) {
+        const pkg = entity.planName ? await getEntityPackage(entity.planName) : null
+        if (pkg) {
+          // Count active members (excluding entity_main itself)
+          const [countRow] = await db
+            .select({ cnt: sqlCount() })
+            .from(tenantMemberships)
+            .where(and(eq(tenantMemberships.tenantId, user.tenantId)))
+
+          const currentCount = Number(countRow?.cnt ?? 0)
+          const includedMax  = pkg.maxUsers                        // users included in plan price
+          const extraAllowed = entity.extraSubUsers ?? 0
+          const effectiveMax = includedMax + extraAllowed
+
+          if (currentCount >= effectiveMax) {
+            // Over plan limit — must pay for an extra sub-user slot
+            const charge = await chargeAndAddSubUser(entity.id, entity.planName!)
+            if (!charge.ok) {
+              const reason = charge.reason === 'insufficient_funds'
+                ? `Plan limitiniz doldu (${includedMax} kullanıcı). Ek kullanıcı ($${parseFloat(String(pkg.extraSubUserPriceUsd))}/ay) için Ki Wallet bakiyeniz yetersiz.`
+                : 'Ek kullanıcı ücreti alınamadı. Lütfen Ki Wallet bakiyenizi kontrol edin.'
+              return reply.status(402).send({ error: reason })
+            }
+          }
+        }
+      }
+    }
+    // ── End plan gate ────────────────────────────────────────────────────
 
     // If already a registered user, add them directly
     const existingUser = await db.query.users.findFirst({ where: (t, { eq }) => eq(t.email, email.toLowerCase()) })
@@ -505,6 +545,27 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
     } catch { /* non-fatal */ }
 
     return reply.send({ ok: true, added: false, invited: true })
+  })
+
+  // PUT /api/v1/tenants/me/members/:userId/message-limit — entity_main sets per-user message limit
+  app.put('/me/members/:userId/message-limit', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = req.user as { sub: string; tenantId: string; role: string }
+    if (!isUUID(user.tenantId)) return reply.status(403).send({ error: 'Entity bağlantısı gerekli' })
+    if (user.role !== 'entity_main') return reply.status(403).send({ error: 'Yalnızca Entity Main User yapabilir' })
+
+    const { userId } = req.params as { userId: string }
+    const { messageLimit } = req.body as { messageLimit: number | null }
+
+    const membership = await db.query.tenantMemberships.findFirst({
+      where: (t, { and, eq }) => and(eq(t.userId, userId), eq(t.tenantId, user.tenantId)),
+    })
+    if (!membership) return reply.status(404).send({ error: 'Üye bulunamadı' })
+
+    await db.update(tenantMemberships)
+      .set({ messageLimit: messageLimit ?? null })
+      .where(and(eq(tenantMemberships.userId, userId), eq(tenantMemberships.tenantId, user.tenantId)))
+
+    return reply.send({ ok: true, userId, messageLimit })
   })
 
   // ── Entity AI Provider Management ─────────────────────────────────────────────
@@ -895,5 +956,77 @@ export const channelRoutes: FastifyPluginAsync = async (app) => {
 
     // For other channels: config presence is sufficient for a basic test
     return reply.send({ ok: true, message: 'Kanal yapılandırması mevcut' })
+  })
+
+  // ── Business profile (sector, size, revenue, etc.) ───────────────────────────
+
+  // GET /api/v1/tenants/me/business-profile
+  app.get('/me/business-profile', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = req.user as { sub: string; tenantId: string }
+    if (!isUUID(user.tenantId)) return reply.send({ profile: {} })
+    const tenant = await db.query.tenants.findFirst({ where: (t, { eq }) => eq(t.id, user.tenantId) })
+    const settings = (tenant?.settings ?? {}) as Record<string, any>
+    return reply.send({ profile: settings.businessProfile ?? {} })
+  })
+
+  // PUT /api/v1/tenants/me/business-profile
+  app.put('/me/business-profile', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = req.user as { sub: string; tenantId: string; role: string }
+    if (!isUUID(user.tenantId)) return reply.status(400).send({ error: 'Entity bağlantısı gerekli' })
+    if (!['entity_main', 'admin', 'supervisor'].includes(user.role)) return reply.status(403).send({ error: 'Yetkisiz' })
+
+    const body = req.body as {
+      sector?:               string
+      employee_count?:       string
+      annual_revenue?:       string
+      address?:              string
+      country?:              string
+      tax_number?:           string
+      registration_number?:  string
+      founded_date?:         string
+      logo_url?:             string
+      fiscal_year_start?:    string
+    }
+
+    const tenant = await db.query.tenants.findFirst({ where: (t, { eq }) => eq(t.id, user.tenantId) })
+    const existing = (tenant?.settings ?? {}) as Record<string, any>
+    const current = existing.businessProfile ?? {}
+    await db.update(tenants)
+      .set({ settings: { ...existing, businessProfile: { ...current, ...body } } as any })
+      .where(eq(tenants.id, user.tenantId))
+    return reply.send({ ok: true })
+  })
+
+  // ── Channel identifiers (for inbound routing: WA, IG, TG, email) ─────────────
+
+  // GET /api/v1/tenants/me/channel-ids
+  app.get('/me/channel-ids', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = req.user as { sub: string; tenantId: string }
+    if (!isUUID(user.tenantId)) return reply.send({ channelIds: {} })
+    const tenant = await db.query.tenants.findFirst({ where: (t, { eq }) => eq(t.id, user.tenantId) })
+    const settings = (tenant?.settings ?? {}) as Record<string, any>
+    return reply.send({ channelIds: settings.channelIds ?? {} })
+  })
+
+  // PUT /api/v1/tenants/me/channel-ids
+  app.put('/me/channel-ids', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = req.user as { sub: string; tenantId: string; role: string }
+    if (!isUUID(user.tenantId)) return reply.status(400).send({ error: 'Entity bağlantısı gerekli' })
+    if (!['entity_main', 'admin', 'supervisor'].includes(user.role)) return reply.status(403).send({ error: 'Yetkisiz' })
+
+    const body = req.body as {
+      whatsapp_phones?:    string[]
+      instagram_handles?:  string[]
+      telegram_ids?:       string[]
+      email_domains?:      string[]
+    }
+
+    const tenant = await db.query.tenants.findFirst({ where: (t, { eq }) => eq(t.id, user.tenantId) })
+    const existing = (tenant?.settings ?? {}) as Record<string, any>
+    const current = existing.channelIds ?? {}
+    await db.update(tenants)
+      .set({ settings: { ...existing, channelIds: { ...current, ...body } } as any })
+      .where(eq(tenants.id, user.tenantId))
+    return reply.send({ ok: true })
   })
 }

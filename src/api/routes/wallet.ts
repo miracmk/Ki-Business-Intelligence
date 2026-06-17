@@ -4,6 +4,7 @@ import { db } from '../../lib/db.js'
 import { kibiEntities, kibiWallets, kibiWalletTransactions, kibiPricingPackages } from '../../../db/schema.js'
 import { eq, and, desc, sql } from 'drizzle-orm'
 import { env } from '../../../config/env.js'
+import { billEntityMonthly, runMonthlyBillingCycle, getEntityPackage } from '../../engine/billing/billing.js'
 
 const isUUID = (s: string | null | undefined) =>
   !!s && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)
@@ -200,5 +201,56 @@ export const walletRoutes: FastifyPluginAsync = async (app) => {
     }
 
     return reply.send({ ok: success, transaction: txn })
+  })
+
+  // ── GET /wallet/billing-status — current entity billing state ─────────────
+  app.get('/billing-status', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = req.user as { sub: string; tenantId: string | null }
+    if (!isUUID(user.tenantId)) return reply.status(403).send({ error: 'Entity bağlantısı gerekli' })
+
+    const entity = await db.query.kibiEntities.findFirst({
+      where: (t, { eq }) => eq(t.entityId, user.tenantId!),
+      columns: {
+        id: true, planName: true, nextBillingAt: true, billingCycleStart: true,
+        extraSubUsers: true, debtTokens: true, isBillingRestricted: true, messagesUsedThisMonth: true,
+      },
+    })
+    if (!entity) return reply.status(404).send({ error: 'Entity bulunamadı' })
+
+    const pkg = entity.planName ? await getEntityPackage(entity.planName) : null
+
+    return reply.send({
+      planName:              entity.planName,
+      nextBillingAt:         entity.nextBillingAt,
+      billingCycleStart:     entity.billingCycleStart,
+      extraSubUsers:         entity.extraSubUsers,
+      debtTokens:            entity.debtTokens,
+      isBillingRestricted:   entity.isBillingRestricted,
+      messagesUsedThisMonth: entity.messagesUsedThisMonth,
+      monthlyMessageLimit:   pkg?.monthlyMessageLimit ?? null,
+      basePriceUsd:          pkg ? parseFloat(String(pkg.basePriceUsd)) : 0,
+      perMessagePriceUsd:    pkg ? parseFloat(String(pkg.perMessagePriceUsd)) : 0,
+      overageMessagePriceUsd:pkg ? parseFloat(String(pkg.overageMessagePriceUsd)) : 0.03,
+      extraSubUserPriceUsd:  pkg ? parseFloat(String(pkg.extraSubUserPriceUsd)) : 25,
+    })
+  })
+
+  // ── POST /wallet/monthly-charge — admin: run billing for one entity or all
+  app.post('/monthly-charge', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = req.user as { sub: string; role?: string }
+    if (user.role !== 'admin') return reply.status(403).send({ error: 'Yetkisiz' })
+
+    const body = z.object({
+      entityId: z.string().uuid().optional(),
+    }).safeParse(req.body)
+    if (!body.success) return reply.status(400).send({ error: body.error.flatten() })
+
+    if (body.data.entityId) {
+      const result = await billEntityMonthly(body.data.entityId)
+      return reply.send(result)
+    }
+
+    const result = await runMonthlyBillingCycle()
+    return reply.send(result)
   })
 }

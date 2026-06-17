@@ -7,10 +7,11 @@ import { getModelForRole } from '../../engine/ai/model-config.js'
 import { redis } from '../../lib/redis.js'
 import { vectorSearch } from '../../lib/qdrant.js'
 import { db } from '../../lib/db.js'
-import { kibiEntities, kibiSupportTickets, kibiTokenUsage, entityMetrics, aiSessions, aiMessages } from '../../../db/schema.js'
+import { kibiEntities, kibiSupportTickets, kibiTokenUsage, entityMetrics, aiSessions, aiMessages, tenantMemberships } from '../../../db/schema.js'
 import { eq, and, sql } from 'drizzle-orm'
 import { getEntitySchema, queryEntitySchema, getEntityDataSummary } from '../../lib/entity-provisioner.js'
 import { env } from '../../../config/env.js'
+import { chargeMessageOverage, getEntityPackage } from '../../engine/billing/billing.js'
 
 async function resolveEntityId(userId: string, tenantId: string | null): Promise<string> {
   const isUUID = (s: string | null | undefined) =>
@@ -41,14 +42,20 @@ async function resolveEntityId(userId: string, tenantId: string | null): Promise
 }
 
 // Plan limits per plan name
+// Legacy plan message limits (kept for backward compat with old plan names)
 const PLAN_MSG_LIMITS: Record<string, number> = {
-  free: 100, starter: 500, growth: 2000, enterprise: 999999,
+  free: 40, starter: 150, basic: 150, growth: 750, premium: 750,
+  enterprise: 4500, custom_models: 999999,
 }
 
 async function getEntityWithPlan(tenantId: string) {
   return db.query.kibiEntities.findFirst({
     where: (t, { eq }) => eq(t.entityId, tenantId),
-    columns: { id: true, planName: true },
+    columns: {
+      id: true, planName: true,
+      isBillingRestricted: true,
+      messagesUsedThisMonth: true,
+    },
   }).catch(() => null)
 }
 
@@ -63,7 +70,22 @@ async function trackTokenUsage(entityId: string, userId: string, modelName: stri
       costUsd: costUsd as any,
       modelRole: 'conversation',
     })
-    // Update monthly message count in entityMetrics
+    // Update entity monthly message counter
+    await db.execute(sql`
+      UPDATE kibi_entities
+      SET messages_used_this_month = messages_used_this_month + 1, updated_at = now()
+      WHERE id = ${entityId}
+    `)
+    // Update per-user monthly counter in tenant_memberships
+    await db.execute(sql`
+      UPDATE tenant_memberships m
+      SET messages_used_this_month = messages_used_this_month + 1
+      FROM kibi_entities e
+      JOIN tenants t ON t.id = e.entity_id
+      WHERE m.tenant_id = t.id AND m.user_id = ${userId}
+        AND e.id = ${entityId}
+    `)
+    // Legacy entityMetrics counter
     await db.execute(sql`
       INSERT INTO entity_metrics (id, entity_id, current_month_messages, updated_at)
       VALUES (gen_random_uuid(), ${entityId}, 1, now())
@@ -246,54 +268,102 @@ export const aiRoutes: FastifyPluginAsync = async (app) => {
       } catch { /* non-fatal */ }
     }
 
-    // ── FAZ 15: Plan limit check (entity users only) ──────────────────────────
+    // ── Message limit + overage check (entity users only) ────────────────────
     if (!isAdmin && isUUIDCheck(user.tenantId)) {
       try {
         const entity = await getEntityWithPlan(user.tenantId!)
         if (entity) {
-          const limit = PLAN_MSG_LIMITS[entity.planName ?? 'free'] ?? 100
-          const metrics = await db.query.entityMetrics.findFirst({
-            where: (t, { eq }) => eq(t.entityId, entity.id),
-            columns: { currentMonthMessages: true },
+          // Block if billing-restricted (debt > max_debt_tokens)
+          if (entity.isBillingRestricted) {
+            return reply.status(402).send({ error: 'Hesabınız kısıtlanmış. Lütfen bakiyenizi kontrol edin.' })
+          }
+
+          // Check per-user limit (set by entity_main)
+          const membership = await db.query.tenantMemberships.findFirst({
+            where: (t, { and, eq }) => and(eq(t.userId, user.sub), eq(t.tenantId, user.tenantId!)),
+            columns: { messageLimit: true, messagesUsedThisMonth: true },
           })
-          const used = metrics?.currentMonthMessages ?? 0
-          if (used >= limit) {
-            return reply.status(429).send({ error: `Plan limitinize ulaştınız (${limit} mesaj/ay). Planınızı yükseltin.` })
+          if (membership?.messageLimit != null) {
+            if ((membership.messagesUsedThisMonth ?? 0) >= membership.messageLimit) {
+              return reply.status(429).send({ error: `Aylık mesaj limitinize ulaştınız (${membership.messageLimit} mesaj). Yöneticinizle iletişime geçin.` })
+            }
+          }
+
+          // Check entity-level monthly message limit
+          const pkg = entity.planName ? await getEntityPackage(entity.planName) : null
+          const limit = pkg?.monthlyMessageLimit ?? PLAN_MSG_LIMITS[entity.planName ?? 'free'] ?? 40
+          const used = entity.messagesUsedThisMonth ?? 0
+
+          if (limit !== null && used >= limit) {
+            if (entity.planName === 'free') {
+              // Free plan: hard block (no wallet billing)
+              return reply.status(429).send({ error: `Ücretsiz plan limitinize ulaştınız (${limit} mesaj/ay). Planınızı yükseltin.` })
+            }
+            // Paid plan: charge overage ($0.03/mesaj)
+            const overage = await chargeMessageOverage(entity.id, entity.planName ?? 'free')
+            if (overage.restricted) {
+              return reply.status(402).send({ error: 'Mesaj limitinizi aştınız. Bakiyeniz yetersiz olduğu için mesaj gönderilemedi.' })
+            }
           }
         }
       } catch { /* non-fatal — don't block if check fails */ }
     }
 
+    // Load Redis session history for context
+    let history: { role: 'user' | 'assistant'; content: string }[] = []
     try {
-      const result = await runAgent({
-        tenantId:     user.tenantId ?? 'platform',
-        sessionId:    sid,
-        userMessage:  message,
-        isAdmin,
-        instructions: kibiInstructions,
-        ...rest,
+      const histKey  = `kibi:session:hist:${sid}`
+      const histRaw  = await redis.get(histKey).catch(() => null)
+      if (histRaw) history = JSON.parse(histRaw)
+      // Also try old session_messages format for backward compat
+      if (history.length === 0) {
+        const legacy = await redis.lrange(`session_messages:${sid}`, -20, -1).catch(() => [])
+        history = legacy.map((r: string) => { try { return JSON.parse(r) } catch { return null } }).filter(Boolean)
+      }
+    } catch { /* non-fatal */ }
+
+    try {
+      const result = await runKibiAgent({
+        tenantId:    user.tenantId ?? undefined,
+        channelType: 'web',
+        identifier:  user.sub,
+        sessionKey:  sid,
+        message,
+        language:    'tr',
+        history,
+        supportAttempts: [],
       })
 
-      // ── FAZ 15: Token usage tracking ─────────────────────────────────────────
+      // Persist updated history to Redis
+      const updatedHistory = [...history, { role: 'user' as const, content: message }, { role: 'assistant' as const, content: result.response }]
+      const histKey = `kibi:session:hist:${sid}`
+      await redis.set(histKey, JSON.stringify(updatedHistory.slice(-40)), 'EX', 60 * 60 * 24 * 30).catch(() => {})
+
+      // Persist to DB session
+      if (isUUIDCheck(sid)) {
+        db.insert(aiMessages).values([
+          { sessionId: sid!, role: 'user',      content: message },
+          { sessionId: sid!, role: 'assistant', content: result.response },
+        ]).then(() =>
+          db.update(aiSessions).set({ messageCount: sql`message_count + 2`, lastMessageAt: new Date(), updatedAt: new Date() })
+            .where(eq(aiSessions.id, sid!))
+        ).catch(err => console.error('[AI CHAT] DB persist failed:', err))
+      }
+
+      // ── Token usage tracking ─────────────────────────────────────────
       if (isUUIDCheck(user.tenantId) && !isAdmin) {
         const entity = await getEntityWithPlan(user.tenantId!).catch(() => null)
         if (entity) {
-          const msgLen = message.length + (result.response?.length ?? 0)
-          const estimatedPrompt = Math.ceil(message.length / 4)
-          const estimatedCompletion = Math.ceil((result.response?.length ?? 0) / 4)
-          trackTokenUsage(entity.id, user.sub, result.usedModel ?? 'unknown', estimatedPrompt, estimatedCompletion)
+          trackTokenUsage(entity.id, user.sub, 'kibi_pipeline',
+            Math.ceil(message.length / 4),
+            Math.ceil((result.response?.length ?? 0) / 4))
         }
       }
 
-      return reply.send({
-        response:   result.response,
-        department: result.department,
-        sessionId:  sid,
-        usedModel:  result.usedModel,
-      })
+      return reply.send({ response: result.response, sessionId: sid })
     } catch (e: any) {
       console.error('[AI CHAT] Error:', e)
-      return reply.status(500).send({ error: 'AI hatası, lütfen tekrar deneyin' })
+      return reply.status(500).send({ error: 'AI hatası: ' + ((e as Error).message || 'lütfen tekrar deneyin') })
     }
   })
 
@@ -473,11 +543,25 @@ export const aiRoutes: FastifyPluginAsync = async (app) => {
         }
       }
 
-      // Get live data summary to build context
-      const summary = await getEntityDataSummary(entity.entityDbSchema)
+      // Get live data summary and business profile in parallel
+      const [summary, tenantRow] = await Promise.all([
+        getEntityDataSummary(entity.entityDbSchema),
+        db.query.tenants.findFirst({ where: (t, { eq }) => eq(t.id, user.tenantId!), columns: { settings: true } }),
+      ])
+
+      const bp = ((tenantRow?.settings as any)?.businessProfile ?? {}) as Record<string, string>
+      const profileLines: string[] = []
+      if (bp.sector)               profileLines.push(`Sektör: ${bp.sector}`)
+      if (bp.employee_count)       profileLines.push(`Çalışan sayısı: ${bp.employee_count}`)
+      if (bp.annual_revenue)       profileLines.push(`Son yıl cirosu: ${bp.annual_revenue}`)
+      if (bp.address)              profileLines.push(`Adres: ${bp.address}`)
+      if (bp.country)              profileLines.push(`Ülke: ${bp.country}`)
+      if (bp.tax_number)           profileLines.push(`Vergi/Kayıt No: ${bp.tax_number}`)
+      if (bp.founded_date)         profileLines.push(`Kuruluş tarihi: ${bp.founded_date}`)
+      if (bp.fiscal_year_start)    profileLines.push(`Mali yıl başlangıcı: ${bp.fiscal_year_start}`)
 
       const systemPrompt = `Sen ${entity.companyName || 'bu şirketin'} verilerine tam erişimi olan Entity AI'sın. Türkçe yanıt ver.
-
+${profileLines.length ? `\nŞirket profili:\n${profileLines.join('\n')}` : ''}
 Güncel veriler:
 CRM: ${summary.crm.contacts} kişi, ${summary.crm.companies} şirket, ${summary.crm.openDeals} açık fırsat (${summary.crm.pipelineValue.toLocaleString('tr-TR')} TL pipeline)
 ERP: ${summary.erp.products} ürün (${summary.erp.lowStockItems} kritik stok), ${summary.erp.ordersLast30d} sipariş/30gün, ${summary.erp.activeStaff} aktif personel (${summary.erp.staffOnLeave} izinde)

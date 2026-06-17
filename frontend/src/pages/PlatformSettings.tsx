@@ -1,11 +1,11 @@
-import { useEffect, useState, useCallback } from 'react'
-import type { Dispatch, SetStateAction } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
+import { createPortal } from 'react-dom'
 import { Navigate } from 'react-router-dom'
 import {
   Database, MessageSquare, BarChart3, Brain,
   Eye, EyeOff, Save, Trash2, RefreshCw, CheckCircle, AlertCircle,
   Server, Wifi, HardDrive, Zap, ChevronDown, ChevronRight, Plus, X,
-  ExternalLink, Key, BookOpen, AlertTriangle,
+  ExternalLink, Key, BookOpen, AlertTriangle, Search,
 } from 'lucide-react'
 import api from '../lib/api'
 import { useAuth } from '../store/auth'
@@ -352,94 +352,133 @@ function PingDots({ rp }: { rp?: RolePing }) {
 
 // ─── ModelCombobox — searchable model picker ──────────────────────────────────
 function ModelCombobox({
-  value, onChange, modelGroups, placeholder, searchKey, modelSearch, setModelSearch,
+  value, onChange, modelGroups, placeholder,
 }: {
   value: string
   onChange: (val: string) => void
   modelGroups: ModelGroup[]
   placeholder: string
-  searchKey: string
-  modelSearch: Record<string, string>
-  setModelSearch: Dispatch<SetStateAction<Record<string, string>>>
 }) {
-  const [open, setOpen] = useState(false)
-  const q = (modelSearch[searchKey] ?? '').toLowerCase()
+  const [open, setOpen]   = useState(false)
+  const [query, setQuery] = useState('')
+  const wrapperRef        = useRef<HTMLDivElement>(null)
+  const [dropRect, setDropRect] = useState<DOMRect | null>(null)
 
-  const filtered = modelGroups.flatMap(g =>
-    g.models
-      .filter(m => !q || m.id.toLowerCase().includes(q) || g.provider.toLowerCase().includes(q))
-      .map(m => ({ ...m, provider: g.provider }))
-  ).slice(0, 50)
+  const openDrop = () => {
+    if (wrapperRef.current) setDropRect(wrapperRef.current.getBoundingClientRect())
+    setQuery('')
+    setOpen(true)
+  }
+  const closeDrop = () => { setOpen(false); setQuery('') }
 
+  const selectModel = (fullId: string) => { onChange(fullId); closeDrop() }
+
+  const q = query.toLowerCase()
   const grouped = modelGroups
     .map(g => ({
       provider: g.provider,
-      models: g.models.filter(m => !q || m.id.toLowerCase().includes(q) || g.provider.toLowerCase().includes(q)),
+      models: !q ? g.models : g.models.filter(m => m.id.toLowerCase().includes(q) || g.provider.toLowerCase().includes(q)),
     }))
     .filter(g => g.models.length > 0)
 
+  const prov = value ? value.split('::')[0] : ''
+
   return (
-    <div className="relative">
-      <div className="flex items-center gap-1" style={{ border: '1px solid var(--border)', borderRadius: 8, background: 'var(--surface-modal)', overflow: 'hidden' }}>
-        {value && (() => {
-          const prov = value.split('::')[0]
-          return <span className="ml-2 flex-shrink-0"><ProviderBadge id={prov} size={16} /></span>
-        })()}
+    <div ref={wrapperRef} className="relative">
+      <div className="flex items-center" style={{ border: '1px solid var(--border)', borderRadius: 8, background: 'var(--surface-modal)', overflow: 'hidden' }}>
+        {prov && !open && <span className="ml-2 flex-shrink-0"><ProviderBadge id={prov} size={16} /></span>}
+        {open && <Search size={13} className="ml-2 flex-shrink-0" style={{ color: 'var(--text-3)' }} />}
         <input
-          value={open ? (modelSearch[searchKey] ?? '') : value}
-          onChange={e => {
-            setModelSearch(p => ({ ...p, [searchKey]: e.target.value }))
-            onChange(e.target.value)
-            if (!open) setOpen(true)
-          }}
-          onFocus={() => { setOpen(true); setModelSearch(p => ({ ...p, [searchKey]: '' })) }}
-          onBlur={() => setTimeout(() => setOpen(false), 150)}
+          value={open ? query : value}
+          onChange={e => { if (open) setQuery(e.target.value) }}
+          onFocus={openDrop}
+          onBlur={() => setTimeout(closeDrop, 150)}
           placeholder={open ? 'Ara...' : placeholder}
           className="flex-1 px-3 py-2 text-xs outline-none font-mono"
           style={{ background: 'transparent', color: 'var(--text-1)' }}
         />
         {value && (
-          <button onClick={() => { onChange(''); setModelSearch(p => ({ ...p, [searchKey]: '' })) }}
+          <button onMouseDown={e => { e.preventDefault(); onChange('') }}
             className="px-2 text-xs" style={{ color: 'var(--text-3)' }}>×</button>
         )}
-        <button onClick={() => setOpen(o => !o)} className="px-2" style={{ color: 'var(--text-3)' }}>
+        <button onMouseDown={e => { e.preventDefault(); open ? closeDrop() : openDrop() }}
+          className="px-2" style={{ color: 'var(--text-3)' }}>
           <ChevronDown size={12} />
         </button>
       </div>
-      {open && (
-        <div className="absolute left-0 right-0 z-50 mt-1 rounded-xl overflow-hidden shadow-2xl max-h-64 overflow-y-auto"
-          style={{ background: 'var(--surface-modal)', border: '1px solid var(--border)' }}>
-          {filtered.length === 0
-            ? <div className="px-3 py-4 text-xs text-center" style={{ color: 'var(--text-3)' }}>Eşleşen model yok</div>
-            : grouped.map(g => (
-              <div key={g.provider}>
-                <div className="flex items-center gap-2 px-3 py-1.5 sticky top-0"
-                  style={{ background: 'var(--surface-2)', borderBottom: '1px solid var(--border)' }}>
-                  <ProviderBadge id={g.provider} size={16} />
-                  <span className="text-[11px] font-semibold" style={{ color: 'var(--text-2)' }}>{providerName(g.provider)}</span>
+      {open && dropRect && createPortal(
+        <div style={{
+          position: 'fixed',
+          top: dropRect.bottom + 4,
+          left: dropRect.left,
+          width: dropRect.width,
+          zIndex: 99999,
+          maxHeight: 280,
+          overflowY: 'auto',
+          background: 'var(--surface-modal)',
+          border: '1px solid var(--border)',
+          borderRadius: 12,
+          boxShadow: '0 20px 40px rgba(0,0,0,0.4)',
+        }}>
+          {modelGroups.length === 0
+            ? <div className="px-3 py-4 text-xs text-center" style={{ color: 'var(--text-3)' }}>Model havuzu boş — "Modelleri Yükle" butonuna basın</div>
+            : grouped.length === 0
+              ? <div className="px-3 py-4 text-xs text-center" style={{ color: 'var(--text-3)' }}>Eşleşen model yok</div>
+              : grouped.map(g => (
+                <div key={g.provider}>
+                  <div className="flex items-center gap-2 px-3 py-1.5 sticky top-0"
+                    style={{ background: 'var(--surface-2)', borderBottom: '1px solid var(--border)' }}>
+                    <ProviderBadge id={g.provider} size={14} />
+                    <span className="text-[11px] font-semibold" style={{ color: 'var(--text-2)' }}>{providerName(g.provider)}</span>
+                    <span className="text-[10px]" style={{ color: 'var(--text-3)' }}>({g.models.length})</span>
+                  </div>
+                  {g.models.slice(0, 30).map(m => {
+                    const fullId = `${g.provider}::${m.id}`
+                    return (
+                      <button key={m.id}
+                        onMouseDown={() => selectModel(fullId)}
+                        className="w-full text-left px-3 py-1.5 text-[11px] font-mono transition-all"
+                        style={{
+                          color: value === fullId ? 'var(--accent)' : 'var(--text-1)',
+                          background: value === fullId ? 'rgba(38,166,154,0.08)' : 'transparent',
+                        }}>
+                        {m.id}
+                      </button>
+                    )
+                  })}
                 </div>
-                {g.models.slice(0, 20).map(m => (
-                  <button key={m.id}
-                    onMouseDown={() => { onChange(`${g.provider}::${m.id}`); setModelSearch(p => ({ ...p, [searchKey]: '' })); setOpen(false) }}
-                    className="w-full text-left px-3 py-1.5 text-[11px] font-mono transition-all"
-                    style={{ color: value === `${g.provider}::${m.id}` ? 'var(--accent)' : 'var(--text-1)', background: value === `${g.provider}::${m.id}` ? 'rgba(38,166,154,0.08)' : '' }}>
-                    {m.id}
-                  </button>
-                ))}
-              </div>
-            ))
+              ))
           }
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   )
 }
 
 // ─── AiProviderPanel ─────────────────────────────────────────────────────────
+type AiScope = 'kibi' | 'entity-free' | 'entity-basic' | 'entity-premium' | 'entity-enterprise'
+
+const SCOPE_LABELS: Record<AiScope, string> = {
+  'kibi':              'KIBI AI',
+  'entity-free':       'Entity Free Tier',
+  'entity-basic':      'Entity Basic Tier',
+  'entity-premium':    'Entity Premium Tier',
+  'entity-enterprise': 'Entity Enterprise Tier',
+}
+
+const SCOPE_COLORS: Record<AiScope, string> = {
+  'kibi':              'linear-gradient(135deg, var(--accent), var(--forest))',
+  'entity-free':       'linear-gradient(135deg, #6366f1, #4f46e5)',
+  'entity-basic':      'linear-gradient(135deg, #0ea5e9, #0284c7)',
+  'entity-premium':    'linear-gradient(135deg, #d97706, #b45309)',
+  'entity-enterprise': 'linear-gradient(135deg, #7c3aed, #6d28d9)',
+}
+
 function AiProviderPanel({
   scope, baseEndpoint, isAdmin, showToast,
 }: {
-  scope:        'kibi' | 'entity-free'
+  scope:        AiScope
   baseEndpoint: string
   isAdmin:      boolean
   showToast:    (msg: string, ok?: boolean) => void
@@ -455,11 +494,8 @@ function AiProviderPanel({
   const [editingId,    setEditingId]    = useState<string | null>(null)
   const [editKey,      setEditKey]      = useState('')
   const [savingKey,    setSavingKey]    = useState(false)
-  const [sectionOpen,   setSectionOpen]   = useState<Record<string, boolean>>({})
-  const [poolExpanded,  setPoolExpanded]  = useState<Record<string, boolean>>({})
-  const [modelSearch,   setModelSearch]   = useState<Record<string, string>>({})
-
-  const [pingStatus, setPingStatus] = useState<Record<string, RolePing>>({})
+  const [sectionOpen, setSectionOpen] = useState<Record<string, boolean>>({})
+  const [pingStatus,  setPingStatus]  = useState<Record<string, RolePing>>({})
 
   const pingOne = async (role: string, field: 'primary' | 'fb1' | 'fb2', model: string): Promise<void> => {
     if (!model) return
@@ -485,6 +521,40 @@ function AiProviderPanel({
     }
   }
 
+  const poolCacheKey = `ki_model_pool_${scope}`
+
+  const fetchModels = async (silent = false) => {
+    if (!silent) setPoolLoading(true)
+    try {
+      const res = await api.get(`${baseEndpoint}/models`)
+      const newGroups: ModelGroup[] = res.data.providers ?? []
+      // Detect changes vs last saved snapshot
+      try {
+        const cached = localStorage.getItem(poolCacheKey)
+        if (cached) {
+          const { groups: oldGroups } = JSON.parse(cached) as { groups: ModelGroup[] }
+          const oldIds = new Set(oldGroups.flatMap(g => g.models.map(m => `${g.provider}::${m.id}`)))
+          const newIds = new Set(newGroups.flatMap(g => g.models.map(m => `${g.provider}::${m.id}`)))
+          const added   = [...newIds].filter(id => !oldIds.has(id)).length
+          const removed = [...oldIds].filter(id => !newIds.has(id)).length
+          if (added || removed) {
+            const parts: string[] = []
+            if (added)   parts.push(`+${added} yeni model`)
+            if (removed) parts.push(`${removed} model kaldırıldı`)
+            showToast(`Model havuzu değişti: ${parts.join(', ')}`)
+          }
+        }
+      } catch { /* ignore */ }
+      localStorage.setItem(poolCacheKey, JSON.stringify({ groups: newGroups, savedAt: new Date().toISOString() }))
+      setModelGroups(newGroups)
+      setPoolLastAt(new Date())
+    } catch {
+      if (!silent) showToast('Model havuzu yüklenemedi', false)
+    } finally {
+      setPoolLoading(false)
+    }
+  }
+
   const load = useCallback(async () => {
     setLoading(true)
     try {
@@ -503,17 +573,23 @@ function AiProviderPanel({
     } finally { setLoading(false) }
   }, [baseEndpoint])
 
-  useEffect(() => { load() }, [load])
-
-  const fetchModels = async () => {
-    setPoolLoading(true)
+  useEffect(() => {
+    load()
+    // Restore model pool from localStorage; auto-refresh if stale or missing
     try {
-      const res = await api.get(`${baseEndpoint}/models`)
-      setModelGroups(res.data.providers ?? [])
-      setPoolLastAt(new Date())
-    } catch { showToast('Model havuzu yüklenemedi', false) }
-    finally { setPoolLoading(false) }
-  }
+      const cached = localStorage.getItem(poolCacheKey)
+      if (cached) {
+        const { groups, savedAt } = JSON.parse(cached) as { groups: ModelGroup[]; savedAt: string }
+        setModelGroups(groups ?? [])
+        setPoolLastAt(new Date(savedAt))
+        const ageMs = Date.now() - new Date(savedAt).getTime()
+        if (ageMs > 30 * 60 * 1000) fetchModels(true)
+      } else {
+        fetchModels(true)
+      }
+    } catch { /* ignore */ }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [load])
 
   const saveKey = async (providerId: string) => {
     if (!editKey.trim()) return
@@ -550,17 +626,20 @@ function AiProviderPanel({
     finally { setRoleSaving(false) }
   }
 
-  // Build flat model list for datalist + dropdown
-  const allModels = modelGroups.flatMap(g => g.models.map(m => ({ ...m, provider: g.provider })))
-
   if (loading) return <div className="text-center py-12" style={{ color: 'var(--text-3)' }}>Yükleniyor...</div>
 
   return (
     <div className="space-y-5">
-      {scope === 'entity-free' && (
+      {scope !== 'kibi' && (
         <div className="flex items-start gap-2 px-4 py-3 rounded-xl text-sm" style={{ background: 'rgba(251,191,36,0.08)', border: '1px solid rgba(251,191,36,0.20)', color: '#fbbf24' }}>
           <AlertCircle size={15} className="mt-0.5 flex-shrink-0" />
-          Bu sağlayıcı key'leri ve modeller, kendi API key'i olmayan entity kullanıcılarına sunulan paylaşımlı altyapıyı oluşturur. Yüksek kullanımda rate limit'e girebilir.
+          <span>
+            <strong>{SCOPE_LABELS[scope]}</strong> — Bu sekmedeki key'ler ve model atamaları, ilgili plan seviyesindeki entity kullanıcılarına sunulan paylaşımlı altyapıyı oluşturur.
+            {scope === 'entity-free' && ' Kendi API key\'i olmayan ücretsiz kullanıcılar bu havuzu kullanır.'}
+            {scope === 'entity-basic' && ' Basic plan sahibi entityler bu havuzu kullanır.'}
+            {scope === 'entity-premium' && ' Premium plan sahibi entityler bu havuzu kullanır.'}
+            {scope === 'entity-enterprise' && ' Enterprise plan sahibi entityler bu havuzu kullanır.'}
+          </span>
         </div>
       )}
 
@@ -656,7 +735,7 @@ function AiProviderPanel({
               </p>
             </div>
           </div>
-          <button onClick={fetchModels} disabled={poolLoading}
+          <button onClick={() => fetchModels()} disabled={poolLoading}
             className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs transition-all disabled:opacity-50"
             style={{ background: 'rgba(38,166,154,0.12)', color: 'var(--accent)', border: '1px solid rgba(38,166,154,0.25)' }}>
             <RefreshCw size={12} className={poolLoading ? 'animate-spin' : ''} />
@@ -664,54 +743,22 @@ function AiProviderPanel({
           </button>
         </div>
         {modelGroups.length === 0
-          ? <p className="text-sm text-center py-6" style={{ color: 'var(--text-3)' }}>Modelleri yüklemek için "Modelleri Yükle" butonuna basın.</p>
+          ? <p className="text-sm text-center py-6" style={{ color: 'var(--text-3)' }}>Modeller yükleniyor veya henüz yapılandırılmış sağlayıcı yok.</p>
           : (
-            <div className="space-y-2">
-              {modelGroups.map(g => {
-                const expanded = poolExpanded[g.provider] ?? false
-                const shown = expanded ? g.models : g.models.slice(0, 5)
-                return (
-                  <div key={g.provider} className="rounded-xl overflow-hidden" style={{ border: '1px solid var(--border)' }}>
-                    {/* Provider header — clickable to expand/collapse */}
-                    <button
-                      onClick={() => setPoolExpanded(p => ({ ...p, [g.provider]: !p[g.provider] }))}
-                      className="w-full flex items-center justify-between gap-3 px-3 py-2.5"
-                      style={{ background: 'var(--surface-2)' }}>
-                      <div className="flex items-center gap-2">
-                        <ProviderBadge id={g.provider} size={22} />
-                        <span className="text-xs font-semibold" style={{ color: 'var(--text-1)' }}>{providerName(g.provider)}</span>
-                        <span className="text-[10px] px-1.5 py-0.5 rounded-full" style={{ background: 'rgba(38,166,154,0.12)', color: 'var(--accent)' }}>
-                          {g.models.length} model
-                        </span>
-                      </div>
-                      {expanded
-                        ? <ChevronDown size={13} style={{ color: 'var(--text-3)' }} />
-                        : <ChevronRight size={13} style={{ color: 'var(--text-3)' }} />}
-                    </button>
-                    {/* Model list */}
-                    {shown.map((m, i) => (
-                      <div key={m.id} className="flex items-center gap-2 px-3 py-1.5"
-                        style={{ background: i % 2 === 0 ? 'var(--surface)' : 'var(--surface-2)', borderTop: '1px solid var(--border)' }}>
-                        <span className="text-[11px] font-mono truncate flex-1" style={{ color: 'var(--text-1)' }}>{m.id}</span>
-                        {m.name !== m.id && <span className="text-[10px] truncate max-w-[120px]" style={{ color: 'var(--text-3)' }}>{m.name}</span>}
-                      </div>
-                    ))}
-                    {g.models.length > 5 && (
-                      <button onClick={() => setPoolExpanded(p => ({ ...p, [g.provider]: !p[g.provider] }))}
-                        className="w-full px-3 py-1.5 text-[10px] text-center transition-all"
-                        style={{ background: 'var(--surface-2)', color: 'var(--accent)', borderTop: '1px solid var(--border)' }}>
-                        {expanded ? '▲ Gizle' : `+${g.models.length - 5} model daha göster`}
-                      </button>
-                    )}
-                  </div>
-                )
-              })}
+            <div className="flex flex-wrap gap-2">
+              {modelGroups.map(g => (
+                <div key={g.provider} className="flex items-center gap-2 px-3 py-2 rounded-xl"
+                  style={{ background: 'var(--surface-2)', border: '1px solid var(--border)' }}>
+                  <ProviderBadge id={g.provider} size={22} />
+                  <span className="text-xs font-semibold" style={{ color: 'var(--text-1)' }}>{providerName(g.provider)}</span>
+                  <span className="text-[10px] px-1.5 py-0.5 rounded-full" style={{ background: 'rgba(38,166,154,0.12)', color: 'var(--accent)' }}>
+                    {g.models.length}
+                  </span>
+                </div>
+              ))}
             </div>
           )
         }
-        <datalist id={`model-pool-${scope}`}>
-          {allModels.map(m => <option key={m.id} value={m.id} label={m.name} />)}
-        </datalist>
       </div>
 
       {/* ── Role Assignments ── */}
@@ -792,15 +839,11 @@ function AiProviderPanel({
                             </div>
                           )}
                         </div>
-                        {/* Searchable model combobox */}
                         <ModelCombobox
                           value={edit[field as keyof typeof edit]}
                           onChange={val => setRoleEdits(p => ({ ...p, [role]: { ...edit, [field]: val } }))}
                           modelGroups={modelGroups}
                           placeholder={required ? 'Ara veya yaz: provider::model' : 'Opsiyonel yedek'}
-                          searchKey={`${role}-${field}`}
-                          modelSearch={modelSearch}
-                          setModelSearch={setModelSearch}
                         />
                       </div>
                     )
@@ -1222,38 +1265,42 @@ function AiLogsTab() {
 }
 
 function AiModelsTab({ isAdmin, showToast }: { isAdmin: boolean; showToast: (msg: string, ok?: boolean) => void }) {
-  const [subTab, setSubTab] = useState<'kibi' | 'entity-free' | 'vector'>('kibi')
+  const [subTab, setSubTab] = useState<AiScope | 'vector'>('kibi')
+
+  const AI_TABS: Array<{ id: AiScope | 'vector'; label: string; icon: typeof Brain }> = [
+    { id: 'kibi',              label: 'KIBI AI',             icon: Brain    },
+    { id: 'entity-free',       label: 'Free Tier',           icon: Zap      },
+    { id: 'entity-basic',      label: 'Basic Tier',          icon: Zap      },
+    { id: 'entity-premium',    label: 'Premium Tier',        icon: Zap      },
+    { id: 'entity-enterprise', label: 'Enterprise Tier',     icon: Zap      },
+    { id: 'vector',            label: 'Vektör Tabanı',       icon: Database },
+  ]
 
   return (
     <div className="space-y-4">
       <div className="flex gap-2 flex-wrap">
-        {([
-          { id: 'kibi'        as const, label: 'KIBI AI',          icon: Brain },
-          { id: 'entity-free' as const, label: 'Entity Free Tier', icon: Zap },
-          { id: 'vector'      as const, label: 'Vektör Tabanı',    icon: Database },
-        ]).map(t => (
-          <button key={t.id} onClick={() => setSubTab(t.id)}
-            className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-medium transition-all"
-            style={subTab === t.id
-              ? { background: 'linear-gradient(135deg, var(--accent), var(--forest))', color: '#fff', boxShadow: '0 4px 12px rgba(38,166,154,0.25)' }
-              : { background: 'var(--surface)', border: '1px solid var(--border)', color: 'var(--text-2)' }}>
-            <t.icon size={14} /> {t.label}
-          </button>
-        ))}
+        {AI_TABS.map(t => {
+          const isActive = subTab === t.id
+          const bg = isActive
+            ? (t.id !== 'vector' && t.id !== 'kibi' ? SCOPE_COLORS[t.id as AiScope] : 'linear-gradient(135deg, var(--accent), var(--forest))')
+            : undefined
+          return (
+            <button key={t.id} onClick={() => setSubTab(t.id)}
+              className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-medium transition-all"
+              style={isActive
+                ? { background: bg, color: '#fff', boxShadow: '0 4px 12px rgba(38,166,154,0.25)' }
+                : { background: 'var(--surface)', border: '1px solid var(--border)', color: 'var(--text-2)' }}>
+              <t.icon size={14} /> {t.label}
+            </button>
+          )
+        })}
       </div>
 
-      {subTab === 'kibi' && (
+      {subTab !== 'vector' && (
         <AiProviderPanel
-          scope="kibi"
-          baseEndpoint="/admin/ai-providers/kibi"
-          isAdmin={isAdmin}
-          showToast={showToast}
-        />
-      )}
-      {subTab === 'entity-free' && (
-        <AiProviderPanel
-          scope="entity-free"
-          baseEndpoint="/admin/ai-providers/entity-free"
+          key={subTab}
+          scope={subTab as AiScope}
+          baseEndpoint={`/admin/ai-providers/${subTab}`}
           isAdmin={isAdmin}
           showToast={showToast}
         />

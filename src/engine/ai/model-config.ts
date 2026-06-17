@@ -42,7 +42,9 @@ const cache = new Map<string, { models: string[]; ts: number }>()
 /** Call this after any PUT /admin/models/:role to force a fresh DB read */
 export function invalidateModelCache(role?: string) {
   if (role) {
-    cache.delete(role)
+    for (const k of cache.keys()) {
+      if (k.endsWith(`:${role}`)) cache.delete(k)
+    }
   } else {
     cache.clear()
   }
@@ -56,36 +58,43 @@ export function invalidateModelCache(role?: string) {
 export async function getPlatformModels(
   role: ModelRole,
   defaults: readonly string[],
+  scope: string = 'platform',
 ): Promise<string[]> {
-  const now    = Date.now()
-  const cached = cache.get(role)
+  const cacheKey = `${scope}:${role}`
+  const now      = Date.now()
+  const cached   = cache.get(cacheKey)
   if (cached && now - cached.ts < CACHE_TTL_MS) return cached.models
 
   try {
     const row = await db.query.kibiModelConfigs.findFirst({
       where: (t, { and, eq }) =>
-        and(eq(t.scope, 'platform'), eq(t.modelRole, role as any)),
+        and(eq(t.scope, scope), eq(t.modelRole, role as any)),
     })
 
     if (row && row.isActive) {
       const models = [row.primaryModel, row.fallback1, row.fallback2, row.fallback3]
         .filter(Boolean) as string[]
       if (models.length > 0) {
-        cache.set(role, { models, ts: now })
+        cache.set(cacheKey, { models, ts: now })
         return models
       }
     }
   } catch (e) {
-    console.warn(`[MODEL-CONFIG] DB read failed for role "${role}", using defaults:`, (e as Error).message)
+    console.warn(`[MODEL-CONFIG] DB read failed for role "${role}" scope "${scope}", using defaults:`, (e as Error).message)
   }
 
   return [...defaults]
 }
 
-/** Convenience wrappers for the two main model families */
-export const getAnalysisModels     = () => getPlatformModels('db_search',    ANALYSIS_MODELS)
-export const getConversationModels = () => getPlatformModels('conversation',  CONVERSATION_MODELS)
-export const getIntentModels       = () => getPlatformModels('intent',        ANALYSIS_MODELS)
+/** Get models for a role in a specific DB scope (entity_free, entity_basic, etc.) */
+export function getScopedModels(role: ModelRole, dbScope: string): Promise<string[]> {
+  return getPlatformModels(role, CONVERSATION_MODELS, dbScope)
+}
+
+/** Convenience wrappers for the two main model families — reads NEW roles with provider::model format */
+export const getAnalysisModels     = () => getPlatformModels('db_query',           ANALYSIS_MODELS)
+export const getConversationModels = () => getPlatformModels('master_conversation', CONVERSATION_MODELS)
+export const getIntentModels       = () => getPlatformModels('intent_analysis',     ANALYSIS_MODELS)
 
 /**
  * Get model(s) for a given role in a specific scope.
@@ -209,98 +218,20 @@ export async function seedDefaultModelConfigs(): Promise<number> {
       fallback2:    CONVERSATION_MODELS[2] ?? '',
       fallback3:    null,
     },
-    // 13 new semantic roles (YFZ 19-21 / FAZ A)
-    {
-      modelRole:    'intent_analysis',
-      primaryModel: `openrouter::${ANALYSIS_MODELS[1]}`,
-      fallback1:    `openrouter::${ANALYSIS_MODELS[0]}`,
-      fallback2:    `openrouter::${ANALYSIS_MODELS[2]}`,
-      fallback3:    null,
-    },
-    {
-      modelRole:    'support_problem',
-      primaryModel: `openrouter::${ANALYSIS_MODELS[1]}`,
-      fallback1:    `openrouter::${ANALYSIS_MODELS[0]}`,
-      fallback2:    `openrouter::${ANALYSIS_MODELS[2]}`,
-      fallback3:    null,
-    },
-    {
-      modelRole:    'support_solution',
-      primaryModel: `openrouter::${ANALYSIS_MODELS[0]}`,
-      fallback1:    `openrouter::${CONVERSATION_MODELS[0]}`,
-      fallback2:    `openrouter::${ANALYSIS_MODELS[1]}`,
-      fallback3:    null,
-    },
-    {
-      modelRole:    'support_generator',
-      primaryModel: `openrouter::${ANALYSIS_MODELS[0]}`,
-      fallback1:    `openrouter::${CONVERSATION_MODELS[0]}`,
-      fallback2:    `openrouter::${ANALYSIS_MODELS[1]}`,
-      fallback3:    null,
-    },
-    {
-      modelRole:    'sales_intent',
-      primaryModel: `openrouter::${ANALYSIS_MODELS[1]}`,
-      fallback1:    `openrouter::${ANALYSIS_MODELS[0]}`,
-      fallback2:    `openrouter::${ANALYSIS_MODELS[2]}`,
-      fallback3:    null,
-    },
-    {
-      modelRole:    'sales_conversation',
-      primaryModel: `openrouter::${CONVERSATION_MODELS[0]}`,
-      fallback1:    `openrouter::${CONVERSATION_MODELS[1]}`,
-      fallback2:    `openrouter::${CONVERSATION_MODELS[2]}`,
-      fallback3:    null,
-    },
-    {
-      modelRole:    'consulting_intent',
-      primaryModel: `openrouter::${ANALYSIS_MODELS[1]}`,
-      fallback1:    `openrouter::${ANALYSIS_MODELS[0]}`,
-      fallback2:    `openrouter::${ANALYSIS_MODELS[2]}`,
-      fallback3:    null,
-    },
-    {
-      modelRole:    'consulting_recommendation',
-      primaryModel: `openrouter::${ANALYSIS_MODELS[0]}`,
-      fallback1:    `openrouter::${CONVERSATION_MODELS[0]}`,
-      fallback2:    `openrouter::${ANALYSIS_MODELS[1]}`,
-      fallback3:    null,
-    },
-    {
-      modelRole:    'master_conversation',
-      primaryModel: `openrouter::${CONVERSATION_MODELS[0]}`,
-      fallback1:    `openrouter::${CONVERSATION_MODELS[1]}`,
-      fallback2:    `openrouter::${CONVERSATION_MODELS[2]}`,
-      fallback3:    null,
-    },
-    {
-      modelRole:    'db_query',
-      primaryModel: `openrouter::${ANALYSIS_MODELS[0]}`,
-      fallback1:    `openrouter::${ANALYSIS_MODELS[1]}`,
-      fallback2:    `openrouter::${ANALYSIS_MODELS[2]}`,
-      fallback3:    null,
-    },
-    {
-      modelRole:    'kb_vector',
-      primaryModel: 'huggingface::BAAI/bge-m3',
-      fallback1:    'huggingface::sentence-transformers/all-MiniLM-L6-v2',
-      fallback2:    '',
-      fallback3:    null,
-    },
-    {
-      modelRole:    'connector',
-      primaryModel: `openrouter::${ANALYSIS_MODELS[0]}`,
-      fallback1:    `openrouter::${ANALYSIS_MODELS[1]}`,
-      fallback2:    `openrouter::${ANALYSIS_MODELS[2]}`,
-      fallback3:    null,
-    },
-    {
-      modelRole:    'kb_signal_writer',
-      primaryModel: `openrouter::${ANALYSIS_MODELS[1]}`,
-      fallback1:    `openrouter::${ANALYSIS_MODELS[0]}`,
-      fallback2:    '',
-      fallback3:    null,
-    },
+    // 13 semantic roles
+    { modelRole: 'intent_analysis',          primaryModel: ANALYSIS_MODELS[0],     fallback1: ANALYSIS_MODELS[1],     fallback2: ANALYSIS_MODELS[2],     fallback3: null },
+    { modelRole: 'support_problem',          primaryModel: ANALYSIS_MODELS[0],     fallback1: ANALYSIS_MODELS[1],     fallback2: ANALYSIS_MODELS[2],     fallback3: null },
+    { modelRole: 'support_solution',         primaryModel: CONVERSATION_MODELS[0], fallback1: ANALYSIS_MODELS[0],     fallback2: ANALYSIS_MODELS[1],     fallback3: null },
+    { modelRole: 'support_generator',        primaryModel: CONVERSATION_MODELS[0], fallback1: ANALYSIS_MODELS[0],     fallback2: ANALYSIS_MODELS[1],     fallback3: null },
+    { modelRole: 'sales_intent',             primaryModel: ANALYSIS_MODELS[0],     fallback1: ANALYSIS_MODELS[1],     fallback2: ANALYSIS_MODELS[2],     fallback3: null },
+    { modelRole: 'sales_conversation',       primaryModel: CONVERSATION_MODELS[0], fallback1: CONVERSATION_MODELS[1], fallback2: CONVERSATION_MODELS[2], fallback3: null },
+    { modelRole: 'consulting_intent',        primaryModel: ANALYSIS_MODELS[0],     fallback1: ANALYSIS_MODELS[1],     fallback2: ANALYSIS_MODELS[2],     fallback3: null },
+    { modelRole: 'consulting_recommendation',primaryModel: CONVERSATION_MODELS[0], fallback1: ANALYSIS_MODELS[0],     fallback2: ANALYSIS_MODELS[1],     fallback3: null },
+    { modelRole: 'master_conversation',      primaryModel: CONVERSATION_MODELS[0], fallback1: CONVERSATION_MODELS[1], fallback2: CONVERSATION_MODELS[2], fallback3: null },
+    { modelRole: 'db_query',                 primaryModel: ANALYSIS_MODELS[0],     fallback1: ANALYSIS_MODELS[1],     fallback2: ANALYSIS_MODELS[2],     fallback3: null },
+    { modelRole: 'kb_vector',                primaryModel: 'huggingface::BAAI/bge-m3', fallback1: 'huggingface::sentence-transformers/all-MiniLM-L6-v2', fallback2: '', fallback3: null },
+    { modelRole: 'connector',                primaryModel: ANALYSIS_MODELS[0],     fallback1: ANALYSIS_MODELS[1],     fallback2: ANALYSIS_MODELS[2],     fallback3: null },
+    { modelRole: 'kb_signal_writer',         primaryModel: ANALYSIS_MODELS[0],     fallback1: ANALYSIS_MODELS[1],     fallback2: '',                     fallback3: null },
   ]
 
   let seeded = 0

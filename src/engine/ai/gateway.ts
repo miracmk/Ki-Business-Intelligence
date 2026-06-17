@@ -53,16 +53,16 @@ export interface CompletionResult {
 
 /** DB scanning, SQL generation, structured reasoning — Nemotron optimised */
 export const ANALYSIS_MODELS: readonly string[] = [
-  'nvidia/llama-3.1-nemotron-70b-instruct:free',   // primary  – best structured reasoning
-  'google/gemini-2.0-flash-exp:free',               // fallback 1
-  'meta-llama/llama-3.3-70b-instruct:free',         // fallback 2
+  'groq::llama-3.3-70b-versatile',    // primary
+  'openai::gpt-4o-mini',              // fallback 1
+  'mistral::mistral-small-latest',    // fallback 2
 ]
 
-/** Customer-facing natural language replies — Llama-3.3 (ex gpt-oss-120b) */
+/** Customer-facing natural language replies */
 export const CONVERSATION_MODELS: readonly string[] = [
-  'meta-llama/llama-3.3-70b-instruct:free',         // primary
-  'google/gemini-2.0-flash-exp:free',               // fallback 1
-  'google/gemini-flash-1.5:free',                   // fallback 2
+  'groq::llama-3.3-70b-versatile',    // primary
+  'openai::gpt-4o-mini',              // fallback 1
+  'mistral::mistral-small-latest',    // fallback 2
 ]
 
 /** Legacy alias kept for backward compat */
@@ -439,6 +439,8 @@ export async function aiComplete(
       resolvedKey = await getEntityOwnKey(resolvedProvider, tenantId!)
       // B → entity_free platform key
       if (!resolvedKey) resolvedKey = await getEntityFreeKey(resolvedProvider)
+      // A → kibi platform key (KIBI AI runs on platform compute — always available as fallback)
+      if (!resolvedKey) resolvedKey = await getKibiKey(resolvedProvider)
     } else {
       // A → kibi platform key (admin/KIBI AI context)
       resolvedKey = await getKibiKey(resolvedProvider)

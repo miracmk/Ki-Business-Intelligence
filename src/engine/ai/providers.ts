@@ -182,7 +182,7 @@ export function getProviderDef(id: string): ProviderDef | undefined {
  *   getConfigKey('groq', 'kibi')        → 'ai_provider_kibi_groq'
  *   getConfigKey('groq', 'entity_free') → 'ai_provider_entity_free_groq'
  */
-export function getConfigKey(providerId: string, scope: 'kibi' | 'entity_free'): string {
+export function getConfigKey(providerId: string, scope: string): string {
   return `ai_provider_${scope}_${providerId}`
 }
 

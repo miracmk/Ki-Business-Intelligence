@@ -869,6 +869,21 @@ export default function Settings() {
   const [webhookTestStatus, setWebhookTestStatus] = useState<Record<string, 'idle'|'testing'|'ok'|'error'>>({})
   const [msgTemplates, setMsgTemplates]           = useState<Record<string, string>>({})
 
+  // Business profile state
+  const [businessProfile, setBusinessProfile] = useState({
+    sector: '', employee_count: '', annual_revenue: '', address: '', country: '',
+    tax_number: '', registration_number: '', founded_date: '', logo_url: '', fiscal_year_start: '',
+  })
+  const [savingBp, setSavingBp] = useState(false)
+
+  // Channel identifiers state
+  const [channelIds, setChannelIds] = useState({
+    whatsapp_phones: [] as string[], instagram_handles: [] as string[],
+    telegram_ids: [] as string[], email_domains: [] as string[],
+  })
+  const [savingChannelIds, setSavingChannelIds] = useState(false)
+  const [channelIdInput, setChannelIdInput] = useState({ whatsapp_phones: '', instagram_handles: '', telegram_ids: '', email_domains: '' })
+
   const showSuccess = (msg: string) => { setSaveMsg(msg); setTimeout(() => setSaveMsg(''), 3000) }
 
   const loadData = async () => {
@@ -900,6 +915,24 @@ export default function Settings() {
     } finally {
       setLoading(false)
     }
+  }
+
+  const loadBusinessProfile = async () => {
+    try {
+      const [bpRes, chRes] = await Promise.all([
+        api.get('/tenants/me/business-profile'),
+        api.get('/tenants/me/channel-ids'),
+      ])
+      const bp = bpRes.data.profile ?? {}
+      setBusinessProfile(prev => ({ ...prev, ...bp }))
+      const ch = chRes.data.channelIds ?? {}
+      setChannelIds({
+        whatsapp_phones:   ch.whatsapp_phones   ?? [],
+        instagram_handles: ch.instagram_handles ?? [],
+        telegram_ids:      ch.telegram_ids      ?? [],
+        email_domains:     ch.email_domains     ?? [],
+      })
+    } catch { /* non-fatal */ }
   }
 
   const loadChannelConfigs = async () => {
@@ -1058,6 +1091,9 @@ export default function Settings() {
       loadOpenRouterModels()
       loadAiProviders()
       loadVectorDocs()
+    }
+    if (activeTab === 'company') {
+      loadBusinessProfile()
     }
     if (activeTab === 'channels') {
       loadChannelConfigs()
@@ -1511,6 +1547,7 @@ export default function Settings() {
 
   const tabs = [
     { id: 'account',    label: 'Hesap',             icon: User },
+    { id: 'company',    label: 'Şirket Profili',    icon: Building2 },
     { id: 'ai',         label: 'AI Modeli',          icon: Brain },
     { id: 'crm',        label: 'CRM / ERP',          icon: Database },
     { id: 'accounting', label: 'Muhasebe',           icon: CreditCard },
@@ -1689,6 +1726,127 @@ export default function Settings() {
               </div>
             </div>
             <button onClick={saveAccountSettings} className="mt-4 px-4 py-2 bg-[#6366f1] hover:bg-[#4f46e5] text-white rounded-lg text-sm">Kaydet</button>
+          </div>
+        </div>
+      )}
+
+      {/* ── Company Profile tab ── */}
+      {activeTab === 'company' && (
+        <div className="space-y-6">
+          {/* Business profile card */}
+          <div className="p-6 bg-[#111111] rounded-xl border border-[#2a2a2a]">
+            <h3 className="text-lg font-semibold text-white mb-6 flex items-center gap-2"><Building2 size={18} /> Şirket Profili</h3>
+            <p className="text-sm text-gray-400 mb-6">Bu bilgiler Entity AI ve KIBI AI tarafından konuşma başında şirketinizi tanımak için kullanılır.</p>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {[
+                { key: 'sector',              label: 'Sektör',                    placeholder: 'Yazılım / Teknoloji' },
+                { key: 'employee_count',       label: 'Çalışan Sayısı',            placeholder: '50' },
+                { key: 'annual_revenue',       label: 'Son Yıl Cirosu',            placeholder: '5.000.000 TL' },
+                { key: 'country',              label: 'Kuruluş Ülkesi',            placeholder: 'Türkiye' },
+                { key: 'tax_number',           label: 'Vergi No / Kayıt No',       placeholder: '1234567890' },
+                { key: 'registration_number',  label: 'Ticaret Sicil No',          placeholder: 'TR-12345' },
+                { key: 'founded_date',         label: 'Kuruluş Tarihi',            placeholder: '2015-03-01' },
+                { key: 'fiscal_year_start',    label: 'Mali Yıl Başlangıcı',       placeholder: 'Ocak' },
+                { key: 'logo_url',             label: 'Logo URL',                  placeholder: 'https://...' },
+              ].map(({ key, label, placeholder }) => (
+                <div key={key}>
+                  <label className="text-gray-400 text-sm mb-1 block">{label}</label>
+                  <input
+                    className={inputCls}
+                    value={(businessProfile as any)[key]}
+                    placeholder={placeholder}
+                    onChange={e => setBusinessProfile(prev => ({ ...prev, [key]: e.target.value }))}
+                  />
+                </div>
+              ))}
+              <div className="md:col-span-2">
+                <label className="text-gray-400 text-sm mb-1 block">Adres</label>
+                <input
+                  className={inputCls}
+                  value={businessProfile.address}
+                  placeholder="Örn: Levent Mahallesi, Büyükdere Caddesi No:1, İstanbul"
+                  onChange={e => setBusinessProfile(prev => ({ ...prev, address: e.target.value }))}
+                />
+              </div>
+            </div>
+            <button
+              onClick={async () => {
+                setSavingBp(true)
+                try {
+                  await api.put('/tenants/me/business-profile', businessProfile)
+                  showSuccess('Şirket profili kaydedildi.')
+                } catch (e: any) {
+                  setError(e.response?.data?.error || 'Kaydedilemedi')
+                } finally { setSavingBp(false) }
+              }}
+              disabled={savingBp}
+              className="mt-6 px-4 py-2 bg-[#6366f1] hover:bg-[#4f46e5] text-white rounded-lg text-sm disabled:opacity-50 flex items-center gap-2"
+            >
+              <Save size={14} />{savingBp ? 'Kaydediliyor...' : 'Profili Kaydet'}
+            </button>
+          </div>
+
+          {/* Channel identifiers card */}
+          <div className="p-6 bg-[#111111] rounded-xl border border-[#2a2a2a]">
+            <h3 className="text-lg font-semibold text-white mb-2 flex items-center gap-2"><MessageSquare size={18} /> Kanal Tanımlayıcıları</h3>
+            <p className="text-sm text-gray-400 mb-6">WhatsApp, Instagram, Telegram veya e-posta üzerinden gelen mesajlar bu tanımlayıcılarla eşleştirilir. AI, hangi şirketten geldiğini otomatik anlar.</p>
+            {([
+              { field: 'whatsapp_phones',   label: 'WhatsApp Telefon Numaraları', placeholder: '+905551234567' },
+              { field: 'instagram_handles', label: 'Instagram Hesapları',          placeholder: '@sirketiniz' },
+              { field: 'telegram_ids',      label: 'Telegram Bot/Kanal ID',        placeholder: '@sirketbot' },
+              { field: 'email_domains',     label: 'E-posta Domainleri',           placeholder: 'sirketiniz.com' },
+            ] as const).map(({ field, label, placeholder }) => (
+              <div key={field} className="mb-5">
+                <label className="text-gray-400 text-sm mb-2 block">{label}</label>
+                <div className="flex gap-2 mb-2">
+                  <input
+                    className={`flex-1 ${inputCls}`}
+                    value={channelIdInput[field]}
+                    placeholder={placeholder}
+                    onChange={e => setChannelIdInput(prev => ({ ...prev, [field]: e.target.value }))}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter' && channelIdInput[field].trim()) {
+                        setChannelIds(prev => ({ ...prev, [field]: [...prev[field], channelIdInput[field].trim()] }))
+                        setChannelIdInput(prev => ({ ...prev, [field]: '' }))
+                      }
+                    }}
+                  />
+                  <button
+                    onClick={() => {
+                      if (channelIdInput[field].trim()) {
+                        setChannelIds(prev => ({ ...prev, [field]: [...prev[field], channelIdInput[field].trim()] }))
+                        setChannelIdInput(prev => ({ ...prev, [field]: '' }))
+                      }
+                    }}
+                    className="px-3 py-2 bg-[#1a1a1a] border border-[#2a2a2a] rounded-lg text-gray-300 hover:border-[#6366f1] text-sm"
+                  ><Plus size={14} /></button>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {channelIds[field].map((val, i) => (
+                    <span key={i} className="flex items-center gap-1 px-3 py-1 bg-[#1a1a1a] border border-[#2a2a2a] rounded-full text-sm text-gray-300">
+                      {val}
+                      <button onClick={() => setChannelIds(prev => ({ ...prev, [field]: prev[field].filter((_, idx) => idx !== i) }))} className="text-gray-500 hover:text-red-400 ml-1"><X size={12} /></button>
+                    </span>
+                  ))}
+                  {channelIds[field].length === 0 && <span className="text-xs text-gray-600 italic">Henüz eklenmedi</span>}
+                </div>
+              </div>
+            ))}
+            <button
+              onClick={async () => {
+                setSavingChannelIds(true)
+                try {
+                  await api.put('/tenants/me/channel-ids', channelIds)
+                  showSuccess('Kanal tanımlayıcıları kaydedildi.')
+                } catch (e: any) {
+                  setError(e.response?.data?.error || 'Kaydedilemedi')
+                } finally { setSavingChannelIds(false) }
+              }}
+              disabled={savingChannelIds}
+              className="px-4 py-2 bg-[#6366f1] hover:bg-[#4f46e5] text-white rounded-lg text-sm disabled:opacity-50 flex items-center gap-2"
+            >
+              <Save size={14} />{savingChannelIds ? 'Kaydediliyor...' : 'Tanımlayıcıları Kaydet'}
+            </button>
           </div>
         </div>
       )}

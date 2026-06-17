@@ -73,7 +73,7 @@ export const senderTypeEnum = pgEnum('sender_type', ['customer', 'agent', 'ai'])
 export const storageTypeEnum = pgEnum('storage_type', ['local', 'gdrive'])
 export const kbSourceEnum = pgEnum('kb_source', ['manual', 'conversation', 'crm', 'accounting'])
 export const accountingRecordTypeEnum = pgEnum('accounting_record_type', ['invoice', 'payment', 'customer', 'vendor', 'account', 'transaction'])
-export const planNameEnum          = pgEnum('plan_name',          ['free', 'starter', 'growth', 'enterprise'])
+export const planNameEnum          = pgEnum('plan_name',          ['free', 'starter', 'growth', 'enterprise', 'basic', 'premium', 'custom_models'])
 export const subscriptionStatusEnum = pgEnum('subscription_status', ['trial', 'active', 'past_due', 'cancelled', 'expired'])
 export const billingCycleEnum      = pgEnum('billing_cycle',      ['monthly', 'yearly'])
 export const aiSessionTypeEnum     = pgEnum('ai_session_type',    ['kibi_ai', 'entity_ai'])
@@ -132,11 +132,13 @@ export const tenants = pgTable('tenants', {
 }))
 
 export const tenantMemberships = pgTable('tenant_memberships', {
-  id:        uuid('id').primaryKey().defaultRandom(),
-  userId:    uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
-  tenantId:  uuid('tenant_id').notNull().references(() => tenants.id, { onDelete: 'cascade' }),
-  role:      userRoleEnum('role').notNull().default('entity_sub'),
-  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  id:                    uuid('id').primaryKey().defaultRandom(),
+  userId:                uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  tenantId:              uuid('tenant_id').notNull().references(() => tenants.id, { onDelete: 'cascade' }),
+  role:                  userRoleEnum('role').notNull().default('entity_sub'),
+  messageLimit:          integer('message_limit'),                                               // null = no sub-limit
+  messagesUsedThisMonth: integer('messages_used_this_month').notNull().default(0),
+  createdAt:             timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 }, (t) => ({
   uniqueIdx: uniqueIndex('memberships_user_tenant_idx').on(t.userId, t.tenantId),
 }))
@@ -207,9 +209,16 @@ export const kibiEntities = pgTable('kibi_entities', {
   mainUserId:             uuid('main_user_id').references(() => users.id, { onDelete: 'set null' }),
 
   // ── Subscription / Plan ──────────────────────────────────────────────────
-  // planId filled after plans table is defined (see FK added in relations)
   planName:               planNameEnum('plan_name').default('free'),
   trialEndsAt:            timestamp('trial_ends_at', { withTimezone: true }),
+
+  // ── Billing state ────────────────────────────────────────────────────────
+  nextBillingAt:          timestamp('next_billing_at', { withTimezone: true }),
+  billingCycleStart:      timestamp('billing_cycle_start', { withTimezone: true }),
+  extraSubUsers:          integer('extra_sub_users').notNull().default(0),
+  debtTokens:             bigint('debt_tokens', { mode: 'number' }).notNull().default(0),
+  isBillingRestricted:    boolean('is_billing_restricted').notNull().default(false),
+  messagesUsedThisMonth:  integer('messages_used_this_month').notNull().default(0),
 
   // ── Isolation: per-entity infra IDs ──────────────────────────────────────
   entityDbSchema:         varchar('entity_db_schema', { length: 100 }),   // e.g. "entity_abc123"
@@ -1256,6 +1265,15 @@ export const kibiPricingPackages = pgTable('kibi_pricing_packages', {
   acceptsKiWallet:       boolean('accepts_ki_wallet').notNull().default(true),
   isActive:              boolean('is_active').notNull().default(true),
   sortOrder:             integer('sort_order').notNull().default(0),
+
+  // New 5-tier pricing fields
+  planName:                varchar('plan_name', { length: 50 }),          // maps to plan_name enum value
+  perMessagePriceUsd:      numeric('per_message_price_usd', { precision: 10, scale: 6 }).notNull().default('0'),
+  overageMessagePriceUsd:  numeric('overage_message_price_usd', { precision: 10, scale: 6 }).notNull().default('0.03'),
+  monthlyMessageLimit:     integer('monthly_message_limit'),              // null = unlimited (Custom Models)
+  extraSubUserPriceUsd:    numeric('extra_sub_user_price_usd', { precision: 10, scale: 2 }).notNull().default('25'),
+  maxDebtTokens:           bigint('max_debt_tokens', { mode: 'number' }).notNull().default(100000),
+
   createdAt:             timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt:             timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 }, (t) => ({

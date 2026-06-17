@@ -129,10 +129,10 @@ export async function getEntityDataSummary(schemaName: string): Promise<EntityDa
     await client.query(`SET search_path TO "${schemaName}", public`)
 
     const [contacts, companies, deals, products, orders, staff, invoices, expenses] = await Promise.all([
-      client.query<{ count: string }>(`SELECT COUNT(*) FROM crm_contacts  WHERE deleted_at IS NULL`),
-      client.query<{ count: string }>(`SELECT COUNT(*) FROM crm_companies WHERE deleted_at IS NULL`),
+      client.query<{ count: string }>(`SELECT COUNT(*) FROM crm_records WHERE module_api_name IN ('Contacts', 'Leads')`),
+      client.query<{ count: string }>(`SELECT COUNT(*) FROM crm_records WHERE module_api_name = 'Accounts'`),
       client.query<{ count: string; total_value: string }>(
-        `SELECT COUNT(*), COALESCE(SUM(deal_value),0) AS total_value FROM crm_deals WHERE deleted_at IS NULL AND stage NOT IN ('won','lost')`
+        `SELECT COUNT(*), COALESCE(SUM((data->>'Amount')::numeric), 0) AS total_value FROM crm_records WHERE module_api_name = 'Deals'`
       ),
       client.query<{ count: string; low_stock: string }>(
         `SELECT COUNT(*), SUM(CASE WHEN reorder_point IS NOT NULL AND available_quantity <= reorder_point THEN 1 ELSE 0 END) AS low_stock FROM erp_products WHERE deleted_at IS NULL AND is_active = TRUE`

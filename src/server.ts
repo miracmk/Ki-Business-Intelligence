@@ -17,6 +17,7 @@ import { ensureQdrantConnection } from './lib/qdrant.js'
 import { authRoutes }         from './api/routes/auth.js'
 import { startImapPollers }   from './engine/imap-poller.js'
 import { startCrmScheduler }  from './engine/crm-sync/crm-scheduler.js'
+import { startBillingScheduler } from './engine/billing/billing.js'
 import { crmRoutes }        from './api/routes/crm.js'
 import { aiRoutes }         from './api/routes/ai.js'
 import { tenantRoutes, channelRoutes } from './api/routes/tenant.js'
@@ -167,6 +168,33 @@ app.setNotFoundHandler(async (req, reply) => {
   return reply.status(404).send('Not found')
 })
 
+function scheduleDailyModelSync() {
+  const runSync = async () => {
+    console.log('[ModelSync] Running daily model sync...')
+    try {
+      for (const scope of ['kibi', 'entity-free']) {
+        await app.inject({ method: 'GET', url: `/api/v1/admin/ai-providers/${scope}/models` })
+      }
+      console.log('[ModelSync] Daily model sync completed')
+    } catch (e) {
+      console.error('[ModelSync] Sync failed:', (e as Error).message)
+    }
+    scheduleNext()
+  }
+
+  const scheduleNext = () => {
+    const now  = new Date()
+    const next = new Date()
+    next.setHours(0, 1, 0, 0)
+    if (next.getTime() <= now.getTime()) next.setDate(next.getDate() + 1)
+    const delayMs = next.getTime() - now.getTime()
+    setTimeout(runSync, delayMs)
+    console.log(`[ModelSync] Next sync scheduled for ${next.toISOString()} (in ${Math.round(delayMs / 3_600_000)}h)`)
+  }
+
+  scheduleNext()
+}
+
 async function start() {
   try {
     await ensureDbConnection()
@@ -176,6 +204,8 @@ async function start() {
     console.log('\n🚀 Ki Platform running on ' + env.HOST + ':' + env.PORT + '\n')
     startImapPollers().catch(e => console.error('[IMAP] Poller start failed:', e))
     startCrmScheduler().catch(e => console.error('[CrmScheduler] Start failed:', e))
+    startBillingScheduler()
+    scheduleDailyModelSync()
   } catch (err) {
     app.log.error(err)
     process.exit(1)

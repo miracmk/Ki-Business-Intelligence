@@ -177,8 +177,36 @@ export const crmRoutes: FastifyPluginAsync = async (app) => {
   app.get('/connections/:id/records', { onRequest: [app.authenticate] }, async (req, reply) => {
     const { id }   = req.params as { id: string }
     const { module, limit = '100', page = '1' } = req.query as Record<string, string>
+    const user = req.user as { sub: string; tenantId: string }
 
     if (!module) return reply.status(400).send({ error: 'module is required' })
+
+    // Mirror path: read from entity schema crm_records
+    const conn = await db.query.crmConnections.findFirst({ where: (t, { eq }) => eq(t.id, id) })
+    if (conn?.connectorConfig && (conn.connectorConfig as any).roles && conn.crmType === 'postgresql') {
+      const entity = await db.query.kibiEntities.findFirst({ where: (t, { eq }) => eq(t.entityId, user.tenantId) })
+      if (entity?.entityDbSchema) {
+        const { Pool } = await import('pg')
+        const pool = new Pool({ connectionString: env.DATABASE_URL, max: 1 })
+        try {
+          const lim    = Math.min(Number(limit), 500)
+          const offset = (Number(page) - 1) * lim
+          const { rows } = await pool.query(
+            `SELECT id, zoho_id, data, created_time, modified_time FROM "${entity.entityDbSchema}".crm_records
+             WHERE module_api_name = $1 ORDER BY id LIMIT $2 OFFSET $3`,
+            [module, lim, offset]
+          )
+          const records = rows.map(r => ({
+            id: r.zoho_id ?? r.id,
+            _ki_row_id: r.id,
+            created_time: r.created_time,
+            modified_time: r.modified_time,
+            ...(typeof r.data === 'object' ? r.data : {}),
+          }))
+          return { records, count: records.length }
+        } finally { await pool.end() }
+      }
+    }
 
     const records = await db.query.crmRecords.findMany({
       where: (t, { eq, and }) => and(eq(t.connectionId, id), eq(t.moduleApiName, module)),
@@ -207,6 +235,41 @@ export const crmRoutes: FastifyPluginAsync = async (app) => {
   // GET /api/v1/crm/connections/:id/modules
   app.get('/connections/:id/modules', { onRequest: [app.authenticate] }, async (req) => {
     const { id } = req.params as { id: string }
+    const user = req.user as { sub: string; tenantId: string }
+
+    // Mirror path: read from entity schema crm_modules
+    const conn = await db.query.crmConnections.findFirst({ where: (t, { eq }) => eq(t.id, id) })
+    if (conn?.connectorConfig && (conn.connectorConfig as any).roles && conn.crmType === 'postgresql') {
+      const entity = await db.query.kibiEntities.findFirst({ where: (t, { eq }) => eq(t.entityId, user.tenantId) })
+      if (entity?.entityDbSchema) {
+        const { Pool } = await import('pg')
+        const pool = new Pool({ connectionString: env.DATABASE_URL, max: 1 })
+        try {
+          const { rows: mods } = await pool.query(
+            `SELECT api_name, module_name, singular_label, plural_label, is_active, _ki_synced_at
+             FROM "${entity.entityDbSchema}".crm_modules ORDER BY api_name`
+          )
+          // Get per-module record counts
+          const { rows: counts } = await pool.query(
+            `SELECT module_api_name, COUNT(*) AS n FROM "${entity.entityDbSchema}".crm_records GROUP BY module_api_name`
+          )
+          const countMap: Record<string, number> = {}
+          for (const c of counts) countMap[c.module_api_name] = parseInt(c.n)
+
+          const modules = mods.map(m => ({
+            apiName:       m.api_name,
+            moduleName:    m.module_name,
+            singularLabel: m.singular_label,
+            pluralLabel:   m.plural_label,
+            isActive:      m.is_active,
+            connectionId:  id,
+            recordCount:   countMap[m.api_name] ?? 0,
+          }))
+          return { modules }
+        } finally { await pool.end() }
+      }
+    }
+
     const modules = await db.query.crmModules.findMany({
       where: (t, { eq }) => eq(t.connectionId, id),
       orderBy: (t, { asc }) => [asc(t.apiName)],
@@ -293,6 +356,38 @@ export const crmRoutes: FastifyPluginAsync = async (app) => {
   // GET /api/v1/crm/connections/:id/modules/:module/fields
   app.get('/connections/:id/modules/:module/fields', { onRequest: [app.authenticate] }, async (req) => {
     const { id, module } = req.params as { id: string; module: string }
+    const user = req.user as { sub: string; tenantId: string }
+
+    // Mirror path: read from entity schema crm_fields
+    const conn = await db.query.crmConnections.findFirst({ where: (t, { eq }) => eq(t.id, id) })
+    if (conn?.connectorConfig && (conn.connectorConfig as any).roles && conn.crmType === 'postgresql') {
+      const entity = await db.query.kibiEntities.findFirst({ where: (t, { eq }) => eq(t.entityId, user.tenantId) })
+      if (entity?.entityDbSchema) {
+        const { Pool } = await import('pg')
+        const pool = new Pool({ connectionString: env.DATABASE_URL, max: 1 })
+        try {
+          const { rows } = await pool.query(
+            `SELECT api_name, field_label, data_type, field_type, is_mandatory, is_read_only, is_custom_field
+             FROM "${entity.entityDbSchema}".crm_fields
+             WHERE module_api_name = $1 ORDER BY api_name`,
+            [module]
+          )
+          const fields = rows.map(f => ({
+            apiName:       f.api_name,
+            fieldLabel:    f.field_label,
+            dataType:      f.data_type,
+            fieldType:     f.field_type,
+            isMandatory:   f.is_mandatory,
+            isReadOnly:    f.is_read_only,
+            isCustomField: f.is_custom_field,
+            moduleApiName: module,
+            connectionId:  id,
+          }))
+          return { fields }
+        } finally { await pool.end() }
+      }
+    }
+
     const fields = await db.query.crmFields.findMany({
       where: (t, { and, eq }) => and(eq(t.connectionId, id), eq(t.moduleApiName, module)),
     })

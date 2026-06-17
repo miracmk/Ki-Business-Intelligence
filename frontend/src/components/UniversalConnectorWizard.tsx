@@ -145,6 +145,7 @@ export function UniversalConnectorWizard({ onClose, onDone }: { onClose: () => v
 
   // Step 4 — role mapping
   const [userMappings, setUserMappings] = useState<Record<string, string>>({})
+  const [aiRoleSuggestions, setAiRoleSuggestions] = useState<Record<string, string>>({})
 
   // Step 5 — AI generation
   const [aiLogs, setAiLogs]         = useState<LogLine[]>([])
@@ -224,13 +225,18 @@ export function UniversalConnectorWizard({ onClose, onDone }: { onClose: () => v
     es.onmessage = (ev) => {
       try {
         const data = JSON.parse(ev.data) as { type: string; message: string; percent: number }
-        setScanLogs(prev => [...prev, { ...data, ts: Date.now() }])
-        setScanProgress(data.percent)
+        if (data.type !== 'roles') {
+          setScanLogs(prev => [...prev, { ...data, ts: Date.now() }])
+          setScanProgress(data.percent)
+        }
         if (data.type === 'structure') {
           try {
             const mod: ScannedModule = JSON.parse(data.message)
             setModules(prev => [...prev, mod])
           } catch { /* ignore */ }
+        }
+        if (data.type === 'roles') {
+          try { setAiRoleSuggestions(JSON.parse(data.message)) } catch { /* ignore */ }
         }
         if (data.type === 'done' || data.type === 'error') {
           es.close()
@@ -244,10 +250,15 @@ export function UniversalConnectorWizard({ onClose, onDone }: { onClose: () => v
     }
   }
 
-  // ── Step 4: init role mappings with auto-suggestion ──────────────────────
+  // ── Step 4: init role mappings — AI suggestions preferred, regex fallback ──
   const initMappings = () => {
     const initial: Record<string, string> = {}
-    modules.forEach(mod => { initial[mod.name] = suggestTableRole(mod.name, sourceType) })
+    const hasAiRoles = Object.keys(aiRoleSuggestions).length > 0
+    modules.forEach(mod => {
+      initial[mod.name] = hasAiRoles
+        ? (aiRoleSuggestions[mod.name] ?? suggestTableRole(mod.name, sourceType))
+        : suggestTableRole(mod.name, sourceType)
+    })
     setUserMappings(initial)
     setStep(4)
   }
@@ -503,9 +514,15 @@ export function UniversalConnectorWizard({ onClose, onDone }: { onClose: () => v
 
           {step === 3 && scanDone && (
             <div className="space-y-4">
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
                 <CheckCircle size={16} style={{ color: 'var(--accent)' }} />
                 <span className="text-sm font-medium" style={{ color: 'var(--accent)' }}>Tarama tamamlandı — {modules.length} tablo bulundu</span>
+                {Object.keys(aiRoleSuggestions).length > 0 && (
+                  <span className="text-xs px-2 py-0.5 rounded-lg font-medium"
+                    style={{ background: 'rgba(139,92,246,0.15)', color: '#a78bfa', border: '1px solid rgba(139,92,246,0.3)' }}>
+                    ✦ AI rolleri tespit etti
+                  </span>
+                )}
               </div>
               {importDone && importResult && (
                 <div className="flex items-start gap-3 p-4 rounded-2xl"
@@ -620,7 +637,9 @@ export function UniversalConnectorWizard({ onClose, onDone }: { onClose: () => v
                 </p>
                 <p className="text-xs" style={{ color: 'var(--text-3)' }}>
                   Her tablonun kaynak sistemdeki <strong>rolünü</strong> belirleyin. AI bu bilgiyi kullanarak entity DB'ye uygun mirror şema oluşturacak.
-                  Sistem tablo isimlerinden otomatik öneri yaptı — doğrulayın ve düzeltin.
+                  {Object.keys(aiRoleSuggestions).length > 0
+                    ? ' ✦ AI tarama sırasında rolleri otomatik tespit etti — doğrulayın ve düzeltin.'
+                    : ' Sistem tablo isimlerinden otomatik öneri yaptı — doğrulayın ve düzeltin.'}
                 </p>
               </div>
 

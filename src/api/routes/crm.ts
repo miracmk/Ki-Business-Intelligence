@@ -561,7 +561,58 @@ export const crmRoutes: FastifyPluginAsync = async (app) => {
 
       const cacheKey = `ki:crm:structure:${id}`
       await redis.set(cacheKey, JSON.stringify(modules), 'EX', 1800)
-      send('done', `Tarama tamamlandı — ${modules.length} modül, önbelleğe alındı`, 100)
+
+      // ── AI-powered role detection ─────────────────────────────────────────
+      if (env.OPENROUTER_API_KEY && modules.length > 0) {
+        send('progress', `AI tablo rollerini tespit ediyor (${modules.length} tablo)...`, 88)
+        try {
+          const tableList = modules.map(m =>
+            `- ${m.name} (${m.recordCount ?? 0} satır, kolonlar: ${(m.fields ?? []).slice(0, 8).map((f: any) => f.name).join(', ')})`
+          ).join('\n')
+
+          const rolePrompt = `Sen bir veri entegrasyon uzmanısın. Bu veritabanı tablolarının rolünü tespit et.
+
+Roller:
+- module_registry: modül/nesne kataloğu (crm_modules, modules gibi)
+- field_definitions: alan/kolon tanımları (crm_fields, fields, attributes gibi)
+- data_records: asıl iş kayıtları (crm_records, data, records gibi)
+- related_lists: ilişkili kayıtlar (crm_related_lists, related gibi)
+- bridge_junction: çoka-çok bağlantı (junction, bridge, link gibi)
+- mirror_direct: normal tablo, doğrudan kopyala
+- "": atla (log, temp, cache, audit, notification, bulk_job, system tablosu)
+
+Tablolar:
+${tableList}
+
+SADECE JSON döndür:
+{"tableName":"role",...}`
+
+          const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${env.OPENROUTER_API_KEY}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              model: 'nvidia/llama-3.1-nemotron-70b-instruct:free',
+              messages: [{ role: 'user', content: rolePrompt }],
+              temperature: 0.1, max_tokens: 800,
+            }),
+            signal: AbortSignal.timeout(20000),
+          })
+          const aiData = await res.json() as any
+          const raw = aiData.choices?.[0]?.message?.content ?? ''
+          const jsonMatch = raw.match(/\{[\s\S]*\}/)
+          if (jsonMatch) {
+            const aiRoles: Record<string, string> = JSON.parse(jsonMatch[0])
+            const detectedCount = Object.values(aiRoles).filter(r => r && r !== '').length
+            send('progress', `AI ${detectedCount} tablonun rolünü tespit etti`, 95)
+            send('roles', JSON.stringify(aiRoles), 95)
+          }
+        } catch (aiErr: any) {
+          console.warn('[scan] AI role detection failed:', aiErr?.message)
+          send('progress', 'AI rol tespiti atlandı — regex önerileri kullanılacak', 95)
+        }
+      }
+
+      send('done', `Tarama tamamlandı — ${modules.length} tablo bulundu`, 100)
 
     } catch (err: any) {
       send('error', err.message ?? 'Bilinmeyen hata', 0)
@@ -629,23 +680,83 @@ export const crmRoutes: FastifyPluginAsync = async (app) => {
       const mappedModules = allModules.filter(mod =>
         roles[mod.name] !== undefined && roles[mod.name] !== ''
       )
-      sendSSE('progress', `${mappedModules.length} tablo mirror edilecek (${sourceSystemType})`, 5)
+      sendSSE('progress', `${mappedModules.length} tablo incelenecek (${sourceSystemType})`, 5)
+
+      // ── EAV-aware pre-scan: connect to source DB and read role-assigned tables ──
+      const creds = decryptJson<any>(conn.credentials)
+      let eavModuleNames: string[] = []
+      let eavFieldCount = 0
+      let eavRecordCount = 0
+
+      if (conn.crmType === 'postgresql' && mappedModules.length > 0) {
+        const { Client } = await import('pg')
+        const pgClient = new Client({
+          host: creds.host, port: Number(creds.port ?? 5432),
+          database: creds.database, user: creds.username, password: creds.password,
+          ssl: creds.ssl ? { rejectUnauthorized: false } : false,
+          connectionTimeoutMillis: 6000,
+        })
+        try {
+          await pgClient.connect()
+
+          for (const mod of mappedModules) {
+            const role = roles[mod.name]!
+            const tableMeta = allModules.find(m => m.name === mod.name)
+            const fieldNames: string[] = (tableMeta?.fields ?? []).map((f: any) => f.name as string)
+
+            if (role === 'module_registry') {
+              // Identify the "name" column
+              const nameCol = fieldNames.find(f => /^api_name$|^module_name$|^name$/.test(f)) ?? fieldNames[0] ?? 'id'
+              const { rows } = await pgClient.query(`SELECT "${nameCol}" FROM "${mod.name}" LIMIT 200`)
+              eavModuleNames = rows.map(r => String(r[nameCol] ?? '')).filter(Boolean)
+              const preview = eavModuleNames.slice(0, 5).join(', ') + (eavModuleNames.length > 5 ? '...' : '')
+              sendSSE('progress', `${eavModuleNames.length} modül bulundu (${mod.name}): ${preview}`, 15)
+
+            } else if (role === 'field_definitions') {
+              const { rows } = await pgClient.query(`SELECT COUNT(*) AS n FROM "${mod.name}"`)
+              eavFieldCount = parseInt(rows[0]?.n ?? '0')
+              sendSSE('progress', `${eavFieldCount.toLocaleString('tr-TR')} alan tanımı tespit edildi (${mod.name})`, 25)
+
+            } else if (role === 'data_records') {
+              const { rows } = await pgClient.query(`SELECT COUNT(*) AS n FROM "${mod.name}"`)
+              eavRecordCount = parseInt(rows[0]?.n ?? '0')
+              sendSSE('progress', `${eavRecordCount.toLocaleString('tr-TR')} kayıt mirror edilecek (${mod.name})`, 35)
+
+            } else if (role === 'related_lists') {
+              const { rows } = await pgClient.query(`SELECT COUNT(*) AS n FROM "${mod.name}"`)
+              const cnt = parseInt(rows[0]?.n ?? '0')
+              sendSSE('progress', `${cnt.toLocaleString('tr-TR')} ilişki kaydı bulundu (${mod.name})`, 40)
+
+            } else {
+              const { rows } = await pgClient.query(`SELECT COUNT(*) AS n FROM "${mod.name}"`)
+              const cnt = parseInt(rows[0]?.n ?? '0')
+              sendSSE('progress', `${mod.name}: ${cnt.toLocaleString('tr-TR')} kayıt [${role}]`, 40)
+            }
+          }
+        } catch (dbErr: any) {
+          sendSSE('progress', `Kaynak DB sorgu hatası: ${dbErr.message}`, 20)
+        } finally {
+          await pgClient.end().catch(() => {})
+        }
+      }
 
       const promptModules: any[] = []
       for (let i = 0; i < mappedModules.length; i++) {
         const mod = mappedModules[i]!
         const role = roles[mod.name] ?? 'mirror_direct'
-        sendSSE('progress', `"${mod.label ?? mod.name}" hazırlanıyor [${role}] — ${mod.fields?.length ?? 0} alan`, 5 + Math.round((i / Math.max(mappedModules.length, 1)) * 25))
         promptModules.push({
           sourceModule: mod.name,
           targetTable: mod.name,  // mirror: entity DB'de aynı isimde tablo
           role,
           fields: (mod.fields ?? []).slice(0, 50),
           sampleRows: (mod.sampleRows ?? []).slice(0, 5),
+          ...(role === 'module_registry' && eavModuleNames.length > 0 ? { discoveredModules: eavModuleNames } : {}),
+          ...(role === 'field_definitions' ? { totalFieldCount: eavFieldCount } : {}),
+          ...(role === 'data_records' ? { totalRecordCount: eavRecordCount } : {}),
         })
       }
 
-      sendSSE('progress', 'AI prompt hazırlandı, OpenRouter\'a gönderiliyor...', 30)
+      sendSSE('progress', 'Mirror şema hazırlanıyor...', 50)
 
       const openrouterKey = env.OPENROUTER_API_KEY
       let connectorConfig: any = null

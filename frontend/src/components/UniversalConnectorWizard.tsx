@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { X, ChevronRight, ChevronLeft, Database, Server, Loader2, CheckCircle, AlertCircle, Zap } from 'lucide-react'
+import { X, ChevronRight, ChevronLeft, Database, Server, Loader2, CheckCircle, AlertCircle, Zap, BarChart3, HardDrive } from 'lucide-react'
 import api from '../lib/api'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -17,47 +17,104 @@ interface Connector {
   mappings: ConnectorModule[]; unmappedFields: string[]; aiGenerated?: boolean
 }
 
-// ── Constants ─────────────────────────────────────────────────────────────────
+// ── Source types ──────────────────────────────────────────────────────────────
 const SOURCE_TYPES = [
-  { id: 'crm-api',  label: 'CRM API',      desc: 'Zoho, HubSpot, Salesforce ve diğer CRM sistemleri', icon: Zap      },
-  { id: 'database', label: 'Veritabanı',    desc: 'PostgreSQL, MySQL — doğrudan tablo bağlantısı',      icon: Database },
-  { id: 'erp',      label: 'ERP (yakında)', desc: 'SAP, NetSuite, Odoo ERP entegrasyonları',            icon: Server   },
+  { id: 'crm-api', label: 'CRM API',          desc: 'Zoho, HubSpot, Salesforce — OAuth bağlantısı',         icon: Zap,       disabled: true  },
+  { id: 'crm-db',  label: 'CRM Veritabanı',   desc: 'Zoho DB, HubSpot export — EAV / meta tablo yapısı',   icon: Database,  disabled: false },
+  { id: 'erp-db',  label: 'ERP Veritabanı',   desc: 'SAP, Odoo, Netsis — fiziksel şema + header/line',     icon: Server,    disabled: false },
+  { id: 'acc-db',  label: 'Muhasebe Sistemi', desc: 'Paraşüt, Xero, Logo İşbaşı — finansal kayıt sistemi', icon: BarChart3, disabled: false },
+  { id: 'generic', label: 'Genel Veritabanı', desc: 'Diğer — tüm tablolar direkt mirror olarak kopyalanır', icon: HardDrive, disabled: false },
 ]
 
-const TARGET_TABLE_OPTIONS = [
-  { value: 'crm_contacts',  label: 'Kişiler / Müşteriler (crm_contacts)'  },
-  { value: 'crm_companies', label: 'Şirketler / Hesaplar (crm_companies)' },
-  { value: 'crm_deals',     label: 'Fırsatlar / Satışlar (crm_deals)'     },
-  { value: 'erp_products',  label: 'Ürünler / Stok (erp_products)'        },
-  { value: '',               label: 'Atla (Bu modülü yoksay)'               },
-]
+// ── Source table roles per system type ───────────────────────────────────────
+const ROLE_OPTIONS: Record<string, Array<{ value: string; label: string; hint: string }>> = {
+  'crm-db': [
+    { value: 'module_registry',   label: 'Modül Kataloğu',    hint: 'Bu tabloda modül/nesne isimleri var (Zoho: crm_modules)' },
+    { value: 'field_definitions', label: 'Alan Tanımları',    hint: 'Bu tabloda her modülün kolon tanımları var (crm_fields)' },
+    { value: 'data_records',      label: 'Kayıt/Veri',       hint: 'Asıl CRM verileri burada (crm_records, data_*)' },
+    { value: 'related_lists',     label: 'İlişki Tablosu',   hint: 'Related list / ilişkili kayıt verileri (crm_related_lists)' },
+    { value: 'bridge_junction',   label: 'Köprü Tablo',      hint: 'Many-to-many bağlantı tablosu' },
+    { value: 'mirror_direct',     label: 'Direkt Mirror',    hint: 'Yapıyı olduğu gibi entity DB\'ye kopyala' },
+    { value: '',                  label: 'Atla',             hint: 'Sistem/log tablosu — yoksay' },
+  ],
+  'erp-db': [
+    { value: 'erp_master',     label: 'Master Veri',         hint: 'Ürün, müşteri, tedarikçi, personel tanım tablosu' },
+    { value: 'erp_header',     label: 'Belge Başlığı',      hint: 'PO, sipariş, fatura — üst bilgi tablosu (Header)' },
+    { value: 'erp_line_items', label: 'Belge Satırları',    hint: 'Kalem, miktar, tutar satırları (_lines, _items)' },
+    { value: 'erp_doc_flow',   label: 'Belge Akışı',        hint: 'Belge zinciri izlenebilirliği (doc_relations, process_flow)' },
+    { value: 'erp_journal',    label: 'Yevmiye/Muhasebe',  hint: 'Finansal borç-alacak, journal entries' },
+    { value: 'mirror_direct',  label: 'Direkt Mirror',      hint: 'Yapıyı olduğu gibi entity DB\'ye kopyala' },
+    { value: '',               label: 'Atla',               hint: 'Log/temp/sistem tablosu — yoksay' },
+  ],
+  'acc-db': [
+    { value: 'acc_contacts',  label: 'Cariler/Kişiler',    hint: 'Müşteri ve tedarikçi — tek tabloda tip sütunuyla' },
+    { value: 'acc_documents', label: 'Belgeler',           hint: 'Fatura, teklif, gider — belge başlığı tablosu' },
+    { value: 'acc_lines',     label: 'Kalem Satırları',   hint: 'Belge kalemleri, miktar, tutar (_lines, _items)' },
+    { value: 'acc_linked_tx', label: 'Bağlı İşlemler',   hint: 'Ödeme, mahsup, teklif→fatura dönüşüm bağları' },
+    { value: 'acc_ledger',    label: 'Yevmiye/Defteri',  hint: 'Borç-alacak kayıtları, anlık finansal olaylar' },
+    { value: 'mirror_direct', label: 'Direkt Mirror',     hint: 'Yapıyı olduğu gibi entity DB\'ye kopyala' },
+    { value: '',              label: 'Atla',              hint: 'Sistem/cache/log tablosu — yoksay' },
+  ],
+  'generic': [
+    { value: 'mirror_direct', label: 'Direkt Mirror', hint: 'Yapıyı olduğu gibi entity DB\'ye kopyala' },
+    { value: '',              label: 'Atla',          hint: 'Bu tabloyu yoksay' },
+  ],
+}
 
 const TRANSFORM_TYPES = ['direct', 'phone_e164', 'country_iso', 'name_case', 'email_lower', 'currency_strip', 'custom']
 
 const DB_FIELDS = [
-  { key: 'host',     label: 'Host',          type: 'text',     placeholder: '192.168.1.10'        },
-  { key: 'port',     label: 'Port',          type: 'text',     placeholder: '5432'                },
-  { key: 'database', label: 'Veritabanı',    type: 'text',     placeholder: 'mydb'                },
-  { key: 'username', label: 'Kullanıcı',     type: 'text',     placeholder: 'postgres'            },
-  { key: 'password', label: 'Şifre',         type: 'password', placeholder: ''                    },
-  { key: 'name',     label: 'Bağlantı Adı',  type: 'text',     placeholder: 'Üretim Veritabanı'   },
+  { key: 'host',     label: 'Host',         type: 'text',     placeholder: '192.168.1.10'      },
+  { key: 'port',     label: 'Port',         type: 'text',     placeholder: '5432'              },
+  { key: 'database', label: 'Veritabanı',   type: 'text',     placeholder: 'mydb'              },
+  { key: 'username', label: 'Kullanıcı',    type: 'text',     placeholder: 'postgres'          },
+  { key: 'password', label: 'Şifre',        type: 'password', placeholder: ''                  },
+  { key: 'name',     label: 'Bağlantı Adı', type: 'text',     placeholder: 'Üretim DB'         },
 ]
 
 const META_TABLE_FIELDS = [
-  { key: 'modulesTable', label: 'Modüller Tablosu',   placeholder: 'crm_modules veya tables_meta', hint: 'Modül/tablo dizinini tutan tablo adı' },
-  { key: 'fieldsTable',  label: "Field'lar Tablosu",  placeholder: 'crm_fields veya columns_meta', hint: 'Alan/kolon tanımlarını tutan tablo adı' },
-  { key: 'dataTable',    label: 'Veri Tablosu',       placeholder: 'crm_records veya data',        hint: 'Asıl client verilerini tutan tablo adı' },
+  { key: 'modulesTable', label: 'Modüller Tablosu',  placeholder: 'crm_modules',  hint: 'Modül/tablo listesini tutan tablo' },
+  { key: 'fieldsTable',  label: "Alan Tanım Tablosu", placeholder: 'crm_fields',   hint: 'Alan/kolon tanımlarını tutan tablo' },
+  { key: 'dataTable',    label: 'Veri Tablosu',       placeholder: 'crm_records',  hint: 'Asıl kayıt verilerini tutan tablo' },
 ]
 
-const STEP_LABELS = ['Kaynak Seç', 'Bağlantı Kur', 'Yapıyı Gör', 'Modül Eşleştir', 'AI Konnektör', 'Onayla']
+const STEP_LABELS = ['Kaynak Seç', 'Bağlantı Kur', 'Yapıyı Gör', 'Rol Belirle', 'AI Mirror', 'Onayla']
 
-function suggestTargetTable(moduleName: string): string {
-  const n = moduleName.toLowerCase()
-  if (/contact|lead|person|müşteri|kişi|customer/.test(n)) return 'crm_contacts'
-  if (/account|company|firma|şirket|organization/.test(n)) return 'crm_companies'
-  if (/deal|opportunity|fırsat|satış|pipeline|potent/.test(n)) return 'crm_deals'
-  if (/product|item|ürün|inventory|stok|stock/.test(n)) return 'erp_products'
-  return ''
+// ── Auto-suggest table role from name + source type ───────────────────────────
+function suggestTableRole(tableName: string, sourceType: string): string {
+  const n = tableName.toLowerCase()
+
+  // Skip obvious system/operational tables for all types
+  if (/sync_log|sync_state|bulk_job|notification|audit_log|_log$|_temp$|_cache$/.test(n)) return ''
+
+  if (sourceType === 'crm-db') {
+    if (/\bmodule/.test(n)) return 'module_registry'
+    if (/\bfield/.test(n)) return 'field_definitions'
+    if (/\brecord|\bdata(?!base)/.test(n)) return 'data_records'
+    if (/related|relation|\blist/.test(n)) return 'related_lists'
+    if (/bridge|junction|\blink/.test(n)) return 'bridge_junction'
+    return 'mirror_direct'
+  }
+
+  if (sourceType === 'erp-db') {
+    if (/_lines?$|_items?$|_details?$|_satir$/.test(n)) return 'erp_line_items'
+    if (/order|invoice|receipt|shipment|delivery|movement|fatura|siparis/.test(n)) return 'erp_header'
+    if (/doc_rel|process_flow|trace|izlenebilir/.test(n)) return 'erp_doc_flow'
+    if (/journal|ledger|yevmiye|defter|entry/.test(n)) return 'erp_journal'
+    if (/product|customer|vendor|supplier|employee|staff|urun|musteri|tedarik/.test(n)) return 'erp_master'
+    return 'mirror_direct'
+  }
+
+  if (sourceType === 'acc-db') {
+    if (/contact|cari|customer|vendor|supplier/.test(n)) return 'acc_contacts'
+    if (/line|item|kalem/.test(n)) return 'acc_lines'
+    if (/invoice|fatura|expense|gider|estimate|teklif|quote/.test(n)) return 'acc_documents'
+    if (/payment|odeme|allocation|\blink|transaction/.test(n)) return 'acc_linked_tx'
+    if (/ledger|journal|yevmiye|defter|entry/.test(n)) return 'acc_ledger'
+    return 'mirror_direct'
+  }
+
+  return 'mirror_direct' // generic
 }
 
 // ── Wizard Component ──────────────────────────────────────────────────────────
@@ -86,7 +143,7 @@ export function UniversalConnectorWizard({ onClose, onDone }: { onClose: () => v
   const [importLoading, setImportLoading] = useState(false)
   const [importResult,  setImportResult]  = useState<{ importedModules: number; importedFields: number } | null>(null)
 
-  // Step 4 — module mapping
+  // Step 4 — role mapping
   const [userMappings, setUserMappings] = useState<Record<string, string>>({})
 
   // Step 5 — AI generation
@@ -107,6 +164,8 @@ export function UniversalConnectorWizard({ onClose, onDone }: { onClose: () => v
   useEffect(() => { scanLogsEnd.current?.scrollIntoView({ behavior: 'smooth' }) }, [scanLogs])
   useEffect(() => { aiLogsEnd.current?.scrollIntoView({ behavior: 'smooth' }) }, [aiLogs])
   useEffect(() => () => { scanEsRef.current?.close(); aiEsRef.current?.close() }, [])
+
+  const roleOptions = ROLE_OPTIONS[sourceType] ?? ROLE_OPTIONS['generic']
 
   // ── Step 2 actions ───────────────────────────────────────────────────────
   const testConnection = async () => {
@@ -185,9 +244,10 @@ export function UniversalConnectorWizard({ onClose, onDone }: { onClose: () => v
     }
   }
 
+  // ── Step 4: init role mappings with auto-suggestion ──────────────────────
   const initMappings = () => {
     const initial: Record<string, string> = {}
-    modules.forEach(mod => { initial[mod.name] = suggestTargetTable(mod.name) })
+    modules.forEach(mod => { initial[mod.name] = suggestTableRole(mod.name, sourceType) })
     setUserMappings(initial)
     setStep(4)
   }
@@ -197,7 +257,8 @@ export function UniversalConnectorWizard({ onClose, onDone }: { onClose: () => v
     setAiLogs([]); setAiProgress(0); setAiDone(false); setConnector(null)
     setStep(5)
     const token = encodeURIComponent(localStorage.getItem('accessToken') ?? '')
-    const m = encodeURIComponent(JSON.stringify(userMappings))
+    // Pass role mappings + source type to AI for intelligent mirror schema generation
+    const m = encodeURIComponent(JSON.stringify({ roles: userMappings, sourceSystemType: sourceType }))
     const es = new EventSource(
       `/api/v1/crm/connections/${connectionId}/generate-connector/stream?token=${token}&m=${m}`
     )
@@ -265,8 +326,7 @@ export function UniversalConnectorWizard({ onClose, onDone }: { onClose: () => v
   const LogPanel = ({ logs, logsEnd, progress }: { logs: LogLine[]; logsEnd: React.RefObject<HTMLDivElement>; progress: number }) => (
     <div className="flex flex-col rounded-2xl overflow-hidden h-full" style={{ background: '#0a0f0e', border: '1px solid var(--border)' }}>
       <div className="px-4 py-2 text-xs font-mono flex items-center justify-between" style={{ color: 'var(--text-3)', borderBottom: '1px solid var(--border)' }}>
-        <span>Canlı Log</span>
-        <span>{progress}%</span>
+        <span>Canlı Log</span><span>{progress}%</span>
       </div>
       <div className="flex-1 overflow-y-auto p-4 space-y-1 font-mono text-xs" style={{ maxHeight: 340 }}>
         {logs.map((l, i) => (
@@ -282,10 +342,24 @@ export function UniversalConnectorWizard({ onClose, onDone }: { onClose: () => v
     </div>
   )
 
+  // ── Role badge colors ─────────────────────────────────────────────────────
+  const ROLE_COLORS: Record<string, string> = {
+    module_registry: 'rgba(139,92,246,0.2)',   field_definitions: 'rgba(59,130,246,0.2)',
+    data_records:    'rgba(38,166,154,0.2)',    related_lists:     'rgba(245,158,11,0.2)',
+    bridge_junction: 'rgba(236,72,153,0.2)',   mirror_direct:     'rgba(100,100,100,0.2)',
+    erp_master:      'rgba(38,166,154,0.2)',   erp_header:        'rgba(59,130,246,0.2)',
+    erp_line_items:  'rgba(139,92,246,0.2)',   erp_doc_flow:      'rgba(245,158,11,0.2)',
+    erp_journal:     'rgba(236,72,153,0.2)',   acc_contacts:      'rgba(38,166,154,0.2)',
+    acc_documents:   'rgba(59,130,246,0.2)',   acc_lines:         'rgba(139,92,246,0.2)',
+    acc_linked_tx:   'rgba(245,158,11,0.2)',   acc_ledger:        'rgba(236,72,153,0.2)',
+  }
+
+  const assignedCount = Object.values(userMappings).filter(Boolean).length
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center" style={{ background: 'rgba(0,0,0,0.75)' }}>
       <div className="relative flex flex-col rounded-3xl shadow-2xl"
-        style={{ background: 'var(--surface-modal)', border: '1px solid var(--border)', width: 'min(96vw,1040px)', maxHeight: '92vh', minHeight: 520 }}>
+        style={{ background: 'var(--surface-modal)', border: '1px solid var(--border)', width: 'min(96vw,1080px)', maxHeight: '92vh', minHeight: 520 }}>
 
         {/* Header */}
         <div className="flex items-center justify-between px-8 py-5" style={{ borderBottom: '1px solid var(--border)' }}>
@@ -312,17 +386,22 @@ export function UniversalConnectorWizard({ onClose, onDone }: { onClose: () => v
         {/* Content */}
         <div className="flex-1 overflow-y-auto p-8">
 
-          {/* ── STEP 1: Source selection ─────────────────────────────────── */}
+          {/* ── STEP 1: Source type selection ────────────────────────────── */}
           {step === 1 && (
             <div className="space-y-4">
-              <p className="text-sm" style={{ color: 'var(--text-2)' }}>Hangi kaynaktan veri çekmek istiyorsunuz?</p>
-              <div className="grid gap-4 sm:grid-cols-3">
+              <p className="text-sm" style={{ color: 'var(--text-2)' }}>
+                Hangi tür sistemden veri çekiyorsunuz? Kaynak tipi, tablo rol tespitini ve mirror şema stratejisini belirler.
+              </p>
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
                 {SOURCE_TYPES.map(src => (
-                  <button key={src.id} onClick={() => setSourceType(src.id)}
-                    className="p-5 rounded-2xl text-left transition-all"
+                  <button key={src.id} onClick={() => !src.disabled && setSourceType(src.id)}
+                    disabled={src.disabled}
+                    className="p-5 rounded-2xl text-left transition-all disabled:opacity-40 disabled:cursor-not-allowed"
                     style={{ background: sourceType === src.id ? 'rgba(38,166,154,0.15)' : 'var(--surface-2)', border: `2px solid ${sourceType === src.id ? 'var(--accent)' : 'var(--border)'}` }}>
-                    <src.icon size={28} style={{ color: 'var(--accent)' }} className="mb-3" />
-                    <p className="font-semibold" style={{ color: 'var(--text-1)' }}>{src.label}</p>
+                    <src.icon size={24} style={{ color: 'var(--accent)' }} className="mb-2" />
+                    <p className="font-semibold text-sm" style={{ color: 'var(--text-1)' }}>
+                      {src.label}{src.disabled ? ' (API üzerinden)' : ''}
+                    </p>
                     <p className="text-xs mt-1" style={{ color: 'var(--text-3)' }}>{src.desc}</p>
                   </button>
                 ))}
@@ -330,17 +409,23 @@ export function UniversalConnectorWizard({ onClose, onDone }: { onClose: () => v
               {sourceType === 'crm-api' && (
                 <div className="p-4 rounded-2xl" style={{ background: 'rgba(38,166,154,0.08)', border: '1px solid var(--border)' }}>
                   <p className="text-sm" style={{ color: 'var(--text-2)' }}>
-                    CRM API bağlantıları <strong>Platform Ayarları → CRM</strong> sekmesinden eklenir. Önce oradan OAuth bağlantısını tamamlayın, ardından Ayarlar sayfasından yapı tarayıcısını başlatın.
+                    CRM API bağlantıları <strong>Platform Ayarları → CRM</strong> sekmesinden OAuth ile eklenir.
                   </p>
                 </div>
               )}
             </div>
           )}
 
-          {/* ── STEP 2: DB form ──────────────────────────────────────────── */}
+          {/* ── STEP 2: DB connection form ────────────────────────────────── */}
           {step === 2 && (
             <div className="space-y-4 max-w-lg">
-              <p className="text-sm" style={{ color: 'var(--text-2)' }}>PostgreSQL veritabanı bağlantı bilgilerini girin.</p>
+              <div className="flex items-center gap-2 mb-2">
+                <span className="text-xs px-2 py-0.5 rounded-lg font-medium"
+                  style={{ background: 'rgba(38,166,154,0.15)', color: 'var(--accent)', border: '1px solid rgba(38,166,154,0.3)' }}>
+                  {SOURCE_TYPES.find(s => s.id === sourceType)?.label}
+                </span>
+                <span className="text-xs" style={{ color: 'var(--text-3)' }}>PostgreSQL bağlantı bilgilerini girin</span>
+              </div>
               {DB_FIELDS.map(f => (
                 <div key={f.key}>
                   <label className="text-sm" style={{ color: 'var(--text-2)' }}>{f.label}</label>
@@ -350,35 +435,34 @@ export function UniversalConnectorWizard({ onClose, onDone }: { onClose: () => v
                     style={{ background: 'var(--surface-2)', border: '1px solid var(--border)', color: 'var(--text-1)' }} />
                 </div>
               ))}
-
-              <div>
-                <button type="button" onClick={() => setShowMetaTables(s => !s)}
-                  className="flex items-center gap-2 text-sm py-2"
-                  style={{ color: 'var(--accent)' }}>
-                  <Database size={13} />
-                  {showMetaTables ? 'Meta-Tablo Alanlarını Gizle' : 'Meta-Tablo Alanlarını Göster (EAV / özel şema)'}
-                </button>
-                {showMetaTables && (
-                  <div className="mt-3 space-y-3 pl-3" style={{ borderLeft: '2px solid var(--accent)' }}>
-                    <p className="text-xs" style={{ color: 'var(--text-3)' }}>
-                      Veritabanınız EAV veya meta-şema yapısındaysa modül dizinini, alan tanımlarını ve client verisini tutan tablolar farklı olabilir.
-                    </p>
-                    {META_TABLE_FIELDS.map(f => (
-                      <div key={f.key}>
-                        <label className="text-sm" style={{ color: 'var(--text-2)' }}>{f.label}
-                          <span className="ml-2 text-xs" style={{ color: 'var(--text-3)' }}>(opsiyonel)</span>
-                        </label>
-                        <p className="text-[11px] mb-1" style={{ color: 'var(--text-3)' }}>{f.hint}</p>
-                        <input type="text" placeholder={f.placeholder} value={dbForm[f.key] ?? ''}
-                          onChange={e => setDbForm(p => ({ ...p, [f.key]: e.target.value }))}
-                          className="w-full px-4 py-2.5 rounded-2xl text-sm outline-none font-mono"
-                          style={{ background: 'var(--surface-2)', border: '1px solid var(--border)', color: 'var(--text-1)' }} />
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-
+              {(sourceType === 'crm-db') && (
+                <div>
+                  <button type="button" onClick={() => setShowMetaTables(s => !s)}
+                    className="flex items-center gap-2 text-sm py-2" style={{ color: 'var(--accent)' }}>
+                    <Database size={13} />
+                    {showMetaTables ? 'EAV Meta-Tablo Alanlarını Gizle' : 'EAV Meta-Tablo Alanlarını Göster (opsiyonel)'}
+                  </button>
+                  {showMetaTables && (
+                    <div className="mt-3 space-y-3 pl-3" style={{ borderLeft: '2px solid var(--accent)' }}>
+                      <p className="text-xs" style={{ color: 'var(--text-3)' }}>
+                        CRM EAV yapısında modül listesi, alan tanımları ve kayıtlar farklı tablolarda olabilir.
+                      </p>
+                      {META_TABLE_FIELDS.map(f => (
+                        <div key={f.key}>
+                          <label className="text-sm" style={{ color: 'var(--text-2)' }}>{f.label}
+                            <span className="ml-2 text-xs" style={{ color: 'var(--text-3)' }}>(opsiyonel)</span>
+                          </label>
+                          <p className="text-[11px] mb-1" style={{ color: 'var(--text-3)' }}>{f.hint}</p>
+                          <input type="text" placeholder={f.placeholder} value={dbForm[f.key] ?? ''}
+                            onChange={e => setDbForm(p => ({ ...p, [f.key]: e.target.value }))}
+                            className="w-full px-4 py-2.5 rounded-2xl text-sm outline-none font-mono"
+                            style={{ background: 'var(--surface-2)', border: '1px solid var(--border)', color: 'var(--text-1)' }} />
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
               {testMsg && (
                 <p className="text-sm flex items-center gap-2" style={{ color: testStatus === 'ok' ? 'var(--accent)' : '#f87171' }}>
                   {testStatus === 'ok' ? <CheckCircle size={14} /> : <AlertCircle size={14} />} {testMsg}
@@ -399,14 +483,14 @@ export function UniversalConnectorWizard({ onClose, onDone }: { onClose: () => v
               <LogPanel logs={scanLogs} logsEnd={scanLogsEnd} progress={scanProgress} />
               <div className="rounded-2xl overflow-hidden" style={{ background: 'var(--surface-2)', border: '1px solid var(--border)' }}>
                 <div className="px-4 py-2 text-xs font-mono" style={{ color: 'var(--text-3)', borderBottom: '1px solid var(--border)' }}>
-                  Bulunan Modüller ({modules.length})
+                  Bulunan Tablolar ({modules.length})
                 </div>
                 <div className="overflow-y-auto p-3 space-y-2" style={{ maxHeight: 320 }}>
                   {modules.map((mod, i) => (
                     <div key={i} className="px-3 py-2 rounded-xl" style={{ background: 'var(--surface-3)' }}>
-                      <div className="font-medium text-sm" style={{ color: 'var(--text-1)' }}>
-                        {mod.label ?? mod.name}
-                        <span className="text-xs ml-2" style={{ color: 'var(--text-3)' }}>({mod.recordCount?.toLocaleString() ?? '?'} kayıt)</span>
+                      <div className="font-medium text-sm font-mono" style={{ color: 'var(--text-1)' }}>
+                        {mod.name}
+                        <span className="text-xs ml-2 font-sans" style={{ color: 'var(--text-3)' }}>({mod.recordCount?.toLocaleString() ?? '?'} kayıt)</span>
                       </div>
                       <div className="text-xs mt-0.5" style={{ color: 'var(--text-3)' }}>{mod.fields?.length ?? 0} kolon</div>
                     </div>
@@ -421,9 +505,8 @@ export function UniversalConnectorWizard({ onClose, onDone }: { onClose: () => v
             <div className="space-y-4">
               <div className="flex items-center gap-2">
                 <CheckCircle size={16} style={{ color: 'var(--accent)' }} />
-                <span className="text-sm font-medium" style={{ color: 'var(--accent)' }}>Tarama tamamlandı — {modules.length} modül bulundu</span>
+                <span className="text-sm font-medium" style={{ color: 'var(--accent)' }}>Tarama tamamlandı — {modules.length} tablo bulundu</span>
               </div>
-
               {importDone && importResult && (
                 <div className="flex items-start gap-3 p-4 rounded-2xl"
                   style={{ background: 'rgba(38,166,154,0.10)', border: '1px solid rgba(38,166,154,0.3)' }}>
@@ -431,34 +514,32 @@ export function UniversalConnectorWizard({ onClose, onDone }: { onClose: () => v
                   <div>
                     <p className="text-sm font-semibold" style={{ color: 'var(--accent)' }}>Eşleştirmesiz import tamamlandı</p>
                     <p className="text-xs mt-0.5" style={{ color: 'var(--text-3)' }}>
-                      {importResult.importedModules} modül ve {importResult.importedFields} field KIBI DB'ye aktarıldı.
+                      {importResult.importedModules} modül ve {importResult.importedFields} alan aktarıldı.
                     </p>
                   </div>
                 </div>
               )}
-
               <div className="flex gap-2">
                 {(['modules', 'fields', 'samples'] as const).map(tab => (
                   <button key={tab} onClick={() => setStructureTab(tab)}
                     className="px-4 py-2 rounded-xl text-sm font-medium transition-colors"
                     style={{ background: structureTab === tab ? 'var(--accent)' : 'var(--surface-2)', color: structureTab === tab ? '#fff' : 'var(--text-2)', border: '1px solid var(--border)' }}>
-                    {tab === 'modules' ? 'Modüller' : tab === 'fields' ? 'Alanlar' : 'Örnek Veri'}
+                    {tab === 'modules' ? 'Tablolar' : tab === 'fields' ? 'Alanlar' : 'Örnek Veri'}
                   </button>
                 ))}
               </div>
-
               {structureTab === 'modules' && (
                 <div className="rounded-2xl overflow-hidden" style={{ border: '1px solid var(--border)' }}>
                   <table className="w-full text-sm">
                     <thead><tr style={{ background: 'var(--surface-2)' }}>
-                      <th className="px-4 py-3 text-left font-medium" style={{ color: 'var(--text-2)' }}>Modül Adı</th>
+                      <th className="px-4 py-3 text-left font-medium" style={{ color: 'var(--text-2)' }}>Tablo Adı</th>
                       <th className="px-4 py-3 text-right font-medium" style={{ color: 'var(--text-2)' }}>Kayıt</th>
                       <th className="px-4 py-3 text-right font-medium" style={{ color: 'var(--text-2)' }}>Alan</th>
                     </tr></thead>
                     <tbody>
                       {modules.map((mod, i) => (
                         <tr key={i} style={{ borderTop: '1px solid var(--border)' }}>
-                          <td className="px-4 py-2.5 font-medium" style={{ color: 'var(--text-1)' }}>{mod.label ?? mod.name}</td>
+                          <td className="px-4 py-2.5 font-mono text-sm" style={{ color: 'var(--text-1)' }}>{mod.name}</td>
                           <td className="px-4 py-2.5 text-right" style={{ color: 'var(--text-2)' }}>{mod.recordCount?.toLocaleString() ?? '—'}</td>
                           <td className="px-4 py-2.5 text-right" style={{ color: 'var(--text-3)' }}>{mod.fields?.length ?? 0}</td>
                         </tr>
@@ -467,13 +548,12 @@ export function UniversalConnectorWizard({ onClose, onDone }: { onClose: () => v
                   </table>
                 </div>
               )}
-
               {structureTab === 'fields' && (
                 <div className="rounded-2xl overflow-hidden" style={{ border: '1px solid var(--border)', maxHeight: 400, overflowY: 'auto' }}>
                   <table className="w-full text-sm">
                     <thead style={{ position: 'sticky', top: 0, zIndex: 1 }}>
                       <tr style={{ background: 'var(--surface-2)' }}>
-                        <th className="px-4 py-3 text-left font-medium" style={{ color: 'var(--text-2)' }}>Modül</th>
+                        <th className="px-4 py-3 text-left font-medium" style={{ color: 'var(--text-2)' }}>Tablo</th>
                         <th className="px-4 py-3 text-left font-medium" style={{ color: 'var(--text-2)' }}>Kolon</th>
                         <th className="px-4 py-3 text-left font-medium" style={{ color: 'var(--text-2)' }}>Tip</th>
                         <th className="px-4 py-3 text-left font-medium" style={{ color: 'var(--text-2)' }}>Örnek</th>
@@ -483,7 +563,7 @@ export function UniversalConnectorWizard({ onClose, onDone }: { onClose: () => v
                       {modules.flatMap(mod =>
                         (mod.fields ?? []).slice(0, 20).map((f, fi) => (
                           <tr key={`${mod.name}-${fi}`} style={{ borderTop: '1px solid var(--border)' }}>
-                            <td className="px-4 py-1.5 text-xs" style={{ color: 'var(--text-3)' }}>{mod.name}</td>
+                            <td className="px-4 py-1.5 text-xs font-mono" style={{ color: 'var(--text-3)' }}>{mod.name}</td>
                             <td className="px-4 py-1.5 font-mono text-xs" style={{ color: 'var(--text-1)' }}>{f.name}</td>
                             <td className="px-4 py-1.5 text-xs" style={{ color: 'var(--text-3)' }}>{f.type ?? '—'}</td>
                             <td className="px-4 py-1.5 text-xs" style={{ color: 'var(--text-2)' }}>{f.sampleValues?.[0] ?? '—'}</td>
@@ -494,13 +574,12 @@ export function UniversalConnectorWizard({ onClose, onDone }: { onClose: () => v
                   </table>
                 </div>
               )}
-
               {structureTab === 'samples' && (
                 <div className="space-y-4" style={{ maxHeight: 400, overflowY: 'auto' }}>
                   {modules.filter(m => m.sampleRows && m.sampleRows.length > 0).slice(0, 5).map(mod => (
                     <div key={mod.name} className="rounded-2xl overflow-hidden" style={{ border: '1px solid var(--border)' }}>
-                      <div className="px-4 py-2 text-xs font-medium" style={{ background: 'var(--surface-2)', borderBottom: '1px solid var(--border)', color: 'var(--text-2)' }}>
-                        {mod.label ?? mod.name} — ilk {mod.sampleRows!.length} kayıt
+                      <div className="px-4 py-2 text-xs font-medium font-mono" style={{ background: 'var(--surface-2)', borderBottom: '1px solid var(--border)', color: 'var(--text-2)' }}>
+                        {mod.name} — ilk {mod.sampleRows!.length} kayıt
                       </div>
                       <div className="overflow-x-auto">
                         <table className="w-full text-xs">
@@ -525,56 +604,75 @@ export function UniversalConnectorWizard({ onClose, onDone }: { onClose: () => v
                     </div>
                   ))}
                   {modules.every(m => !m.sampleRows?.length) && (
-                    <p className="text-sm text-center py-8" style={{ color: 'var(--text-3)' }}>Bu bağlantı için örnek veri alınamadı.</p>
+                    <p className="text-sm text-center py-8" style={{ color: 'var(--text-3)' }}>Örnek veri alınamadı.</p>
                   )}
                 </div>
               )}
             </div>
           )}
 
-          {/* ── STEP 4: Module mapping ───────────────────────────────────── */}
+          {/* ── STEP 4: Role mapping ─────────────────────────────────────── */}
           {step === 4 && (
             <div className="space-y-4">
-              <p className="text-sm" style={{ color: 'var(--text-2)' }}>Her kaynak modül için hedef tabloyu seçin.</p>
+              <div className="p-4 rounded-2xl" style={{ background: 'rgba(38,166,154,0.06)', border: '1px solid rgba(38,166,154,0.2)' }}>
+                <p className="text-sm font-medium mb-1" style={{ color: 'var(--accent)' }}>
+                  {SOURCE_TYPES.find(s => s.id === sourceType)?.label} — Kaynak Tablo Rolleri
+                </p>
+                <p className="text-xs" style={{ color: 'var(--text-3)' }}>
+                  Her tablonun kaynak sistemdeki <strong>rolünü</strong> belirleyin. AI bu bilgiyi kullanarak entity DB'ye uygun mirror şema oluşturacak.
+                  Sistem tablo isimlerinden otomatik öneri yaptı — doğrulayın ve düzeltin.
+                </p>
+              </div>
+
               <div className="rounded-2xl overflow-hidden" style={{ border: '1px solid var(--border)', maxHeight: 480, overflowY: 'auto' }}>
                 <table className="w-full text-sm">
                   <thead style={{ position: 'sticky', top: 0, zIndex: 1 }}>
                     <tr style={{ background: 'var(--surface-2)' }}>
-                      <th className="px-4 py-3 text-left font-medium" style={{ color: 'var(--text-2)' }}>Kaynak Modül</th>
+                      <th className="px-4 py-3 text-left font-medium" style={{ color: 'var(--text-2)' }}>Kaynak Tablo</th>
                       <th className="px-4 py-3 text-right font-medium" style={{ color: 'var(--text-2)' }}>Kayıt</th>
-                      <th className="px-4 py-3 text-left font-medium" style={{ color: 'var(--text-2)' }}>Hedef Tablo</th>
+                      <th className="px-4 py-3 text-left font-medium" style={{ color: 'var(--text-2)' }}>Kaynak Sistemdeki Rolü</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {modules.map((mod, i) => (
-                      <tr key={i} style={{ borderTop: '1px solid var(--border)' }}>
-                        <td className="px-4 py-2.5">
-                          <div className="font-medium" style={{ color: 'var(--text-1)' }}>{mod.label ?? mod.name}</div>
-                          <div className="text-xs font-mono" style={{ color: 'var(--text-3)' }}>{mod.name}</div>
-                        </td>
-                        <td className="px-4 py-2.5 text-right text-sm" style={{ color: 'var(--text-3)' }}>
-                          {mod.recordCount?.toLocaleString() ?? '—'}
-                        </td>
-                        <td className="px-4 py-2.5">
-                          <select
-                            value={userMappings[mod.name] ?? ''}
-                            onChange={e => setUserMappings(prev => ({ ...prev, [mod.name]: e.target.value }))}
-                            className="w-full px-3 py-2 rounded-xl text-sm"
-                            style={{ background: 'var(--surface-modal)', border: '1px solid var(--border)', color: 'var(--text-1)', outline: 'none' }}>
-                            {TARGET_TABLE_OPTIONS.map(opt => (
-                              <option key={opt.value} value={opt.value} style={{ background: 'var(--surface-modal)', color: 'var(--text-1)' }}>
-                                {opt.label}
-                              </option>
-                            ))}
-                          </select>
-                        </td>
-                      </tr>
-                    ))}
+                    {modules.map((mod, i) => {
+                      const role = userMappings[mod.name] ?? ''
+                      return (
+                        <tr key={i} style={{ borderTop: '1px solid var(--border)' }}>
+                          <td className="px-4 py-2.5">
+                            <div className="font-mono font-medium text-sm" style={{ color: 'var(--text-1)' }}>{mod.name}</div>
+                            <div className="text-xs" style={{ color: 'var(--text-3)' }}>{mod.fields?.length ?? 0} kolon</div>
+                          </td>
+                          <td className="px-4 py-2.5 text-right text-sm" style={{ color: 'var(--text-3)' }}>
+                            {mod.recordCount?.toLocaleString() ?? '—'}
+                          </td>
+                          <td className="px-4 py-2.5">
+                            <select
+                              value={role}
+                              onChange={e => setUserMappings(prev => ({ ...prev, [mod.name]: e.target.value }))}
+                              className="w-full px-3 py-2 rounded-xl text-sm"
+                              style={{ background: role ? ROLE_COLORS[role] ?? 'var(--surface-modal)' : 'var(--surface-modal)', border: '1px solid var(--border)', color: 'var(--text-1)', outline: 'none' }}>
+                              {roleOptions.map(opt => (
+                                <option key={opt.value} value={opt.value}
+                                  style={{ background: 'var(--surface-modal)', color: 'var(--text-1)' }}
+                                  title={opt.hint}>
+                                  {opt.label}
+                                </option>
+                              ))}
+                            </select>
+                            {role && (
+                              <p className="text-[11px] mt-1" style={{ color: 'var(--text-3)' }}>
+                                {roleOptions.find(r => r.value === role)?.hint}
+                              </p>
+                            )}
+                          </td>
+                        </tr>
+                      )
+                    })}
                   </tbody>
                 </table>
               </div>
               <p className="text-xs" style={{ color: 'var(--text-3)' }}>
-                Eşleşen modül: {Object.values(userMappings).filter(Boolean).length} / {modules.length}
+                Rol atanan tablo: {assignedCount} / {modules.length} — atlananlar hariç
               </p>
             </div>
           )}
@@ -587,7 +685,7 @@ export function UniversalConnectorWizard({ onClose, onDone }: { onClose: () => v
                 <div className="mt-4 p-4 rounded-2xl flex items-center gap-3" style={{ background: 'rgba(38,166,154,0.1)', border: '1px solid var(--accent)' }}>
                   <CheckCircle size={16} style={{ color: 'var(--accent)' }} />
                   <span className="text-sm font-medium" style={{ color: 'var(--accent)' }}>
-                    Konnektör hazır — {connector.mappings.filter(m => m.targetTable).length} modül eşleşti.
+                    Mirror şema hazır — {connector.mappings.filter(m => m.targetTable).length} tablo eşleşti.
                   </span>
                 </div>
               )}
@@ -604,7 +702,7 @@ export function UniversalConnectorWizard({ onClose, onDone }: { onClose: () => v
                     <div key={mod.sourceModule}>
                       <div className="px-4 py-2 text-xs font-semibold flex items-center justify-between"
                         style={{ background: 'var(--surface-2)', borderBottom: '1px solid var(--border)', color: 'var(--text-2)' }}>
-                        <span>{mod.sourceModule}</span>
+                        <span className="font-mono">{mod.sourceModule}</span>
                         <span className="font-mono" style={{ color: 'var(--accent)' }}>→ {mod.targetTable}</span>
                       </div>
                       <table className="w-full text-xs">
@@ -637,9 +735,8 @@ export function UniversalConnectorWizard({ onClose, onDone }: { onClose: () => v
                   ))}
                 </div>
               </div>
-
               <div className="space-y-3">
-                <h3 className="text-sm font-semibold" style={{ color: 'var(--text-1)' }}>DB Schema Önizleme</h3>
+                <h3 className="text-sm font-semibold" style={{ color: 'var(--text-1)' }}>Entity DB Mirror Önizleme</h3>
                 <div className="space-y-3" style={{ maxHeight: 420, overflowY: 'auto' }}>
                   {Object.entries(schemaPreview).map(([table, { mapped, custom }]) => (
                     <div key={table} className="rounded-2xl p-4" style={{ background: 'var(--surface-2)', border: '1px solid var(--border)' }}>
@@ -657,24 +754,24 @@ export function UniversalConnectorWizard({ onClose, onDone }: { onClose: () => v
                       )}
                       {custom.length > 0 && (
                         <div>
-                          <p className="text-xs mb-1" style={{ color: 'var(--text-3)' }}>custom_fields'e gidecek:</p>
+                          <p className="text-xs mb-1" style={{ color: 'var(--text-3)' }}>custom_fields:</p>
                           <div className="flex flex-wrap gap-1">
                             {custom.slice(0, 8).map(f => (
                               <span key={f} className="px-2 py-0.5 rounded-lg text-xs font-mono"
                                 style={{ background: 'var(--surface-3)', color: 'var(--text-3)', border: '1px solid var(--border)' }}>{f}</span>
                             ))}
-                            {custom.length > 8 && <span className="text-xs px-2 py-0.5" style={{ color: 'var(--text-3)' }}>+{custom.length - 8} daha</span>}
+                            {custom.length > 8 && <span className="text-xs px-2 py-0.5" style={{ color: 'var(--text-3)' }}>+{custom.length - 8}</span>}
                           </div>
                         </div>
                       )}
                     </div>
                   ))}
                   {Object.keys(schemaPreview).length === 0 && (
-                    <p className="text-sm text-center py-8" style={{ color: 'var(--text-3)' }}>Hiçbir modül eşleştirilmedi.</p>
+                    <p className="text-sm text-center py-8" style={{ color: 'var(--text-3)' }}>Hiçbir tablo eşleştirilmedi.</p>
                   )}
                 </div>
                 <div className="p-3 rounded-xl text-xs" style={{ background: 'rgba(38,166,154,0.08)', border: '1px solid rgba(38,166,154,0.2)', color: 'var(--text-3)' }}>
-                  {connector.aiGenerated !== false ? '✓ AI ile oluşturuldu' : '⚠ Regex tabanlı'} — v{connector.version}
+                  {connector.aiGenerated !== false ? '✓ AI mirror şema' : '⚠ Regex tabanlı'} — v{connector.version}
                 </div>
               </div>
             </div>
@@ -691,7 +788,8 @@ export function UniversalConnectorWizard({ onClose, onDone }: { onClose: () => v
 
           <div className="flex gap-3">
             {step === 1 && (
-              <button disabled={!sourceType || sourceType !== 'database'}
+              <button
+                disabled={!sourceType || sourceType === 'crm-api'}
                 onClick={() => setStep(2)}
                 className="flex items-center gap-2 px-6 py-2.5 rounded-2xl text-sm font-medium disabled:opacity-40"
                 style={{ background: 'var(--accent)', color: '#fff' }}>
@@ -721,7 +819,7 @@ export function UniversalConnectorWizard({ onClose, onDone }: { onClose: () => v
                 <button onClick={initMappings}
                   className="flex items-center gap-2 px-6 py-2.5 rounded-2xl text-sm font-medium"
                   style={{ background: 'var(--accent)', color: '#fff' }}>
-                  Modülleri Eşleştir <ChevronRight size={16} />
+                  Rolleri Belirle <ChevronRight size={16} />
                 </button>
               </>
             )}
@@ -734,10 +832,10 @@ export function UniversalConnectorWizard({ onClose, onDone }: { onClose: () => v
             )}
             {step === 4 && (
               <button onClick={startAiGeneration}
-                disabled={!Object.values(userMappings).some(Boolean)}
+                disabled={assignedCount === 0}
                 className="flex items-center gap-2 px-6 py-2.5 rounded-2xl text-sm font-medium disabled:opacity-40"
                 style={{ background: 'var(--forest)', color: '#fff' }}>
-                <Zap size={14} /> AI Konnektör Üret
+                <Zap size={14} /> AI Mirror Üret
               </button>
             )}
             {step === 5 && aiDone && (

@@ -771,7 +771,7 @@ export function UniversalConnectorWizard({ onClose, onDone }: { onClose: () => v
                   )}
                 </div>
                 <div className="p-3 rounded-xl text-xs" style={{ background: 'rgba(38,166,154,0.08)', border: '1px solid rgba(38,166,154,0.2)', color: 'var(--text-3)' }}>
-                  {connector.aiGenerated !== false ? '✓ AI mirror şema' : '⚠ Regex tabanlı'} — v{connector.version}
+                  {connector.aiGenerated !== false ? '✓ AI mirror şema' : '✓ Mirror şema'} — v{connector.version}
                 </div>
               </div>
             </div>

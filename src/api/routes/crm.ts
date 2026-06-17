@@ -588,8 +588,20 @@ export const crmRoutes: FastifyPluginAsync = async (app) => {
       reply.raw.writeHead(401); reply.raw.end('Unauthorized'); return
     }
 
-    let userMappings: Record<string, string | null> = {}
-    try { if (m) userMappings = JSON.parse(decodeURIComponent(m)) } catch { /* ignore */ }
+    // Frontend sends { roles: { tableName: role }, sourceSystemType: 'crm-db' }
+    let roles: Record<string, string> = {}
+    let sourceSystemType = 'generic'
+    try {
+      if (m) {
+        const parsed = JSON.parse(decodeURIComponent(m))
+        if (parsed && typeof parsed.roles === 'object' && parsed.roles !== null) {
+          roles = parsed.roles
+          sourceSystemType = parsed.sourceSystemType ?? 'generic'
+        } else {
+          roles = parsed  // backward compat: flat mapping
+        }
+      }
+    } catch { /* ignore */ }
 
     const conn = await db.query.crmConnections.findFirst({ where: eq(crmConnections.id, id) })
     if (!conn) { reply.raw.writeHead(404); reply.raw.end(); return }
@@ -613,16 +625,21 @@ export const crmRoutes: FastifyPluginAsync = async (app) => {
       const cached = await redis.get(cacheKey)
       const allModules: any[] = cached ? JSON.parse(cached) : []
 
-      const mappedModules = allModules.filter(mod => userMappings[mod.name])
-      sendSSE('progress', `${mappedModules.length} modül analiz edilecek`, 5)
+      // Only include tables with a non-empty role ('' = skip/Atla)
+      const mappedModules = allModules.filter(mod =>
+        roles[mod.name] !== undefined && roles[mod.name] !== ''
+      )
+      sendSSE('progress', `${mappedModules.length} tablo mirror edilecek (${sourceSystemType})`, 5)
 
       const promptModules: any[] = []
       for (let i = 0; i < mappedModules.length; i++) {
         const mod = mappedModules[i]!
-        sendSSE('progress', `"${mod.label ?? mod.name}" hazırlanıyor — ${mod.fields?.length ?? 0} alan`, 5 + Math.round((i / Math.max(mappedModules.length, 1)) * 25))
+        const role = roles[mod.name] ?? 'mirror_direct'
+        sendSSE('progress', `"${mod.label ?? mod.name}" hazırlanıyor [${role}] — ${mod.fields?.length ?? 0} alan`, 5 + Math.round((i / Math.max(mappedModules.length, 1)) * 25))
         promptModules.push({
           sourceModule: mod.name,
-          targetTable: userMappings[mod.name],
+          targetTable: mod.name,  // mirror: entity DB'de aynı isimde tablo
+          role,
           fields: (mod.fields ?? []).slice(0, 50),
           sampleRows: (mod.sampleRows ?? []).slice(0, 5),
         })
@@ -630,35 +647,32 @@ export const crmRoutes: FastifyPluginAsync = async (app) => {
 
       sendSSE('progress', 'AI prompt hazırlandı, OpenRouter\'a gönderiliyor...', 30)
 
-      const TARGET_SCHEMA_DETAIL = `
-crm_contacts: first_name, last_name, full_name, email, phone, mobile, company_name, job_title, department, website, address_line1, city, state, country(2-char ISO), postal_code, contact_type, lead_source, lead_status
-crm_companies: name, legal_name, industry, website, email, phone, city, country(2-char ISO), tax_number, tax_office
-crm_deals: title, deal_value(numeric), currency(3-char), stage, probability(0-100), expected_close_date
-erp_products: name, sku, barcode, category, description, cost_price(numeric), sale_price(numeric), currency, stock_quantity(numeric), unit`
-
       const openrouterKey = env.OPENROUTER_API_KEY
       let connectorConfig: any = null
 
       if (openrouterKey && promptModules.length > 0) {
         try {
-          const prompt = `You are a data integration expert. The user has already decided which source module maps to which target table. Your ONLY job is field-level mapping — do NOT change targetTable values.
+          const prompt = `You are a data integration expert building a mirror schema.
 
-USER MODULE MAPPINGS (fixed):
-${promptModules.map(m => `- "${m.sourceModule}" → ${m.targetTable}`).join('\n')}
+SOURCE SYSTEM TYPE: ${sourceSystemType}
+STRATEGY: Mirror each source table AS-IS into entity DB. The role describes what the table contains.
 
-TARGET SCHEMA:
-${TARGET_SCHEMA_DETAIL}
+TABLES TO MIRROR:
+${promptModules.map(m => `- "${m.sourceModule}" (role: ${m.role}) → entity DB table: "${m.targetTable}"`).join('\n')}
 
-SOURCE MODULES WITH SAMPLE DATA:
-${JSON.stringify(promptModules, null, 2)}
+For each table, map every source field to itself (direct copy, same name). Only change transform when you detect:
+- phone/mobile/tel fields or values like "+90..." → phone_e164
+- email fields or values containing "@" → email_lower
+- country fields → country_iso
+- price/amount/cost fields with currency symbols (₺$€) in sample → currency_strip
+- name/title fields needing proper case → name_case
+- everything else → direct
 
-Rules:
-1. targetTable is fixed — copy it exactly as given.
-2. For each source field, find the best targetField using sample data values (not just field name).
-3. Choose transform: direct, phone_e164(for phone numbers), country_iso(2-char country), name_case(proper case), email_lower(emails), currency_strip(monetary amounts), custom(no match).
-4. Unmatched fields: targetField="custom_fields", transform="custom", customFieldKey=sourceFieldName.
-5. Output ONLY valid JSON, no markdown:
-{"mappings":[{"sourceModule":"str","targetTable":"str","fields":[{"sourceField":"str","targetField":"str","transform":"direct","customFieldKey":null}]}],"unmappedFields":[]}`
+SOURCE FIELDS WITH SAMPLES:
+${JSON.stringify(promptModules.map(m => ({ table: m.sourceModule, role: m.role, fields: m.fields.slice(0, 20).map((f: any) => ({ name: f.name, type: f.type, sample: f.sampleValues?.[0] })) })), null, 2)}
+
+Output ONLY valid JSON (no markdown):
+{"mappings":[{"sourceModule":"str","targetTable":"str","role":"str","fields":[{"sourceField":"str","targetField":"str","transform":"direct","customFieldKey":null}]}],"unmappedFields":[]}`
 
           const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
             method: 'POST',
@@ -679,20 +693,22 @@ Rules:
             const parsed = JSON.parse(jsonMatch[0])
             connectorConfig = {
               version: 2, generatedAt: new Date().toISOString(), sourceType: conn.crmType,
-              userMappings, mappings: parsed.mappings ?? [], unmappedFields: parsed.unmappedFields ?? [], aiGenerated: true,
+              sourceSystemType, roles,
+              mappings: parsed.mappings ?? [], unmappedFields: parsed.unmappedFields ?? [], aiGenerated: true,
             }
           }
         } catch (err) {
-          sendSSE('progress', `AI hatası — fallback kullanılıyor`, 80)
+          sendSSE('progress', `AI hatası — mirror konnektör oluşturuluyor`, 80)
           console.error('[generate-connector/stream] AI error:', err)
         }
       }
 
       if (!connectorConfig) {
-        sendSSE('progress', 'Regex tabanlı konnektör oluşturuluyor...', 80)
+        sendSSE('progress', 'Mirror konnektör oluşturuluyor...', 80)
         connectorConfig = {
           version: 2, generatedAt: new Date().toISOString(), sourceType: conn.crmType,
-          userMappings, mappings: buildFallbackMappingsFromUserMap(promptModules), unmappedFields: [], aiGenerated: false,
+          sourceSystemType, roles,
+          mappings: buildMirrorMappings(promptModules), unmappedFields: [], aiGenerated: false,
         }
       }
 
@@ -1154,6 +1170,24 @@ const FIELD_MAP_PATTERNS: Record<string, { target: string; transform: string }> 
   tax_number: { target: 'tax_number', transform: 'direct' },
   category:   { target: 'category',   transform: 'direct' },
   description:{ target: 'description', transform: 'direct' },
+}
+
+function buildMirrorMappings(modules: Array<{ sourceModule: string; targetTable: string; role: string; fields: any[] }>) {
+  return modules.map(mod => ({
+    sourceModule: mod.sourceModule,
+    targetTable: mod.targetTable,
+    role: mod.role,
+    fields: (mod.fields ?? []).map((f: any) => {
+      const name = (f.name ?? '').toLowerCase()
+      const sample = String(f.sampleValues?.[0] ?? '')
+      let transform = 'direct'
+      if (/phone|mobile|tel/.test(name) || /^\+?[0-9()\s\-]{7,}$/.test(sample)) transform = 'phone_e164'
+      else if (/\bemail\b|^mail$/.test(name) || sample.includes('@')) transform = 'email_lower'
+      else if (/\bcountry\b/.test(name)) transform = 'country_iso'
+      else if ((/price|amount|cost|value/.test(name)) && /[₺$€£]/.test(sample)) transform = 'currency_strip'
+      return { sourceField: f.name, targetField: f.name, transform, customFieldKey: null }
+    }),
+  }))
 }
 
 function buildFallbackMappingsFromUserMap(promptModules: Array<{ sourceModule: string; targetTable: string; fields: any[] }>) {

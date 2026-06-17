@@ -10,6 +10,13 @@ import { redis } from '../../lib/redis.js'
 import { db } from '../../lib/db.js'
 import { crmConnections, accountingConnections, kibiEntities, tenants } from '../../../db/schema.js'
 import { encryptJson } from '../../lib/crypto.js'
+import { createHmac, timingSafeEqual } from 'crypto'
+
+function verifyMetaSignature(rawBody: Buffer, signature: string | undefined, secret: string): boolean {
+  if (!signature) return false
+  const expected = `sha256=${createHmac('sha256', secret).update(rawBody).digest('hex')}`
+  try { return timingSafeEqual(Buffer.from(signature), Buffer.from(expected)) } catch { return false }
+}
 
 export const webhookRoutes: FastifyPluginAsync = async (app) => {
 
@@ -234,6 +241,13 @@ export const webhookRoutes: FastifyPluginAsync = async (app) => {
 
   // ── WhatsApp Cloud API — incoming messages (POST) ─────────────────────────
   app.post('/whatsapp', async (req, reply) => {
+    const sig = req.headers['x-hub-signature-256'] as string | undefined
+    if (env.NODE_ENV === 'production') {
+      const raw = (req as any).rawBody as Buffer | undefined
+      if (!raw || !verifyMetaSignature(raw, sig, env.APP_SECRET)) {
+        return reply.status(403).send('Invalid signature')
+      }
+    }
     reply.status(200).send('OK')  // must respond < 20s
 
     const body  = req.body as any
@@ -290,6 +304,13 @@ export const webhookRoutes: FastifyPluginAsync = async (app) => {
 
   // ── Instagram Messaging — incoming DMs (POST) ─────────────────────────────
   app.post('/instagram', async (req, reply) => {
+    const sig = req.headers['x-hub-signature-256'] as string | undefined
+    if (env.NODE_ENV === 'production') {
+      const raw = (req as any).rawBody as Buffer | undefined
+      if (!raw || !verifyMetaSignature(raw, sig, env.APP_SECRET)) {
+        return reply.status(403).send('Invalid signature')
+      }
+    }
     reply.status(200).send('OK')
 
     const body  = req.body as any

@@ -15,6 +15,7 @@ import {
 import { eq, and, sql, desc }       from 'drizzle-orm'
 import { runEntityAgent }           from '../../engine/ai/entity-agent.js'
 import { escalateToHuman, shouldEscalate } from '../../engine/ai/escalation-manager.js'
+import { checkMessageLimit }        from '../../lib/plan-limits.js'
 
 function isUUID(s: string | null | undefined): boolean {
   return !!s && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)
@@ -88,7 +89,7 @@ const escalateSchema = z.object({
 export const entityAiRoutes: FastifyPluginAsync = async (app) => {
 
   // ── POST /entity-ai/chat ──────────────────────────────────────────────────
-  app.post('/chat', { onRequest: [app.authenticate] }, async (req, reply) => {
+  app.post('/chat', { onRequest: [app.authenticate], config: { rateLimit: { max: 20, timeWindow: '1 minute' } } }, async (req, reply) => {
     const user   = req.user as { sub: string; tenantId: string }
     const parsed = chatSchema.safeParse(req.body)
     if (!parsed.success) return reply.status(400).send({ error: parsed.error.flatten() })
@@ -97,6 +98,9 @@ export const entityAiRoutes: FastifyPluginAsync = async (app) => {
 
     const entity = await resolveEntity(user.tenantId)
     if (!entity) return reply.status(404).send({ error: 'Entity bulunamadı' })
+
+    const limitCheck = await checkMessageLimit(user.tenantId)
+    if (!limitCheck.allowed) return reply.status(429).send({ error: limitCheck.reason })
 
     const sessionId = await getOrCreateSession(entity.id, user.sub, reqSessionId)
 

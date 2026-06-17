@@ -1,5 +1,5 @@
 import { useEffect, useState, useRef, useCallback } from 'react'
-import { X, RefreshCw, Database, Play, CheckCircle2, AlertCircle, Loader2 } from 'lucide-react'
+import { X, RefreshCw, Database, Play, CheckCircle2, AlertCircle, Loader2, LayoutGrid, List } from 'lucide-react'
 import { useSearchParams } from 'react-router-dom'
 import api from '../lib/api'
 
@@ -22,6 +22,7 @@ export default function Modules() {
   const [syncStates,     setSyncStates]     = useState<Record<string, SyncState>>({})
   const [recentJobs,     setRecentJobs]     = useState<BulkJob[]>([])
   const [polling,        setPolling]        = useState(false)
+  const [viewMode,       setViewMode]       = useState<'table' | 'kanban'>('table')
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   useEffect(() => {
@@ -220,9 +221,23 @@ export default function Modules() {
           {selectedModule && !syncStates[selectedModule] && (
             <span className="text-xs" style={{ color: 'var(--text-3)' }}>{records.length} kayıt (yerel)</span>
           )}
-          <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Ara..."
-            className="ml-auto px-3 py-1.5 rounded-lg text-sm outline-none w-44"
-            style={{ background: 'var(--surface-2)', color: 'var(--text-1)', border: '1px solid var(--border)' }} />
+          <div className="ml-auto flex items-center gap-2">
+            <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Ara..."
+              className="px-3 py-1.5 rounded-lg text-sm outline-none w-36"
+              style={{ background: 'var(--surface-2)', color: 'var(--text-1)', border: '1px solid var(--border)' }} />
+            <div className="flex gap-0.5 p-0.5 rounded-lg" style={{ background: 'var(--surface-2)', border: '1px solid var(--border)' }}>
+              <button onClick={() => setViewMode('table')} title="Tablo"
+                className="p-1.5 rounded-md transition-all"
+                style={{ background: viewMode === 'table' ? 'var(--surface-modal)' : 'transparent', color: viewMode === 'table' ? 'var(--accent)' : 'var(--text-3)' }}>
+                <List size={13} />
+              </button>
+              <button onClick={() => setViewMode('kanban')} title="Kanban"
+                className="p-1.5 rounded-md transition-all"
+                style={{ background: viewMode === 'kanban' ? 'var(--surface-modal)' : 'transparent', color: viewMode === 'kanban' ? 'var(--accent)' : 'var(--text-3)' }}>
+                <LayoutGrid size={13} />
+              </button>
+            </div>
+          </div>
         </div>
 
         {/* Content */}
@@ -246,6 +261,8 @@ export default function Modules() {
                 <div className="flex items-center justify-center h-32" style={{ color: 'var(--text-3)' }}>
                   <Loader2 size={20} className="animate-spin" />
                 </div>
+              ) : viewMode === 'kanban' ? (
+                <KanbanBoard records={filtered} fields={fields} onSelect={setDrawer} />
               ) : (
                 <table className="w-full text-sm">
                   <thead className="sticky top-0" style={{ background: 'var(--surface-2)' }}>
@@ -315,6 +332,89 @@ export default function Modules() {
               ))}
             </div>
           </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ─── Kanban Board ─────────────────────────────────────────────────────────────
+
+const STAGE_FIELD_CANDIDATES = [
+  'Stage', 'Deal_Stage', 'Lead_Status', 'stage', 'status', 'Status',
+  'Pipeline_Stage', 'Opportunity_Stage', 'Contact_Status',
+]
+
+const STAGE_COLORS: Record<string, string> = {
+  'Qualification':         'rgba(99,102,241,0.15)',
+  'Value Proposition':     'rgba(34,197,94,0.12)',
+  'Needs Analysis':        'rgba(245,158,11,0.12)',
+  'Proposal/Price Quote':  'rgba(239,68,68,0.12)',
+  'Closed Won':            'rgba(45,138,107,0.18)',
+  'Closed Lost':           'rgba(107,114,128,0.12)',
+  'New':                   'rgba(99,102,241,0.12)',
+  'Working':               'rgba(245,158,11,0.12)',
+  'Converted':             'rgba(45,138,107,0.18)',
+  'Unqualified':           'rgba(107,114,128,0.12)',
+}
+
+function KanbanBoard({ records, fields, onSelect }: { records: any[]; fields: any[]; onSelect: (r: any) => void }) {
+  const stageField = STAGE_FIELD_CANDIDATES.find(f => fields.some((fld: any) => fld.apiName === f || fld.fieldLabel === f))
+  const titleField = fields.find((f: any) => ['Deal_Name', 'Full_Name', 'Subject', 'Name', 'title', 'name'].includes(f.apiName))?.apiName
+    ?? fields[0]?.apiName
+
+  if (!stageField) {
+    return (
+      <div className="flex items-center justify-center h-48" style={{ color: 'var(--text-3)' }}>
+        <div className="text-center">
+          <LayoutGrid size={28} className="mx-auto mb-2 opacity-30" />
+          <p className="text-sm">Bu modül Kanban görünümünü desteklemiyor</p>
+          <p className="text-xs mt-1 opacity-60">Stage / Status alanı bulunamadı</p>
+        </div>
+      </div>
+    )
+  }
+
+  const columns: Record<string, any[]> = {}
+  for (const r of records) {
+    const stage = String(r[stageField] ?? 'Diğer')
+    if (!columns[stage]) columns[stage] = []
+    columns[stage].push(r)
+  }
+
+  return (
+    <div className="flex gap-3 p-4 overflow-x-auto h-full">
+      {Object.entries(columns).map(([stage, items]) => (
+        <div key={stage} className="flex-shrink-0 w-60 flex flex-col">
+          <div className="flex items-center justify-between px-3 py-2 mb-2 rounded-lg"
+            style={{ background: STAGE_COLORS[stage] ?? 'rgba(99,102,241,0.1)', border: '1px solid rgba(99,102,241,0.15)' }}>
+            <span className="text-xs font-semibold truncate" style={{ color: 'var(--text-1)' }}>{stage}</span>
+            <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded-full flex-shrink-0"
+              style={{ background: 'rgba(99,102,241,0.15)', color: '#818cf8' }}>
+              {items.length}
+            </span>
+          </div>
+          <div className="space-y-2 overflow-y-auto flex-1 pr-0.5" style={{ maxHeight: 'calc(100vh - 280px)' }}>
+            {items.map((r, i) => (
+              <div key={i} onClick={() => onSelect(r)}
+                className="p-3 rounded-xl cursor-pointer transition-all hover:scale-[1.01]"
+                style={{ background: 'var(--surface-modal)', border: '1px solid var(--border)' }}>
+                <p className="text-xs font-medium truncate mb-1" style={{ color: 'var(--text-1)' }}>
+                  {String(r[titleField] ?? '—')}
+                </p>
+                {fields.slice(1, 4).filter((f: any) => f.apiName !== stageField && f.apiName !== titleField).map((f: any) => (
+                  <p key={f.apiName} className="text-[10px] truncate" style={{ color: 'var(--text-3)' }}>
+                    {f.fieldLabel || f.apiName}: {String(r[f.apiName] ?? '')}
+                  </p>
+                ))}
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
+      {Object.keys(columns).length === 0 && (
+        <div className="flex-1 flex items-center justify-center" style={{ color: 'var(--text-3)' }}>
+          <p className="text-sm">Kayıt yok</p>
         </div>
       )}
     </div>

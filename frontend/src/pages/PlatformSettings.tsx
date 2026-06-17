@@ -756,6 +756,114 @@ function PlatformVectorPanel({ isAdmin, showToast }: { isAdmin: boolean; showToa
               ))}
             </div>
       }
+
+      {/* KB Arama Testi */}
+      <KbSearchTest />
+
+      {/* Sinyal İstatistikleri */}
+      <KbSignalStats />
+    </div>
+  )
+}
+
+function KbSearchTest() {
+  const [query, setQuery] = useState('')
+  const [results, setResults] = useState<any[]>([])
+  const [searching, setSearching] = useState(false)
+  const [searched, setSearched] = useState(false)
+
+  const runSearch = async () => {
+    if (!query.trim()) return
+    setSearching(true); setSearched(false)
+    try {
+      const res = await api.post('/admin/kb-search', { query: query.trim(), limit: 5 })
+      setResults(res.data.results ?? [])
+    } catch { setResults([]) } finally {
+      setSearching(false); setSearched(true)
+    }
+  }
+
+  return (
+    <div className="mt-4 p-4 rounded-xl" style={{ background: 'var(--surface-modal-2)', border: '1px solid var(--border)' }}>
+      <h4 className="text-sm font-semibold mb-3" style={{ color: 'var(--text-1)' }}>KB Arama Testi</h4>
+      <div className="flex gap-2 mb-3">
+        <input
+          value={query}
+          onChange={e => setQuery(e.target.value)}
+          onKeyDown={e => e.key === 'Enter' && runSearch()}
+          placeholder="Arama sorgusu..."
+          className="flex-1 px-3 py-2 rounded-lg text-sm outline-none"
+          style={{ background: 'var(--surface-modal)', border: '1px solid var(--border)', color: 'var(--text-1)' }}
+        />
+        <button onClick={runSearch} disabled={searching || !query.trim()}
+          className="px-4 py-2 rounded-lg text-xs font-medium disabled:opacity-50"
+          style={{ background: 'linear-gradient(135deg, var(--accent), var(--forest))', color: '#fff' }}>
+          {searching ? '...' : 'Ara'}
+        </button>
+      </div>
+      {searched && (
+        <div className="space-y-2">
+          {results.length === 0
+            ? <p className="text-xs" style={{ color: 'var(--text-3)' }}>Sonuç bulunamadı</p>
+            : results.map((r: any, i: number) => (
+              <div key={i} className="p-3 rounded-lg" style={{ background: 'var(--surface-modal)', border: '1px solid var(--border)' }}>
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-xs font-medium" style={{ color: 'var(--text-1)' }}>{r.payload?.title ?? `Sonuç ${i + 1}`}</span>
+                  <span className="text-[10px] px-2 py-0.5 rounded-full" style={{ background: 'rgba(99,102,241,0.12)', color: '#818cf8' }}>
+                    Skor: {(r.score * 100).toFixed(1)}%
+                  </span>
+                </div>
+                <p className="text-xs line-clamp-2" style={{ color: 'var(--text-3)' }}>{r.payload?.content ?? ''}</p>
+              </div>
+            ))
+          }
+        </div>
+      )}
+    </div>
+  )
+}
+
+function KbSignalStats() {
+  const [stats, setStats] = useState<any>(null)
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    api.get('/admin/kb-signals').then(r => setStats(r.data)).catch(() => {}).finally(() => setLoading(false))
+  }, [])
+
+  if (loading) return null
+  if (!stats) return null
+
+  return (
+    <div className="mt-4 p-4 rounded-xl" style={{ background: 'var(--surface-modal-2)', border: '1px solid var(--border)' }}>
+      <h4 className="text-sm font-semibold mb-3" style={{ color: 'var(--text-1)' }}>Sinyal İstatistikleri</h4>
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        {[
+          { label: 'Toplam İstek', value: stats.total, color: '#818cf8' },
+          { label: 'Başarı Oranı', value: `${stats.successRate}%`, color: '#22c55e' },
+          { label: 'KB Yazılan', value: `${stats.kbWritten} (${stats.kbWrittenRate}%)`, color: 'var(--accent)' },
+          { label: 'Yönlendirilen', value: stats.escalated, color: '#f59e0b' },
+          { label: 'Ort. Güven', value: `${stats.avgConfidence}%`, color: '#a78bfa' },
+        ].map(s => (
+          <div key={s.label} className="p-3 rounded-lg" style={{ background: 'var(--surface-modal)' }}>
+            <p className="text-[10px] uppercase tracking-wider mb-1" style={{ color: 'var(--text-3)' }}>{s.label}</p>
+            <p className="text-lg font-bold" style={{ color: s.color }}>{s.value}</p>
+          </div>
+        ))}
+      </div>
+      {Object.keys(stats.byRole ?? {}).length > 0 && (
+        <div className="mt-3">
+          <p className="text-[10px] uppercase tracking-wider mb-2" style={{ color: 'var(--text-3)' }}>Rol Dağılımı</p>
+          <div className="flex flex-wrap gap-1.5">
+            {Object.entries(stats.byRole as Record<string, number>).map(([role, count]) => (
+              <span key={role} className="text-[10px] px-2 py-0.5 rounded-full"
+                style={{ background: 'rgba(99,102,241,0.12)', color: '#818cf8' }}>
+                {role}: {count}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   )
 }

@@ -196,6 +196,54 @@ export default function Dashboard() {
         </div>
       )}
 
+      {/* AI Intent Distribution */}
+      {aiStats?.aiActivity?.intentDistribution && (
+        <div className="mb-6 rounded-xl p-5" style={{ background: 'var(--surface-2)', border: '1px solid var(--border)' }}>
+          <div className="flex items-center justify-between mb-4">
+            <div>
+              <h3 className="font-semibold text-sm" style={{ color: 'var(--text-1)' }}>AI Niyet Dağılımı</h3>
+              <p className="text-xs mt-0.5" style={{ color: 'var(--text-3)' }}>Bu ay işlenen konuşmaların dağılımı</p>
+            </div>
+            <div className="text-xs px-2 py-1 rounded-lg" style={{ background: 'rgba(99,102,241,0.1)', color: '#818cf8' }}>
+              {aiStats.aiActivity.monthConversations} konuşma
+            </div>
+          </div>
+          <div className="space-y-2.5">
+            {[
+              { key: 'support',  label: 'Destek',    color: '#6366f1' },
+              { key: 'sales',    label: 'Satış',     color: '#22c55e' },
+              { key: 'info',     label: 'Bilgi',     color: '#f59e0b' },
+              { key: 'general',  label: 'Genel',     color: '#94a3b8' },
+            ].map(({ key, label, color }) => {
+              const pct = aiStats.aiActivity.intentDistribution[key] ?? 0
+              return (
+                <div key={key}>
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-xs" style={{ color: 'var(--text-2)' }}>{label}</span>
+                    <span className="text-xs font-medium" style={{ color }}>{pct}%</span>
+                  </div>
+                  <div className="h-2 rounded-full" style={{ background: 'var(--border)' }}>
+                    <div className="h-2 rounded-full transition-all" style={{ width: `${pct}%`, background: color }} />
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+          <div className="mt-4 grid grid-cols-3 gap-3">
+            {[
+              { label: 'Bugün',        value: aiStats.aiActivity.todayConversations },
+              { label: 'Yönlendirilen', value: aiStats.aiActivity.escalatedCount },
+              { label: 'KB Eklenen',   value: aiStats.aiActivity.kbEntriesAdded },
+            ].map(s => (
+              <div key={s.label} className="text-center p-2 rounded-lg" style={{ background: 'var(--surface-modal)' }}>
+                <p className="text-xs mb-0.5" style={{ color: 'var(--text-3)' }}>{s.label}</p>
+                <p className="text-lg font-bold" style={{ color: 'var(--text-1)' }}>{s.value ?? 0}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* CRM connections */}
         <div className="rounded-xl p-5" style={{ background: 'var(--surface-2)', border: '1px solid var(--border)' }}>

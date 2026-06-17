@@ -19,7 +19,7 @@ import { startImapPollers }   from './engine/imap-poller.js'
 import { startCrmScheduler }  from './engine/crm-sync/crm-scheduler.js'
 import { crmRoutes }        from './api/routes/crm.js'
 import { aiRoutes }         from './api/routes/ai.js'
-import { tenantRoutes }     from './api/routes/tenant.js'
+import { tenantRoutes, channelRoutes } from './api/routes/tenant.js'
 import { accountingRoutes } from './api/routes/accounting.js'
 import { supportRoutes }    from './api/routes/support.js'
 import { adminRoutes }         from './api/routes/admin.js'
@@ -105,6 +105,7 @@ await app.register(async (api) => {
   await api.register(notificationRoutes,  { prefix: '/notifications' })
   await api.register(walletRoutes,        { prefix: '/wallet' })
   await api.register(entityAiRoutes,      { prefix: '/entity-ai' })
+  await api.register(channelRoutes,       { prefix: '/channels' })
   await api.register(dashboardRoutes,     { prefix: '/dashboard' })
 }, { prefix: '/api/v1' })
 

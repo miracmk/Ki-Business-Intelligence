@@ -92,6 +92,17 @@ const CHANNEL_SCHEMAS: Record<string, ChannelSchema> = {
       { key: 'api_secret', label: 'API Secret / Auth Token', type: 'password' },
     ],
   },
+  portal: {
+    label: 'Portal Chat',
+    description: 'Web sitenize gömülü AI chat widget',
+    emoji: '💬',
+    fields: [
+      { key: 'widget_title', label: 'Widget Başlığı', type: 'text', placeholder: 'Destek Asistanı', help: 'Chat widget penceresinde görünen başlık' },
+      { key: 'greeting', label: 'Karşılama Mesajı', type: 'text', placeholder: 'Merhaba! Size nasıl yardımcı olabilirim?', help: 'Ziyaretçiye gösterilecek ilk mesaj' },
+      { key: 'primary_color', label: 'Ana Renk (HEX)', type: 'text', placeholder: '#6366f1', help: 'Widget buton ve header rengi' },
+      { key: 'allowed_domains', label: 'İzin Verilen Domain\'ler', type: 'text', placeholder: 'example.com,shop.example.com', help: 'Widget\'ın çalışacağı domain\'ler (virgülle ayırın)' },
+    ],
+  },
 }
 
 // ─── Static data ──────────────────────────────────────────────────────────────
@@ -851,6 +862,13 @@ export default function Settings() {
   const [dbTestResult, setDbTestResult]         = useState<{ ok: boolean; isReadOnly?: boolean; tables?: string[]; error?: string } | null>(null)
   const [dbSaving, setDbSaving]                 = useState(false)
 
+  const [planUsage, setPlanUsage]               = useState<any>(null)
+  const [allPlans, setAllPlans]                 = useState<any[]>([])
+  const [planLoading, setPlanLoading]           = useState(false)
+
+  const [webhookTestStatus, setWebhookTestStatus] = useState<Record<string, 'idle'|'testing'|'ok'|'error'>>({})
+  const [msgTemplates, setMsgTemplates]           = useState<Record<string, string>>({})
+
   const showSuccess = (msg: string) => { setSaveMsg(msg); setTimeout(() => setSaveMsg(''), 3000) }
 
   const loadData = async () => {
@@ -1043,9 +1061,23 @@ export default function Settings() {
     }
     if (activeTab === 'channels') {
       loadChannelConfigs()
+      api.get('/tenants/me').then(r => {
+        const tpl = r.data.tenant?.settings?.messageTemplates ?? {}
+        setMsgTemplates(tpl)
+      }).catch(() => {})
     }
     if (activeTab === 'team') {
       api.get('/tenants/me/members').then(r => setTeamMembers(r.data.members ?? [])).catch(() => {})
+    }
+    if (activeTab === 'plan') {
+      setPlanLoading(true)
+      Promise.all([
+        api.get('/tenants/plan').catch(() => ({ data: null })),
+        api.get('/tenants/plans').catch(() => ({ data: [] })),
+      ]).then(([usageRes, plansRes]) => {
+        setPlanUsage(usageRes.data)
+        setAllPlans(Array.isArray(plansRes.data) ? plansRes.data : [])
+      }).finally(() => setPlanLoading(false))
     }
   }, [activeTab])
 
@@ -1478,13 +1510,14 @@ export default function Settings() {
   }
 
   const tabs = [
-    { id: 'account',    label: 'Hesap',           icon: User },
-    { id: 'ai',         label: 'AI Modeli',        icon: Brain },
-    { id: 'crm',        label: 'CRM / ERP',        icon: Database },
-    { id: 'accounting', label: 'Muhasebe',         icon: CreditCard },
-    { id: 'channels',   label: 'Kanallar',         icon: MessageSquare },
-    { id: 'team',       label: 'Ekip',             icon: Users },
-    { id: 'security',   label: '2FA & Güvenlik',   icon: Shield },
+    { id: 'account',    label: 'Hesap',             icon: User },
+    { id: 'ai',         label: 'AI Modeli',          icon: Brain },
+    { id: 'crm',        label: 'CRM / ERP',          icon: Database },
+    { id: 'accounting', label: 'Muhasebe',           icon: CreditCard },
+    { id: 'channels',   label: 'Kanallar',           icon: MessageSquare },
+    { id: 'plan',       label: 'Plan & Kullanım',    icon: Zap },
+    { id: 'team',       label: 'Ekip',               icon: Users },
+    { id: 'security',   label: '2FA & Güvenlik',     icon: Shield },
   ]
 
   if (loading) {
@@ -2176,6 +2209,27 @@ export default function Settings() {
                       {isConfigured ? 'Düzenle' : 'Yapılandır'}
                     </button>
                     {isConfigured && (
+                      <button
+                        onClick={async () => {
+                          setWebhookTestStatus(s => ({ ...s, [key]: 'testing' }))
+                          try {
+                            await api.post(`/channels/${key}/test`)
+                            setWebhookTestStatus(s => ({ ...s, [key]: 'ok' }))
+                            setTimeout(() => setWebhookTestStatus(s => ({ ...s, [key]: 'idle' })), 3000)
+                          } catch {
+                            setWebhookTestStatus(s => ({ ...s, [key]: 'error' }))
+                            setTimeout(() => setWebhookTestStatus(s => ({ ...s, [key]: 'idle' })), 3000)
+                          }
+                        }}
+                        disabled={webhookTestStatus[key] === 'testing'}
+                        className="px-3 py-1.5 bg-[#222] hover:bg-[#2a2a2a] text-gray-400 rounded-lg text-xs disabled:opacity-50"
+                        title="Webhook Test Et">
+                        {webhookTestStatus[key] === 'testing' ? '...' :
+                         webhookTestStatus[key] === 'ok' ? '✓' :
+                         webhookTestStatus[key] === 'error' ? '✗' : 'Test'}
+                      </button>
+                    )}
+                    {isConfigured && (
                       <button onClick={() => deleteChannelConfig(key)}
                         className="px-3 py-1.5 bg-[#222] hover:bg-red-900/20 text-gray-400 hover:text-red-400 rounded-lg text-sm transition-colors">
                         <Trash2 size={14} />
@@ -2197,6 +2251,169 @@ export default function Settings() {
               )
             })}
           </div>
+
+          {/* Message templates */}
+          <div className="p-5 bg-[#111111] rounded-xl border border-[#2a2a2a]">
+            <h4 className="text-white font-medium text-sm mb-4">Mesaj Şablonları</h4>
+            <div className="space-y-3">
+              {[
+                { key: 'greeting', label: 'Karşılama' },
+                { key: 'away', label: 'Dışarıda / Kapalı' },
+                { key: 'escalation', label: 'İnsan Temsilciye Aktarım' },
+                { key: 'resolved', label: 'Çözüldü' },
+              ].map(t => (
+                <div key={t.key}>
+                  <label className="text-gray-400 text-xs mb-1 block">{t.label}</label>
+                  <input
+                    value={msgTemplates[t.key] ?? ''}
+                    onChange={e => setMsgTemplates(m => ({ ...m, [t.key]: e.target.value }))}
+                    placeholder={`${t.label} mesajı...`}
+                    className="w-full px-3 py-2 bg-[#0a0a0a] border border-[#2a2a2a] rounded-lg text-gray-300 text-sm outline-none focus:border-[#6366f1]"
+                  />
+                </div>
+              ))}
+            </div>
+            <div className="flex justify-end mt-4">
+              <button
+                onClick={async () => {
+                  try {
+                    await api.put('/tenants/me/settings', { messageTemplates: msgTemplates })
+                    showSuccess('Mesaj şablonları kaydedildi.')
+                  } catch (e: any) {
+                    setError(e.response?.data?.error || 'Kaydedilemedi')
+                  }
+                }}
+                className="flex items-center gap-2 px-4 py-2 bg-[#6366f1] hover:bg-[#4f46e5] text-white rounded-lg text-sm">
+                <Save size={14} /> Şablonları Kaydet
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Plan & Usage tab ── */}
+      {activeTab === 'plan' && (
+        <div className="space-y-6">
+          {planLoading ? (
+            <div className="p-8 text-center" style={{ color: 'var(--text-3)' }}>Yükleniyor...</div>
+          ) : planUsage ? (
+            <>
+              {/* Current plan header */}
+              <div className="p-6 rounded-2xl" style={{ background: 'var(--surface-modal)', border: '1px solid var(--border)' }}>
+                <div className="flex items-center justify-between mb-4">
+                  <div>
+                    <h3 className="font-semibold text-lg" style={{ color: 'var(--text-1)' }}>Mevcut Plan</h3>
+                    <p className="text-sm mt-0.5" style={{ color: 'var(--text-3)' }}>Bu ay kullanımınız</p>
+                  </div>
+                  <span className="px-3 py-1 rounded-full text-sm font-semibold"
+                    style={{ background: 'rgba(99,102,241,0.15)', color: '#818cf8', border: '1px solid rgba(99,102,241,0.3)' }}>
+                    {planUsage.plan?.displayName ?? planUsage.planName}
+                  </span>
+                </div>
+
+                {/* Usage bars */}
+                <div className="space-y-4">
+                  {[
+                    { label: 'Aylık Mesaj', key: 'monthlyMessages', unit: 'mesaj' },
+                    { label: 'Kullanıcı', key: 'users', unit: 'kullanıcı' },
+                    { label: 'Bağlantı', key: 'connections', unit: 'bağlantı' },
+                    { label: 'Depolama', key: 'storageMb', unit: 'MB' },
+                  ].map(({ label, key, unit }) => {
+                    const u = planUsage.usage?.[key]
+                    if (!u) return null
+                    const pct = u.pct ?? 0
+                    const barColor = pct >= 90 ? '#ef4444' : pct >= 70 ? '#f59e0b' : '#6366f1'
+                    return (
+                      <div key={key}>
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="text-sm" style={{ color: 'var(--text-2)' }}>{label}</span>
+                          <span className="text-xs" style={{ color: pct >= 90 ? '#ef4444' : 'var(--text-3)' }}>
+                            {u.used} / {u.limit === 999999 ? '∞' : u.limit} {unit} ({pct}%)
+                          </span>
+                        </div>
+                        <div className="w-full rounded-full h-2" style={{ background: 'var(--surface-2)' }}>
+                          <div className="h-2 rounded-full transition-all"
+                            style={{ width: `${Math.min(pct, 100)}%`, background: barColor }} />
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+
+                {/* Limit warnings */}
+                {planUsage.limitsHit?.length > 0 && (
+                  <div className="mt-4 p-3 rounded-xl flex items-start gap-2"
+                    style={{ background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.2)' }}>
+                    <AlertTriangle size={16} className="mt-0.5 flex-shrink-0" style={{ color: '#ef4444' }} />
+                    <div className="text-sm" style={{ color: '#f87171' }}>
+                      {planUsage.limitsHit.map((msg: string) => <p key={msg}>{msg}</p>)}
+                    </div>
+                  </div>
+                )}
+
+                {/* Plan features */}
+                <div className="mt-5 pt-5" style={{ borderTop: '1px solid var(--border)' }}>
+                  <p className="text-xs font-semibold uppercase tracking-wider mb-3" style={{ color: 'var(--text-3)' }}>Plan Özellikleri</p>
+                  <div className="grid grid-cols-2 gap-2 text-sm" style={{ color: 'var(--text-2)' }}>
+                    <div className="flex items-center gap-2">
+                      <CheckCircle size={14} style={{ color: '#22c55e' }} />
+                      <span>AI Modeller: <strong style={{ color: 'var(--text-1)' }}>{planUsage.plan?.aiModels}</strong></span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <CheckCircle size={14} style={{ color: '#22c55e' }} />
+                      <span>Destek SLA: <strong style={{ color: 'var(--text-1)' }}>{planUsage.plan?.supportSla}</strong></span>
+                    </div>
+                    {planUsage.plan?.channels?.map((ch: string) => (
+                      <div key={ch} className="flex items-center gap-2">
+                        <CheckCircle size={14} style={{ color: '#22c55e' }} />
+                        <span className="capitalize">{ch}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              {/* Plan comparison */}
+              {allPlans.length > 0 && (
+                <div className="p-6 rounded-2xl" style={{ background: 'var(--surface-modal)', border: '1px solid var(--border)' }}>
+                  <h3 className="font-semibold mb-4" style={{ color: 'var(--text-1)' }}>Plan Karşılaştırması</h3>
+                  <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                    {allPlans.map((p: any) => {
+                      const isCurrent = p.name === planUsage.planName
+                      return (
+                        <div key={p.name} className="p-4 rounded-xl"
+                          style={{
+                            background: isCurrent ? 'rgba(99,102,241,0.1)' : 'var(--surface-2)',
+                            border: isCurrent ? '1px solid rgba(99,102,241,0.4)' : '1px solid var(--border)',
+                          }}>
+                          <p className="font-semibold text-sm mb-1" style={{ color: isCurrent ? '#818cf8' : 'var(--text-1)' }}>
+                            {p.displayName}
+                            {isCurrent && <span className="ml-1 text-xs">(Aktif)</span>}
+                          </p>
+                          <p className="text-xs mb-2" style={{ color: 'var(--text-3)' }}>
+                            {p.monthlyMessages === 999999 ? 'Sınırsız' : p.monthlyMessages.toLocaleString()} mesaj/ay
+                          </p>
+                          <p className="text-xs" style={{ color: 'var(--text-3)' }}>{p.maxUsers === 999 ? 'Sınırsız' : p.maxUsers} kullanıcı</p>
+                          <p className="text-xs" style={{ color: 'var(--text-3)' }}>{p.maxConnections === 999 ? 'Sınırsız' : p.maxConnections} bağlantı</p>
+                          {!isCurrent && (
+                            <button className="mt-3 w-full py-1.5 rounded-lg text-xs font-medium"
+                              style={{ background: 'rgba(99,102,241,0.15)', color: '#818cf8', border: '1px solid rgba(99,102,241,0.3)' }}
+                              onClick={() => alert('Plan yükseltme için destek ile iletişime geçin.')}>
+                              Yükselt
+                            </button>
+                          )}
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+              )}
+            </>
+          ) : (
+            <div className="p-8 text-center rounded-2xl" style={{ background: 'var(--surface-modal)', border: '1px solid var(--border)', color: 'var(--text-3)' }}>
+              Plan bilgisi yüklenemedi.
+            </div>
+          )}
         </div>
       )}
 

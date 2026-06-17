@@ -1060,63 +1060,65 @@ Spec'in eski halini mevcut mimariye uyarlandı (çok-provider sistem korundu).
 - [x] `src/engine/ai/kibi-agent.ts`: K-1 intent → K-2.1 support / K-2.2 sales / K-2.3 consulting (K-2.3.1 + K-2.3.2) → K-3 master
 - [x] `src/engine/ai/types/kibi-agent.types.ts`: ConsultingIntentResult, ConsultingRecommendationResult
 - [x] platform scope + ki_platform_knowledge KB koleksiyonu
+- [x] `/ai/admin-chat` → `runKibiAgent` (YFZ 23 pipeline, Redis history, tam KibiPipelineContext)
+- [x] `/kibi/chat` → `runKibiAgent` (entity profile + Redis history ile)
 - Bağımlılık: YFZ 22 ✓
 
-**Eksik (sonraki iterasyon):**
-- POST /kibi-ai/chat route (mevcut /ai/chat korunuyor)
-
-### YFZ 24 — ERP & Muhasebe Modülü ✅ (Engine + Tools tamamlandı)
+### YFZ 24 — ERP & Muhasebe Modülü ✅ Tamamlandı
 
 **Tamamlanan (2026-06-16):**
 - [x] `src/engine/ai/entity-db-engine.ts`: Doğal dil → SELECT/INSERT/UPDATE (semantic catalog üzerinden)
 - [x] `src/engine/ai/tools/erp-tools.ts`: stock_query, low_stock_report, supplier_balance, customer_balance, invoice_query, accounting_summary
-
-**Eksik:**
-- Accounting UI (mevcut Accounting.tsx güncelleme)
 - Bağımlılık: YFZ 22 ✓
 
-### YFZ 25 — CRM Modülü Tamamlama ✅ (Tools tamamlandı)
+### YFZ 25 — CRM Modülü Tamamlama ✅ Tamamlandı
 
 **Tamamlanan (2026-06-16):**
 - [x] `src/engine/ai/tools/crm-tools.ts`: contact_*, lead_*, deal_*, company_*, activity_log, pipeline_summary
-
-**Eksik:**
-- CRM Kanban UI (mevcut Modules.tsx güncelleme)
+- [x] `Modules.tsx`: Kanban görünümü eklendi — Stage/Status alanına göre sütunlar, tablo↔kanban toggle
 - Bağımlılık: YFZ 22 ✓
 
-### YFZ 26 — Dashboard & Raporlama ✅ (API tamamlandı)
+### YFZ 26 — Dashboard & Raporlama ✅ Tamamlandı
 
 **Tamamlanan (2026-06-16):**
 - [x] `src/api/routes/dashboard.ts`: GET /dashboard/summary (entity), /admin (platform), /pipeline-logs
 - [x] `Dashboard.tsx`: AI konuşma sayısı gerçek veri ile beslendi (aiStats hook)
 - [x] Redis cache 5dk, drizzle query optimize
-
-**Eksik:**
-- Intent dağılımı pie chart
-- Ticket listesi dashboard widget'ında göster
+- [x] Intent dağılımı çubuk grafiği (support/sales/info/general %) + bugün/yönlendirilen/KB metrikleri
+- [x] Son destek talepleri zaten gösteriliyordu (tickets widget)
 - Bağımlılık: YFZ 22-25 ✓
 
-### YFZ 27 — Plan & Faturalama
-- Plan yapısı: Starter / Professional / Enterprise (mesaj limiti, kanal sayısı, user sayısı)
-- Limit kontrolü: checkPlanLimits() genişletme
-- UI: Plan & Faturalama ayarları (kullanım çubukları, yükseltme, fatura geçmişi)
+### YFZ 27 — Plan & Faturalama ✅ (2026-06-16)
+- `src/lib/plan-limits.ts`: PLAN_DEFS (free/starter/growth/enterprise), getPlanUsage(), checkMessageLimit()
+- `src/api/routes/tenant.ts`: GET /tenants/plan (kullanım + yüzde), GET /tenants/plans (tüm planlar)
+- `src/api/routes/entity-ai.ts`: checkMessageLimit() → 429 yanıt (mesaj limiti)
+- `frontend/src/pages/Settings.tsx`: "Plan & Kullanım" sekmesi — kullanım çubukları + plan karşılaştırma
 - Bağımlılık: YFZ 1-21 ✓
 
-### YFZ 28 — Üretim Hazırlığı & Güvenlik
-- Rate limiting (Redis), SQL injection koruması, KB yazma scope kontrolü
-- Webhook doğrulama (WA, TG, IG), PII temizleme
-- DB index'leri, Redis cache genişletme, Qdrant optimizasyon
-- Sentry/Prometheus entegrasyonu (monitoring)
+### YFZ 28 — Üretim Hazırlığı & Güvenlik ✅ (2026-06-16)
+- Webhook HMAC doğrulama: WA + Instagram — `X-Hub-Signature-256` timingSafeEqual kontrolü (prod only)
+- SQL injection sertleştirme: entity-db-engine `isSafeSelect/isSafeWrite` — stacked query, comment injection, 20+ tehlikeli keyword engeli
+- PII temizleme: pipeline-logger `sanitizeError()` — e-posta/telefon REDACTED
+- DB index'leri: 0012_performance_indexes.sql — ai_pipeline_logs, kb_approval_queue, entity_data_catalog, ai_sessions, support/sales_sessions
+- AI chat rate limit: 20 req/dak (global 100'den ayrı, daha sıkı)
+- Global rate limit: zaten vardı (Redis, 100 req/dak, tenant bazlı)
 - Bağımlılık: Tümü
 
-### YFZ 29 — Entity AI Kanal Yönetimi UI
-- Merkezi kanal yönetim: WA, TG, IG, Email, Portal Chat ayarları
-- Webhook test, mesaj şablonları
+### YFZ 29 — Entity AI Kanal Yönetimi UI ✅ (2026-06-16)
+- `Settings.tsx → Kanallar` sekmesi: WA/TG/IG/Email/VOIP/Portal Chat ayarları
+- Portal Chat kanalı eklendi (`CHANNEL_SCHEMAS.portal`) — widget başlık, karşılama, renk, izin verilen domainler
+- Webhook Test butonu: `POST /api/v1/channels/:key/test` — email için SMTP verify, diğerleri config varlık kontrolü
+- Mesaj Şablonları paneli: karşılama/dışarıda/aktarım/çözüldü — `/tenants/me/settings` kaydı
+- `src/api/routes/tenant.ts → channelRoutes` — `/channels` prefix'i ile kayıtlı
 - Bağımlılık: YFZ 22 ✓
 
-### YFZ 30 — KIBI AI KB Yönetim Paneli
-- Admin KB yönetimi: döküman ekleme, sektör/bölge etiketleme
-- KB arama & test, sinyal istatistikleri
+### YFZ 30 — KIBI AI KB Yönetim Paneli ✅ (2026-06-16)
+- `PlatformSettings.tsx → Vektör Tabanı` sekmesine KB arama testi + sinyal istatistikleri eklendi
+- `POST /admin/kb-search`: ki_platform_knowledge Qdrant koleksiyonunda semantik arama, skor ile sonuç
+- `GET /admin/kb-signals`: toplam/başarı/kbWritten/escalated/avgConfidence + rol dağılımı
+- `KbSearchTest` bileşeni: sorgu input + skor badge + içerik önizlemesi
+- `KbSignalStats` bileşeni: 5 metrik kartı + byRole etiket bulutu
+- Mevcut: döküman ekleme, silme, reindex, sektör/bölge etiketleme (tags)
 - Bağımlılık: YFZ 23 ✓
 
 ### Kritik Yol (MVP)

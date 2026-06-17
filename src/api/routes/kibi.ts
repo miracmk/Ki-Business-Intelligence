@@ -2,7 +2,8 @@ import type { FastifyPluginAsync } from 'fastify'
 import { db } from '../../lib/db.js'
 import { kibiEntities, kibiModelConfigs } from '../../../db/schema.js'
 import { eq, and } from 'drizzle-orm'
-import { runKibiConversation } from '../../engine/kibi/conversation.js'
+import { runKibiAgent } from '../../engine/ai/kibi-agent.js'
+import { redis } from '../../lib/redis.js'
 
 export const kibiRoutes: FastifyPluginAsync = async (app) => {
   app.post('/chat', { onRequest: [app.authenticate] }, async (req, reply) => {
@@ -11,14 +12,33 @@ export const kibiRoutes: FastifyPluginAsync = async (app) => {
     if (!message || !sessionId) return reply.status(400).send({ error: 'message and sessionId required' })
 
     const entity = await db.query.kibiEntities.findFirst({ where: (t, { eq }) => eq(t.entityId, user.tenantId) })
-    const result = await runKibiConversation({
-      tenantId: user.tenantId,
-      sessionId,
-      userMessage: message,
-      channel: 'web',
-      entityContext: entity ? { entityId: entity.id, clientId: entity.clientId, mood: entity.mood, lastContactAt: entity.lastContactAt } : undefined,
+
+    const historyKey = `kibi:chat:hist:${sessionId}`
+    const histRaw = await redis.get(historyKey).catch(() => null)
+    const history: { role: 'user' | 'assistant'; content: string }[] = histRaw ? JSON.parse(histRaw) : []
+
+    const result = await runKibiAgent({
+      tenantId:       user.tenantId,
+      channelType:    'web',
+      identifier:     user.sub,
+      sessionKey:     sessionId,
+      message,
+      language:       'tr',
+      history,
+      supportAttempts: [],
+      entityProfile: entity ? {
+        industry:         entity.sector ?? '',
+        sizeCategory:     entity.employeeCount ? String(entity.employeeCount) : '',
+        region:           entity.country ?? entity.city ?? '',
+        connectedModules: [],
+      } : undefined,
     })
-    return reply.send(result)
+
+    history.push({ role: 'user', content: message })
+    history.push({ role: 'assistant', content: result.response })
+    await redis.set(historyKey, JSON.stringify(history.slice(-20)), 'EX', 86400).catch(() => {})
+
+    return reply.send({ response: result.response, sessionId })
   })
 
   app.get('/entity-context', { onRequest: [app.authenticate] }, async (req, reply) => {

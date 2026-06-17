@@ -9,7 +9,7 @@ import { invalidateModelCache, seedDefaultModelConfigs } from '../../engine/ai/m
 import { PROVIDERS, getConfigKey } from '../../engine/ai/providers.js'
 import { invalidateProviderKeyCache } from '../../engine/ai/gateway.js'
 import { redis } from '../../lib/redis.js'
-import { qdrant, embedConfigured, invalidateEmbeddingModelCache } from '../../lib/qdrant.js'
+import { qdrant, embedConfigured, invalidateEmbeddingModelCache, vectorSearch } from '../../lib/qdrant.js'
 import { env } from '../../../config/env.js'
 
 export const adminRoutes: FastifyPluginAsync = async (app) => {
@@ -675,6 +675,44 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
     }
 
     return reply.send({ ok: true, indexed, total: docs.length })
+  })
+
+  // POST /admin/kb-search — KB arama testi (ki_platform_knowledge koleksiyonu)
+  app.post('/kb-search', async (req, reply) => {
+    const { query, limit } = req.body as { query?: string; limit?: number }
+    if (!query?.trim()) return reply.status(400).send({ error: 'Sorgu gerekli' })
+    try {
+      const results = await vectorSearch('ki_platform_knowledge', query.trim(), Math.min(limit ?? 5, 20))
+      return reply.send({ results, total: results.length })
+    } catch (e: any) {
+      return reply.status(500).send({ error: e.message })
+    }
+  })
+
+  // GET /admin/kb-signals — KB sinyal istatistikleri
+  app.get('/kb-signals', async (_req, reply) => {
+    const logs = await db.query.aiPipelineLogs.findMany({
+      orderBy: desc(aiPipelineLogs.createdAt),
+      limit: 1000,
+    })
+    const total         = logs.length
+    const kbWritten     = logs.filter(l => l.kbWritten).length
+    const escalated     = logs.filter(l => l.escalated).length
+    const succeeded     = logs.filter(l => l.success).length
+    const avgConfidence = logs
+      .filter(l => l.confidenceScore != null)
+      .reduce((s, l) => s + (l.confidenceScore ?? 0), 0) / (logs.filter(l => l.confidenceScore != null).length || 1)
+    const byRole = logs.reduce<Record<string, number>>((acc, l) => {
+      acc[l.modelRole] = (acc[l.modelRole] ?? 0) + 1
+      return acc
+    }, {})
+    return reply.send({
+      total, kbWritten, escalated, succeeded,
+      successRate:    Math.round(succeeded / (total || 1) * 100),
+      kbWrittenRate:  Math.round(kbWritten / (total || 1) * 100),
+      avgConfidence:  Math.round(avgConfidence),
+      byRole,
+    })
   })
 
   // GET /admin/pipeline-logs — AI pipeline kayıtları (filtreleme ile)

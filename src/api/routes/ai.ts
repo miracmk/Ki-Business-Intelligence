@@ -1,6 +1,7 @@
 import type { FastifyPluginAsync } from 'fastify'
 import { z } from 'zod'
 import { runAgent } from '../../engine/ai/agent.js'
+import { runKibiAgent } from '../../engine/ai/kibi-agent.js'
 import { AiGateway, ANALYSIS_MODELS, CONVERSATION_MODELS } from '../../engine/ai/gateway.js'
 import { redis } from '../../lib/redis.js'
 import { vectorSearch } from '../../lib/qdrant.js'
@@ -532,13 +533,27 @@ Kullanıcı sorusu:`
     }
 
     try {
-      const result = await runAgent({
-        tenantId:    'admin',
-        sessionId:   sid,
-        userMessage: body.data.message,
-        channel:     'web',
-        isAdmin:     true,
+      // Load history from Redis
+      const historyKey = `kibi:admin:hist:${sid}`
+      const histRaw = await redis.get(historyKey).catch(() => null)
+      const history: { role: 'user' | 'assistant'; content: string }[] = histRaw ? JSON.parse(histRaw) : []
+
+      const result = await runKibiAgent({
+        tenantId:       undefined,
+        channelType:    'web',
+        identifier:     user.sub,
+        sessionKey:     sid,
+        message:        body.data.message,
+        language:       'tr',
+        history,
+        supportAttempts: [],
       })
+
+      // Persist history (last 20 turns)
+      history.push({ role: 'user', content: body.data.message })
+      history.push({ role: 'assistant', content: result.response })
+      await redis.set(historyKey, JSON.stringify(history.slice(-20)), 'EX', 86400).catch(() => {})
+
       return reply.send({ response: result.response, sessionId: sid })
     } catch (e: any) {
       console.error('[ADMIN AI] Error:', e)

@@ -3,6 +3,7 @@ import { db } from '../../lib/db.js'
 import { aiConfigs, emailConfigs, tenantMemberships, tenants, users, platformConfigs, kibiModelConfigs, knowledgeEntries } from '../../../db/schema.js'
 import { encryptJson, decryptJson, encrypt, decrypt } from '../../lib/crypto.js'
 import { eq, and } from 'drizzle-orm'
+import { getPlanUsage, PLAN_DEFS } from '../../lib/plan-limits.js'
 import nodemailer from 'nodemailer'
 import * as argon2 from 'argon2'
 import { nanoid } from 'nanoid'
@@ -52,6 +53,19 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
       .set({ settings: { ...existing, ...(language ? { language } : {}), ...(timezone ? { timezone } : {}) } as any })
       .where(eq(tenants.id, user.tenantId))
     return reply.send({ ok: true })
+  })
+
+  // GET /api/v1/tenants/plan
+  app.get('/plan', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = req.user as { sub: string; tenantId: string }
+    const usage = await getPlanUsage(user.tenantId).catch(() => null)
+    if (!usage) return reply.status(404).send({ error: 'Plan bilgisi bulunamadı' })
+    return usage
+  })
+
+  // GET /api/v1/tenants/plans — tüm plan seçenekleri
+  app.get('/plans', async () => {
+    return { plans: Object.values(PLAN_DEFS) }
   })
 
   // GET /api/v1/tenants/storage-usage
@@ -840,5 +854,46 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
     } catch {}
 
     return reply.send({ ok: true })
+  })
+}
+
+// ─── Channel Routes (prefix: /channels) ──────────────────────────────────────
+
+export const channelRoutes: FastifyPluginAsync = async (app) => {
+
+  const VALID_CHANNELS = new Set(['whatsapp', 'instagram', 'telegram', 'email', 'voip', 'portal'])
+
+  // POST /api/v1/channels/:key/test — verify channel config exists + ping endpoint
+  app.post('/:key/test', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = req.user as { sub: string; tenantId: string }
+    const { key } = req.params as { key: string }
+    if (!VALID_CHANNELS.has(key)) return reply.status(400).send({ error: 'Geçersiz kanal' })
+
+    const tenant = isUUID(user.tenantId)
+      ? await db.query.tenants.findFirst({ where: (t, { eq }) => eq(t.id, user.tenantId) })
+      : null
+    if (!tenant) return reply.status(404).send({ error: 'Tenant bulunamadı' })
+
+    const settings = (tenant.settings ?? {}) as Record<string, any>
+    const channelCfg = settings.channels?.[key]
+    if (!channelCfg) return reply.status(404).send({ error: 'Kanal yapılandırılmamış' })
+
+    // For email: try nodemailer verify
+    if (key === 'email' && channelCfg.host) {
+      try {
+        const transporter = nodemailer.createTransport({
+          host: channelCfg.host, port: Number(channelCfg.port ?? 587),
+          secure: channelCfg.encryption === 'SSL/TLS',
+          auth: { user: channelCfg.username, pass: channelCfg.password },
+        })
+        await transporter.verify()
+        return reply.send({ ok: true, message: 'SMTP bağlantısı başarılı' })
+      } catch (e: any) {
+        return reply.status(400).send({ ok: false, message: e.message })
+      }
+    }
+
+    // For other channels: config presence is sufficient for a basic test
+    return reply.send({ ok: true, message: 'Kanal yapılandırması mevcut' })
   })
 }

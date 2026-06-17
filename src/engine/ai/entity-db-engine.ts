@@ -43,17 +43,29 @@ export async function getCatalogForEntity(entityId: string): Promise<CatalogSumm
 
 // ─── SQL Safety ──────────────────────────────────────────────────────────────
 
+const DANGEROUS_PATTERNS = /\b(DROP|TRUNCATE|ALTER|CREATE|GRANT|REVOKE|EXEC|EXECUTE|XP_|SP_|COPY|VACUUM|ANALYZE|CLUSTER|REINDEX|REFRESH|COMMENT|NOTIFY|LISTEN|UNLISTEN|LOAD|IMPORT)\b/i
+
 function isSafeSelect(sql: string): boolean {
-  const upper = sql.trim().toUpperCase()
-  if (!upper.startsWith('SELECT')) return false
-  if (/\b(INSERT|UPDATE|DELETE|DROP|TRUNCATE|ALTER|CREATE|GRANT|REVOKE)\b/.test(upper)) return false
+  const trimmed = sql.trim()
+  if (!/^SELECT\b/i.test(trimmed)) return false
+  if (/\b(INSERT|UPDATE|DELETE)\b/i.test(trimmed)) return false
+  if (DANGEROUS_PATTERNS.test(trimmed)) return false
+  // Block stacked queries
+  if (trimmed.includes(';') && trimmed.indexOf(';') < trimmed.length - 1) return false
+  // Block comment injection
+  if (/\/\*|--/.test(trimmed)) return false
   return true
 }
 
 function isSafeWrite(sql: string): boolean {
-  const upper = sql.trim().toUpperCase()
-  if (!/^(INSERT|UPDATE)\b/.test(upper)) return false
-  if (/\b(DROP|TRUNCATE|ALTER|CREATE|GRANT|REVOKE|DELETE)\b/.test(upper)) return false
+  const trimmed = sql.trim()
+  if (!/^(INSERT|UPDATE)\b/i.test(trimmed)) return false
+  if (/\bDELETE\b/i.test(trimmed)) return false
+  if (DANGEROUS_PATTERNS.test(trimmed)) return false
+  // Block stacked queries
+  if (trimmed.includes(';') && trimmed.indexOf(';') < trimmed.length - 1) return false
+  // Block comment injection
+  if (/\/\*|--/.test(trimmed)) return false
   return true
 }
 

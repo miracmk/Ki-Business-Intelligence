@@ -2,7 +2,8 @@ import type { FastifyPluginAsync } from 'fastify'
 import { z } from 'zod'
 import { runAgent } from '../../engine/ai/agent.js'
 import { runKibiAgent } from '../../engine/ai/kibi-agent.js'
-import { AiGateway, ANALYSIS_MODELS, CONVERSATION_MODELS } from '../../engine/ai/gateway.js'
+import { AiGateway, ANALYSIS_MODELS, CONVERSATION_MODELS, aiComplete } from '../../engine/ai/gateway.js'
+import { getModelForRole } from '../../engine/ai/model-config.js'
 import { redis } from '../../lib/redis.js'
 import { vectorSearch } from '../../lib/qdrant.js'
 import { db } from '../../lib/db.js'
@@ -475,14 +476,12 @@ export const aiRoutes: FastifyPluginAsync = async (app) => {
       // Get live data summary to build context
       const summary = await getEntityDataSummary(entity.entityDbSchema)
 
-      const context = `Sen ${entity.companyName || 'bu şirketin'} verilerine tam erişimi olan Entity AI'sın.
+      const systemPrompt = `Sen ${entity.companyName || 'bu şirketin'} verilerine tam erişimi olan Entity AI'sın. Türkçe yanıt ver.
 
 Güncel veriler:
 CRM: ${summary.crm.contacts} kişi, ${summary.crm.companies} şirket, ${summary.crm.openDeals} açık fırsat (${summary.crm.pipelineValue.toLocaleString('tr-TR')} TL pipeline)
 ERP: ${summary.erp.products} ürün (${summary.erp.lowStockItems} kritik stok), ${summary.erp.ordersLast30d} sipariş/30gün, ${summary.erp.activeStaff} aktif personel (${summary.erp.staffOnLeave} izinde)
-Muhasebe: ${summary.accounting.totalReceivable.toLocaleString('tr-TR')} TL alacak (${summary.accounting.overdueReceivable.toLocaleString('tr-TR')} TL gecikmiş), bu ay ${summary.accounting.expensesThisMonth.toLocaleString('tr-TR')} TL gider
-
-Kullanıcı sorusu:`
+Muhasebe: ${summary.accounting.totalReceivable.toLocaleString('tr-TR')} TL alacak (${summary.accounting.overdueReceivable.toLocaleString('tr-TR')} TL gecikmiş), bu ay ${summary.accounting.expensesThisMonth.toLocaleString('tr-TR')} TL gider`
 
       // Load entity instructions from AI config
       let entityInstructions: string | undefined
@@ -492,15 +491,40 @@ Kullanıcı sorusu:`
         entityInstructions = cfgSettings.entityInstructions || undefined
       } catch { /* non-fatal */ }
 
-      const result = await runAgent({
-        tenantId:     user.tenantId ?? 'default',
-        sessionId:    sid,
-        userMessage:  `${context}\n${message}`,
-        channel:      'web',
-        instructions: entityInstructions,
-      })
+      // Load Redis conversation history
+      const histKey = `entity:chat:hist:${sid}`
+      const histRaw = await redis.get(histKey).catch(() => null)
+      const history: { role: 'user' | 'assistant'; content: string }[] = histRaw ? JSON.parse(histRaw) : []
 
-      return reply.send({ response: result.response, sessionId: sid })
+      // Use working model chain from DB
+      const { primary, fallbacks } = await getModelForRole('master_conversation', 'platform', user.tenantId ?? undefined)
+      const chain = [primary, ...fallbacks].filter(Boolean)
+
+      const systemContent = entityInstructions ? `${systemPrompt}\n\nEk talimatlar: ${entityInstructions}` : systemPrompt
+      const messages = [
+        { role: 'system' as const, content: systemContent },
+        ...history.slice(-10),
+        { role: 'user' as const, content: message },
+      ]
+
+      let responseText = 'Şu an yanıt üretemiyorum, lütfen tekrar deneyin.'
+      for (const modelStr of chain) {
+        try {
+          const norm = modelStr.includes('::') ? modelStr : `openrouter::${modelStr}`
+          const res  = await aiComplete(norm, messages, user.tenantId, {})
+          responseText = res.content
+          break
+        } catch (e: any) {
+          console.warn(`[ENTITY AI] model ${modelStr} failed:`, e.message)
+        }
+      }
+
+      // Persist history
+      history.push({ role: 'user', content: message })
+      history.push({ role: 'assistant', content: responseText })
+      await redis.set(histKey, JSON.stringify(history.slice(-20)), 'EX', 86400).catch(() => {})
+
+      return reply.send({ response: responseText, sessionId: sid })
     } catch (e: any) {
       console.error('[ENTITY AI] Error:', e)
       return reply.status(500).send({ error: 'Entity AI hatası, lütfen tekrar deneyin' })

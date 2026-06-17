@@ -215,17 +215,6 @@ const COMM_CHANNELS: { id: string; label: string; color: string; emoji: string; 
 ]
 
 const MODEL_ROLE_LABELS: Record<string, string> = {
-  // Eski roller (geriye dönük uyumluluk)
-  conversation:      'Konuşma Modeli',
-  db_search:         'DB Arama',
-  qdrant_search:     'Vektör Arama',
-  redis_search:      'Cache Arama',
-  intent:            'Niyet Tespiti',
-  support_intent:    'Destek Niyet',
-  support_refine:    'Destek Geliştirme',
-  support_resolver:  'Destek Çözüm',
-  support_answering: 'Destek Yanıt',
-  // 13 yeni semantik roller (YFZ 19-21)
   intent_analysis:            'Niyet & Ruh Hali Analizörü',
   support_problem:            'Destek Sorun Analizörü',
   support_solution:           'Destek Çözüm Analizörü',

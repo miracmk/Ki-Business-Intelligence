@@ -3258,6 +3258,7 @@ export default function Settings() {
       {showCrmWizard && (
         <UniversalConnectorWizard
           onClose={() => { setShowCrmWizard(false); loadData() }}
+          onDone={() => { setShowCrmWizard(false); loadData() }}
         />
       )}
     </div>

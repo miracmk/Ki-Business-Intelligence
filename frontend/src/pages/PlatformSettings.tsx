@@ -285,6 +285,71 @@ interface AiProviderInfo {
 interface ModelGroup  { provider: string; models: Array<{ id: string; name: string }> }
 interface RoleConfig  { modelRole: string; primaryModel: string; fallback1?: string; fallback2?: string }
 
+// ─── Ping result helpers ──────────────────────────────────────────────────────
+type PingResult = { ok: boolean; latencyMs: number; speed?: string; errorType?: string; error?: string; model: string }
+type FieldPing  = PingResult | 'loading' | undefined
+
+const ERROR_LABELS: Record<string, string> = {
+  timeout:      'Zaman aşımı',
+  network:      'Bağlantı hatası',
+  auth:         'Kimlik doğrulama hatası',
+  not_found:    'Model bulunamadı',
+  rate_limit:   'Hız sınırı (429)',
+  server_error: 'Sunucu hatası',
+  error:        'Hata',
+}
+
+function PingBadge({ result }: { result: FieldPing }) {
+  if (!result) return null
+  if (result === 'loading') return (
+    <span className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded animate-pulse" style={{ color: 'var(--text-3)', background: 'var(--surface-2)' }}>
+      <RefreshCw size={9} className="animate-spin" /> test ediliyor...
+    </span>
+  )
+  if (result.ok) {
+    const color = result.speed === 'fast' ? '#4ade80' : result.speed === 'slow' ? '#fbbf24' : '#f97316'
+    const bg    = result.speed === 'fast' ? 'rgba(34,197,94,0.1)' : result.speed === 'slow' ? 'rgba(251,191,36,0.1)' : 'rgba(249,115,22,0.1)'
+    const label = result.speed === 'fast' ? 'Kullanılabilir' : result.speed === 'slow' ? 'Yavaş' : 'Çok Yavaş'
+    return (
+      <span className="inline-flex items-center gap-1 text-[10px] font-mono px-1.5 py-0.5 rounded-full"
+        style={{ background: bg, color }} title={`${result.latencyMs}ms`}>
+        ✓ {label} · {result.latencyMs}ms
+      </span>
+    )
+  }
+  const errLabel = ERROR_LABELS[result.errorType ?? ''] ?? result.errorType ?? 'Hata'
+  return (
+    <span className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-full max-w-[200px]"
+      style={{ background: 'rgba(239,68,68,0.1)', color: '#f87171' }}
+      title={result.error ?? ''}>
+      ✗ {errLabel}{result.error ? ` — ${result.error.slice(0, 60)}` : ''}
+    </span>
+  )
+}
+
+// 3 dots summary for collapsed header view
+type RolePing = { primary?: FieldPing; fb1?: FieldPing; fb2?: FieldPing }
+function PingDots({ rp }: { rp?: RolePing }) {
+  if (!rp) return null
+  const fields: Array<['primary' | 'fb1' | 'fb2', string]> = [['primary', 'P'], ['fb1', 'F1'], ['fb2', 'F2']]
+  return (
+    <div className="flex items-center gap-1">
+      {fields.map(([f, lbl]) => {
+        const r = rp[f]
+        if (!r) return null
+        if (r === 'loading') return <span key={f} className="w-4 h-4 rounded-full animate-pulse" style={{ background: 'var(--border)' }} title={lbl} />
+        const color = r.ok ? (r.speed === 'fast' ? '#4ade80' : r.speed === 'slow' ? '#fbbf24' : '#f97316') : '#f87171'
+        const label = r.ok ? `${lbl}: ✓ ${r.latencyMs}ms` : `${lbl}: ✗ ${ERROR_LABELS[r.errorType ?? ''] ?? 'Hata'}`
+        return (
+          <span key={f} className="text-[9px] font-bold px-1.5 py-0.5 rounded-full" style={{ background: color + '22', color }} title={label}>
+            {lbl}
+          </span>
+        )
+      })}
+    </div>
+  )
+}
+
 // ─── ModelCombobox — searchable model picker ──────────────────────────────────
 function ModelCombobox({
   value, onChange, modelGroups, placeholder, searchKey, modelSearch, setModelSearch,
@@ -392,17 +457,31 @@ function AiProviderPanel({
   const [savingKey,    setSavingKey]    = useState(false)
   const [sectionOpen,   setSectionOpen]   = useState<Record<string, boolean>>({})
   const [poolExpanded,  setPoolExpanded]  = useState<Record<string, boolean>>({})
-  const [pingStatus,    setPingStatus]    = useState<Record<string, { ok: boolean; latencyMs?: number; error?: string } | 'loading'>>({})
   const [modelSearch,   setModelSearch]   = useState<Record<string, string>>({})
 
-  const pingModel = async (role: string, model: string) => {
+  const [pingStatus, setPingStatus] = useState<Record<string, RolePing>>({})
+
+  const pingOne = async (role: string, field: 'primary' | 'fb1' | 'fb2', model: string): Promise<void> => {
     if (!model) return
-    setPingStatus(p => ({ ...p, [role]: 'loading' }))
+    setPingStatus(p => ({ ...p, [role]: { ...p[role], [field]: 'loading' } }))
     try {
       const r = await api.post(`${baseEndpoint}/test-model`, { model })
-      setPingStatus(p => ({ ...p, [role]: { ok: r.data.ok, latencyMs: r.data.latencyMs, error: r.data.error } }))
+      const result: PingResult = { ok: r.data.ok, latencyMs: r.data.latencyMs, speed: r.data.speed, errorType: r.data.errorType, error: r.data.error, model }
+      setPingStatus(p => ({ ...p, [role]: { ...p[role], [field]: result } }))
     } catch (e: any) {
-      setPingStatus(p => ({ ...p, [role]: { ok: false, error: e.response?.data?.error ?? e.message } }))
+      const result: PingResult = { ok: false, latencyMs: 0, errorType: 'network', error: e.response?.data?.error ?? e.message, model }
+      setPingStatus(p => ({ ...p, [role]: { ...p[role], [field]: result } }))
+    }
+  }
+
+  const pingAll = (role: string, edit: { primary: string; fb1: string; fb2: string }) => {
+    const fields: Array<['primary' | 'fb1' | 'fb2', string]> = [
+      ['primary', edit.primary],
+      ['fb1', edit.fb1],
+      ['fb2', edit.fb2],
+    ]
+    for (const [field, model] of fields) {
+      if (model) pingOne(role, field, model)
     }
   }
 
@@ -676,26 +755,15 @@ function AiProviderPanel({
                       {isOpen ? <ChevronDown size={13} style={{ color: 'var(--text-3)' }} /> : <ChevronRight size={13} style={{ color: 'var(--text-3)' }} />}
                     </div>
                   </button>
-                  {/* Ping on header — always visible when saved model exists */}
-                  {saved?.primaryModel && !isOpen && isAdmin && (
+                  {/* Ping All on header — always visible when any model is saved */}
+                  {(saved?.primaryModel || edit.fb1 || edit.fb2) && isAdmin && (
                     <div className="flex items-center gap-1.5 px-3 flex-shrink-0">
-                      {pingStatus[role] === 'loading' && (
-                        <RefreshCw size={11} className="animate-spin" style={{ color: 'var(--text-3)' }} />
-                      )}
-                      {pingStatus[role] && pingStatus[role] !== 'loading' && (
-                        <span className="text-[10px] font-mono px-1 py-0.5 rounded"
-                          style={{
-                            background: (pingStatus[role] as any).ok ? 'rgba(34,197,94,0.1)' : 'rgba(239,68,68,0.1)',
-                            color: (pingStatus[role] as any).ok ? '#4ade80' : '#f87171',
-                          }}>
-                          {(pingStatus[role] as any).ok ? `✓ ${(pingStatus[role] as any).latencyMs}ms` : '✗'}
-                        </span>
-                      )}
+                      <PingDots rp={pingStatus[role]} />
                       <button
-                        onClick={e => { e.stopPropagation(); pingModel(role, saved.primaryModel!) }}
-                        className="text-[10px] px-2 py-1 rounded-lg border transition-all"
+                        onClick={e => { e.stopPropagation(); pingAll(role, edit) }}
+                        className="text-[10px] px-2 py-1 rounded-lg border transition-all whitespace-nowrap"
                         style={{ borderColor: 'var(--border)', color: 'var(--text-3)', background: 'var(--surface)' }}>
-                        Ping
+                        Ping Tümü
                       </button>
                     </div>
                   )}
@@ -707,26 +775,16 @@ function AiProviderPanel({
                       { field: 'fb1',     label: 'Fallback 1',   required: false },
                       { field: 'fb2',     label: 'Fallback 2',   required: false },
                     ].map(({ field, label: fLabel, required }) => {
-                      const isPrimary = field === 'primary'
                       const currentVal = edit[field as keyof typeof edit]
-                      const ping = pingStatus[role]
+                      const fieldPing = pingStatus[role]?.[field as 'primary' | 'fb1' | 'fb2']
                       return (
                       <div key={field}>
                         <div className="flex items-center justify-between mb-1">
                           <label className="text-[11px]" style={{ color: 'var(--text-3)' }}>{fLabel}{required ? ' *' : ''}</label>
-                          {isPrimary && currentVal && (
+                          {currentVal && (
                             <div className="flex items-center gap-2">
-                              {ping === 'loading' && <span className="text-[10px] animate-pulse" style={{ color: 'var(--text-3)' }}>test ediliyor...</span>}
-                              {ping && ping !== 'loading' && (
-                                <span className="text-[10px] font-mono px-1.5 py-0.5 rounded-full"
-                                  style={{
-                                    background: ping.ok ? 'rgba(34,197,94,0.1)' : 'rgba(239,68,68,0.1)',
-                                    color: ping.ok ? '#4ade80' : '#f87171',
-                                  }}>
-                                  {ping.ok ? `✓ ${ping.latencyMs}ms` : `✗ ${ping.error?.slice(0,40) ?? 'hata'}`}
-                                </span>
-                              )}
-                              <button onClick={() => pingModel(role, currentVal)}
+                              <PingBadge result={fieldPing} />
+                              <button onClick={() => pingOne(role, field as 'primary' | 'fb1' | 'fb2', currentVal)}
                                 className="text-[10px] px-2 py-0.5 rounded-lg border transition-all"
                                 style={{ borderColor: 'var(--border)', color: 'var(--text-3)', background: 'var(--surface-2)' }}>
                                 Ping

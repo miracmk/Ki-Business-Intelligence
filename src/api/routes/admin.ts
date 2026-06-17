@@ -579,15 +579,35 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
       const latencyMs = Date.now() - t0
 
       if (res.ok || res.status === 200) {
-        return reply.send({ ok: true, latencyMs, status: res.status })
+        const speed = latencyMs < 1000 ? 'fast' : latencyMs < 3000 ? 'slow' : 'very_slow'
+        return reply.send({ ok: true, latencyMs, status: res.status, speed })
       }
 
       const errBody = await res.text().catch(() => '')
-      return reply.send({ ok: false, latencyMs, status: res.status, error: errBody.slice(0, 200) })
+      let errorType: string
+      if (res.status === 401 || res.status === 403) errorType = 'auth'
+      else if (res.status === 404)                  errorType = 'not_found'
+      else if (res.status === 429)                  errorType = 'rate_limit'
+      else if (res.status >= 500)                   errorType = 'server_error'
+      else                                          errorType = 'error'
+
+      // Try to extract a cleaner error message from JSON
+      let errMsg = errBody.slice(0, 300)
+      try {
+        const parsed = JSON.parse(errBody)
+        errMsg = parsed?.error?.message ?? parsed?.message ?? errMsg
+      } catch {}
+
+      return reply.send({ ok: false, latencyMs, status: res.status, errorType, error: errMsg.slice(0, 200) })
     } catch (e: any) {
       clearTimeout(timer)
       const latencyMs = Date.now() - t0
-      return reply.send({ ok: false, latencyMs, error: e.name === 'AbortError' ? 'Zaman aşımı (15s)' : e.message })
+      const isTimeout = e.name === 'AbortError'
+      return reply.send({
+        ok: false, latencyMs,
+        errorType: isTimeout ? 'timeout' : 'network',
+        error: isTimeout ? 'Zaman aşımı (15s)' : e.message,
+      })
     }
   })
 

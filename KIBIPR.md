@@ -107,8 +107,13 @@ Gradient: `linear-gradient(135deg, var(--accent), var(--forest))`.
 │   │   ├── ai/
 │   │   │   ├── gateway.ts     ← OpenRouter multi-provider, fallback zinciri
 │   │   │   ├── agent.ts       ← AI agent orchestration (UUID guard, instructions)
-│   │   │   └── model-config.ts ← DB-backed model config reader (5dk cache)
+│   │   │   └── model-config.ts ← DB-backed model config reader (scope:role cache)
+│   │   ├── billing/
+│   │   │   └── billing.ts     ← Aylık faturalama, mesaj aşımı, ek kullanıcı, Ki Wallet entegrasyonu (YFZ 32)
 │   │   ├── crm-sync/
+│   │   │   └── entity-etl.ts  ← runConnectorEtl + runMirrorEtl (YFZ 31)
+│   │   ├── connector/
+│   │   │   └── connector-ai.ts ← Semantic katalog üretimi (YFZ 19-21)
 │   │   ├── accounting-sync/
 │   │   ├── kibi/
 │   │   ├── knowledge/
@@ -154,6 +159,7 @@ Gradient: `linear-gradient(135deg, var(--accent), var(--forest))`.
 /app/chat → AiChat (KIBI AI)
 /app/entity-ai → EntityAI
 /app/support → Support
+/app/wallet → KiWallet (Ki Wallet bakiye + faturalama durumu + paket karşılaştırma)
 /app/settings → Settings
 /app/admin → Admin (AdminRoute)
 /app/admin/settings → PlatformSettings (AdminRoute)
@@ -1139,3 +1145,119 @@ YFZ 19-21 ✓ → YFZ 22 → YFZ 23 → YFZ 27 → YFZ 28
 - YFZ 27-28: Paralel 1 hafta (plan + prod güvenlik)
 - YFZ 29-30: Paralel 5 gün (UI'lar)
 - **TOPLAM: 4-5 hafta → Production Ready**
+
+---
+
+## YFZ 31 — Universal Connector: Kaynak Rol Sistemi + Mirror ETL + Model Ping Altyapısı ✅ (2026-06-17/18)
+
+**Amaç:** UniversalConnectorWizard'ı gerçek (fake olmayan) bir mirror pipeline'a çevirmek: kaynak veritabanı tablolarına AI/kullanıcı tarafından **rol** atanır (CRM/ERP/Muhasebe'ye özel), kaynak doğrudan entity şemasına aynalanır; ayrıca platform model havuzu için ping/latency test altyapısı.
+
+### Kaynak Rol Sistemi (Adım 4 yeniden tasarımı)
+- [x] `frontend/src/components/UniversalConnectorWizard.tsx` → `ROLE_OPTIONS`: sourceType'a özel rol sözlüğü
+  - **crm-db:** module_registry, field_definitions, data_records, related_lists, bridge_junction, mirror_direct, skip
+  - **erp-db:** erp_master, erp_header, erp_line_items, erp_doc_flow, erp_journal, mirror_direct, skip
+  - **acc-db:** acc_contacts, acc_documents, acc_lines, acc_linked_tx, acc_ledger, mirror_direct, skip
+  - **generic:** mirror_direct, skip
+- [x] `suggestTableRole(tableName, sourceType)` — regex tabanlı rol önerisi (AI yoksa fallback)
+- [x] Adım 4 başlığı "Modül Eşleştir" → "Rol Belirle", Adım 5 "AI Konnektör" → "AI Mirror"
+- [x] `POST /db-detect-type` (`src/api/routes/crm.ts`) — kaynağı CRM/ERP/Muhasebe/Generic olarak AI ile tespit eder (`{ detectedType, confidence, reason, aiUsed }`), regex fallback `detectTypeByNames()`
+- [x] `GET /connections/:id/scan-structure/stream` (SSE) — tarama sonrası OpenRouter AI her tabloya rol önerir (`roles` event), başarısızsa frontend regex'e döner
+
+### Mirror ETL (Direct Mirror)
+- [x] `src/engine/crm-sync/entity-etl.ts` → `runMirrorEtl()` — rol atanmış PostgreSQL kaynak tablolarını entity şemasına olduğu gibi kopyalar (TRUNCATE + 500'lük batch INSERT)
+- [x] `mirrorPgType()` — kaynak PG tipini hedef DDL tipine çevirir (text/bigint/timestamptz/jsonb/uuid→text)
+- [x] `POST /connections/:id/generate-connector/stream` (SSE) — **EAV pre-scan**: module_registry/field_definitions/data_records rolündeki tabloları sayar ("24 modül, 1106 alan, 2265 kayıt") → AI/regex ile alan dönüşümü (`buildMirrorMappings()`: phone_e164/email_lower/country_iso/currency_strip/direct tespiti)
+- [x] `GET /connections/:id/entity-tables` — entity şemasındaki gerçek tabloları + satır sayılarını dinamik listeler (eskiden sabit 4 tablo)
+- [x] Mirror connector için entity-data okuma yolu eklendi:
+  - `GET /connections/:id/modules` — `entity_{slug}.crm_modules`'tan modül + kayıt sayısı
+  - `GET /connections/:id/modules/:module/fields` — `entity_{slug}.crm_fields`'tan alan listesi
+  - `GET /connections/:id/records` — `entity_{slug}.crm_records` JSONB verisini düzleştirir (pagination, limit≤500)
+  - API tabanlı connector'lar için eski `public.crm_*` davranışı korunur (fallback)
+- [x] ETL pool lifetime bug düzeltildi (`runMirrorEtl`/`runConnectorEtl` çağrılarına `await` eklendi — pool async iş bitmeden kapanıyordu)
+
+### Model Ping Altyapısı
+- [x] `POST /admin/ai-providers/:scope/test-model` (`src/api/routes/admin.ts`) — `{ model: "provider::modelId" }` ile 1-token'lık ping, 15s timeout
+  - Hız sınıflandırma: fast (<1s) / slow (<3s) / very_slow (≥3s)
+  - Hata sınıflandırma: timeout / auth / not_found / rate_limit / server_error / network
+- [x] `frontend/src/pages/PlatformSettings.tsx`:
+  - `PROVIDER_META` — 14 sağlayıcı için renk/kısaltma rozet haritası, `ProviderBadge` bileşeni
+  - Searchable model combobox (native `<select>` yerine) — id/sağlayıcıya göre filtre, klavye navigasyonu
+  - `PingBadge` / `PingDots` — Primary/Fallback1/Fallback2 için tek satırda renkli sonuç noktaları
+  - `pingAll()` + "Ping Tümü" butonu — 3 modeli paralel test eder
+
+### Entity AI Chat Düzeltmesi
+- [x] `src/api/routes/ai.ts` → `/entity-chat`: `runAgent()` → `aiComplete()` + `getModelForRole('master_conversation')`, Redis geçmişi (`entity:chat:hist:${sid}`, 20 mesaj, 24s TTL), canlı veri özetiyle (CRM/ERP/Muhasebe) bağlamlandırılmış sistem prompt'u
+
+**Önemli kavramlar:**
+- **Mirror connector vs API connector:** Mirror = kaynak PG tabloları doğrudan entity şemasına kopyalanır (rol metadata'sı yön verir); API = CRM API → `crm_records` → ETL → entity şeması.
+- **EAV pre-scan:** Mapping üretmeden önce kaynaktaki gerçek hacmi (modül/alan/kayıt sayısı) AI'a bildirir.
+
+---
+
+## YFZ 32 — Fiyatlandırma, Faturalama ve Ki Wallet Entegrasyonu ✅ (2026-06-18)
+
+**Amaç:** 5 katmanlı fiyatlandırma planı, aylık otomatik faturalama, mesaj aşım/ek kullanıcı ücretlendirmesi ve harici **Ki Wallet** servisi üzerinden ödeme — tüm sistem KiCoin (1 USD = 1 KiCoin) üzerinden işler.
+
+### Veritabanı (migration 0013 + 0014)
+- [x] `plan_name` enum'a 3 yeni değer: `basic`, `premium`, `custom_models` (eski: free/starter/growth/enterprise — starter→basic, growth→premium migrate edildi)
+- [x] `tenant_memberships` → `message_limit` (kullanıcı bazlı aylık mesaj sınırı, null=sınırsız), `messages_used_this_month`
+- [x] `kibi_entities` → `next_billing_at`, `billing_cycle_start`, `extra_sub_users`, `debt_tokens` (bigint), `is_billing_restricted`, `messages_used_this_month`
+- [x] `kibi_pricing_packages` → `plan_name`, `per_message_price_usd`, `overage_message_price_usd` (varsayılan 0.03), `monthly_message_limit` (null=sınırsız), `extra_sub_user_price_usd` (varsayılan 25), `max_debt_tokens` (varsayılan 100000)
+- [x] 5 katmanlı paket seed verisi:
+
+| Plan | Görünen Ad | Kullanıcı | Aylık Ücret | Aylık Mesaj | Mesaj Başı Ücret | Ek Kullanıcı |
+|------|-----------|-----------|--------------|-------------|-------------------|--------------|
+| free | Ücretsiz | 1 | $0 | 40 | - | $25 |
+| basic | Başlangıç | 1-3 | $25 | 150 | - | $25 |
+| premium | Premium | 1-10 | $100 | 750 | - | $25 |
+| enterprise | Kurumsal | 1-50 | $1000 | 4500 | - | $25 |
+| custom_models | Özel Modeller | 1-9999 | $50 | sınırsız | $0.05 | $30 |
+
+### Billing Engine (`src/engine/billing/billing.ts` — YENİ)
+- [x] `chargeEntity(entityId, amountUsd, description, txnType?)` — Ki Wallet'tan düş (1 USD=1 KiCoin) + transaction kaydı → `{ ok, insufficientFunds }`
+- [x] `getEntityPackage(planName)` — `kibi_pricing_packages`'tan plan satırı
+- [x] `billEntityMonthly(entityId)` — aylık faturalama: free→sadece sayaç sıfırlama; ücretli→taban ücret + (custom_models için mesaj başı) + ek kullanıcı ücreti; yetersiz bakiye → `isBillingRestricted=true`
+- [x] `chargeMessageOverage(entityId, planName)` — aylık limit aşımında $0.03/mesaj ücretlendirme
+- [x] `chargeAndAddSubUser(entityId, planName)` — ek alt kullanıcı ücretlendirme + `extra_sub_users` artırma
+- [x] `incrementTokenDebt(entityId, tokens, maxDebtTokens?)` — borç sayacı, `max_debt_tokens`'a ulaşınca kısıtlama
+- [x] `runMonthlyBillingCycle()` — `next_billing_at <= now` olan tüm entity'leri faturalar
+- [x] `startBillingScheduler()` / `stopBillingScheduler()` — saatlik kontrol döngüsü, `server.ts` startup'ında çağrılır
+- [x] Harici **Ki Wallet** servisi entegrasyonu (`KI_WALLET_URL`, varsayılan `http://ki-wallet:3001`): `debitKiWallet()` (POST /api/debit, x-internal-key, 8s timeout), `syncKiWalletBalance()` (POST /api/balance, 5s timeout)
+
+### API Değişiklikleri
+- [x] `GET /api/v1/wallet/billing-status` — entity'nin güncel faturalama durumu (plan, sonraki fatura, mesaj kullanımı, borç, kısıtlama)
+- [x] `POST /api/v1/wallet/monthly-charge` (admin) — `{ entityId? }` ile tek entity veya tüm döngüyü manuel tetikler
+- [x] `PUT /admin/entities/:entityId/plan` — geçerli planlar güncellendi: `free/basic/premium/enterprise/custom_models`
+- [x] `PUT /admin/entities/:entityId/status` (YENİ) — entity'nin tenant `is_active` durumunu aç/kapat
+- [x] `POST /admin/support/tickets/:id/ai-draft` (YENİ) — KIBI AI ile destek bileti için taslak yanıt üretir
+- [x] `GET /admin/plans` — artık sabit dizi değil, `kibi_pricing_packages` tablosundan dinamik okunuyor
+- [x] `GET /admin/entities` — `kibi_wallets` JOIN ile bakiye (USD/KiCoin), `tenant_is_active`, `owner_phone` eklendi
+- [x] AI scope sistemi entity katmanlarına genişletildi: `SCOPE_MAP` → `kibi | entity-free | entity-basic | entity-premium | entity-enterprise` (her biri kendi model/key havuzuna sahip)
+- [x] `POST /api/v1/ai/chat`:
+  - `isBillingRestricted=true` → 402 "Hesabınız kısıtlanmış"
+  - Kullanıcı bazlı `tenantMemberships.messageLimit` aşımı → 429
+  - Entity bazlı `monthlyMessageLimit` aşımı: free→hard block (429), ücretli→`chargeMessageOverage()` (yetersiz bakiye→402)
+  - Başarılı yanıt sonrası `kibi_entities.messages_used_this_month` + `tenant_memberships.messages_used_this_month` artırılır
+  - Entity AI sistem prompt'una `tenants.settings.businessProfile` (sektör, çalışan sayısı, ciro vb.) eklenir
+- [x] `PUT /tenants/me/members/:userId/message-limit` (YENİ, entity_main) — kullanıcı bazlı aylık mesaj sınırı belirler
+- [x] `POST /tenants/me/members/invite`: alt kullanıcı eklerken plan limiti aşılırsa `chargeAndAddSubUser()` tetiklenir, yetersiz bakiye→402
+- [x] `GET/PUT /tenants/me/business-profile` (YENİ) — şirket profili (sektör, çalışan sayısı, ciro, adres, vergi no, ticaret sicil no, kuruluş tarihi, mali yıl başlangıcı, logo)
+- [x] `GET/PUT /tenants/me/channel-ids` (YENİ) — gelen mesaj yönlendirme için WA telefon/IG handle/TG id/email domain listeleri (`tenants.settings.channelIds`)
+
+### Frontend
+- [x] `KiWallet.tsx` — Faturalama Durumu kartı (plan, sonraki fatura tarihi, mesaj kullanım çubuğu, ek kullanıcı, token borcu); kısıtlama uyarı kutusu; 5 sütunlu paket karşılaştırma tablosu
+- [x] `Settings.tsx` → "Şirket Profili" sekmesi (business profile formu + kanal kimlikleri tag-editörü)
+- [x] `PlatformSettings.tsx` — entity katman bazlı (`entity-basic/premium/enterprise`) renk/etiket haritası, model combobox portal tabanlı yeniden yazıldı (positioning bug fix), localStorage model havuzu cache (`ki_model_pool_${scope}`, 30dk stale kontrolü)
+- [x] `Admin.tsx` — entity listesinde sahip telefon/wallet bakiyesi, destek bileti AI taslak butonu, entity aktif/pasif toggle
+
+### Diğer
+- [x] `src/engine/ai/gateway.ts` — `ANALYSIS_MODELS`/`CONVERSATION_MODELS` zinciri groq→openai→mistral olarak güncellendi; entity kendi key'i yoksa `entity_free` → `kibi` platform key'ine düşer
+- [x] `src/engine/ai/model-config.ts` — cache key `${scope}:${role}` olarak scope'landı; `getScopedModels(role, dbScope)` eklendi (entity_basic/premium/enterprise destekler)
+- [x] `src/lib/entity-provisioner.ts` → `getEntityDataSummary()` artık eski `crm_contacts/crm_companies/crm_deals` yerine birleşik `crm_records` (module_api_name + JSONB data) okuyor
+- [x] `server.ts` → `startBillingScheduler()` + `scheduleDailyModelSync()` (her gün 00:01 UTC model havuzu senkronu) startup'a eklendi
+
+**Önemli kavram:** Ki Wallet, platformdan ayrı harici bir servis (`KI_WALLET_URL`) — KiCoin bakiyesi orada tutulur, `billing.ts` sadece debit/balance API'lerini çağırır.
+
+---
+
+*Son güncelleme: YFZ 31-32 tamamlandı. Universal Connector kaynak rol sistemi + mirror ETL + model ping altyapısı (YFZ 31); 5 katmanlı fiyatlandırma + aylık faturalama + Ki Wallet entegrasyonu + şirket profili/kanal kimlikleri (YFZ 32). 18 Haziran 2026.*

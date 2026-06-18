@@ -6,7 +6,7 @@ import { tenants, kibiEntities, kibiTokenUsage, kibiSupportTickets, kibiSupportM
 import { learnFromTicket } from '../../engine/kibi/support-pipeline.js'
 import { encrypt, decrypt } from '../../lib/crypto.js'
 import { invalidateModelCache, seedDefaultModelConfigs } from '../../engine/ai/model-config.js'
-import { PROVIDERS, getConfigKey } from '../../engine/ai/providers.js'
+import { PROVIDERS, getConfigKey, pingProviderModel } from '../../engine/ai/providers.js'
 import { invalidateProviderKeyCache, aiComplete, CONVERSATION_MODELS } from '../../engine/ai/gateway.js'
 import { redis } from '../../lib/redis.js'
 import { qdrant, embedConfigured, invalidateEmbeddingModelCache, vectorSearch } from '../../lib/qdrant.js'
@@ -612,64 +612,8 @@ Sadece yanıt metnini yaz, başka açıklama ekleme.`
     let apiKey: string
     try { apiKey = decrypt(encryptedKey) } catch { return reply.status(500).send({ error: 'API key çözümlenemedi' }) }
 
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-      ...providerDef.extraHeaders,
-      ...(providerDef.authHeader === 'x-api-key'
-        ? { 'x-api-key': apiKey }
-        : { 'Authorization': `Bearer ${apiKey}` }),
-    }
-
-    // Anthropic uses a different request body format
-    const isAnthropic = providerId === 'anthropic'
-    const body = isAnthropic
-      ? JSON.stringify({ model: modelId, max_tokens: 1, messages: [{ role: 'user', content: 'ping' }] })
-      : JSON.stringify({ model: modelId, max_tokens: 1, messages: [{ role: 'user', content: 'ping' }] })
-
-    const pingPath = isAnthropic ? '/messages' : '/chat/completions'
-
-    const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), 15_000)
-    const t0 = Date.now()
-
-    try {
-      const res = await fetch(`${providerDef.baseUrl}${pingPath}`, {
-        method: 'POST', headers, body, signal: controller.signal,
-      })
-      clearTimeout(timer)
-      const latencyMs = Date.now() - t0
-
-      if (res.ok || res.status === 200) {
-        const speed = latencyMs < 1000 ? 'fast' : latencyMs < 3000 ? 'slow' : 'very_slow'
-        return reply.send({ ok: true, latencyMs, status: res.status, speed })
-      }
-
-      const errBody = await res.text().catch(() => '')
-      let errorType: string
-      if (res.status === 401 || res.status === 403) errorType = 'auth'
-      else if (res.status === 404)                  errorType = 'not_found'
-      else if (res.status === 429)                  errorType = 'rate_limit'
-      else if (res.status >= 500)                   errorType = 'server_error'
-      else                                          errorType = 'error'
-
-      // Try to extract a cleaner error message from JSON
-      let errMsg = errBody.slice(0, 300)
-      try {
-        const parsed = JSON.parse(errBody)
-        errMsg = parsed?.error?.message ?? parsed?.message ?? errMsg
-      } catch {}
-
-      return reply.send({ ok: false, latencyMs, status: res.status, errorType, error: errMsg.slice(0, 200) })
-    } catch (e: any) {
-      clearTimeout(timer)
-      const latencyMs = Date.now() - t0
-      const isTimeout = e.name === 'AbortError'
-      return reply.send({
-        ok: false, latencyMs,
-        errorType: isTimeout ? 'timeout' : 'network',
-        error: isTimeout ? 'Zaman aşımı (15s)' : e.message,
-      })
-    }
+    const result = await pingProviderModel(providerDef, modelId, apiKey)
+    return reply.send(result)
   })
 
   app.post('/seed', async (req, reply) => {

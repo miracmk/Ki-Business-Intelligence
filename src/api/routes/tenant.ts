@@ -1,14 +1,14 @@
 import type { FastifyPluginAsync } from 'fastify'
 import { db } from '../../lib/db.js'
-import { aiConfigs, emailConfigs, tenantMemberships, tenants, users, platformConfigs, kibiModelConfigs, knowledgeEntries, kibiEntities } from '../../../db/schema.js'
+import { aiConfigs, emailConfigs, tenantMemberships, tenants, users, platformConfigs, kibiModelConfigs, knowledgeEntries, kibiEntities, kibiEntityUsers, kibiPricingPackages } from '../../../db/schema.js'
 import { encryptJson, decryptJson, encrypt, decrypt } from '../../lib/crypto.js'
 import { eq, and, count as sqlCount } from 'drizzle-orm'
-import { getPlanUsage, PLAN_DEFS } from '../../lib/plan-limits.js'
+import { getPlanUsage, getAllPlanDefs } from '../../lib/plan-limits.js'
 import nodemailer from 'nodemailer'
 import * as argon2 from 'argon2'
 import { nanoid } from 'nanoid'
 import { env } from '../../../config/env.js'
-import { PROVIDERS, getConfigKey, KIBI_FREE_MODEL } from '../../engine/ai/providers.js'
+import { PROVIDERS, getConfigKey, KIBI_FREE_MODEL, pingProviderModel } from '../../engine/ai/providers.js'
 import { invalidateProviderKeyCache } from '../../engine/ai/gateway.js'
 import { redis } from '../../lib/redis.js'
 import { qdrant, embedConfigured } from '../../lib/qdrant.js'
@@ -16,6 +16,32 @@ import { chargeAndAddSubUser, getEntityPackage } from '../../engine/billing/bill
 
 const isUUID = (s: string | null | undefined): s is string =>
   !!s && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)
+
+// Entity Main her zaman; entity_supervisor sadece kibiEntityUsers.permissions.manageCompanyProfile=true ise
+// Şirket Profili / Ekip yönetimi yapabilir. Platform admin/supervisor destek amaçlı her zaman yetkili.
+async function canManageCompanyProfile(user: { sub: string; tenantId: string; role: string }): Promise<boolean> {
+  if (['entity_main', 'admin', 'supervisor'].includes(user.role)) return true
+  if (user.role !== 'entity_supervisor') return false
+  const entity = await db.query.kibiEntities.findFirst({
+    where: (t, { eq }) => eq(t.entityId, user.tenantId),
+    columns: { id: true },
+  })
+  if (!entity) return false
+  const entityUser = await db.query.kibiEntityUsers.findFirst({
+    where: (t, { and, eq }) => and(eq(t.entityId, entity.id), eq(t.userId, user.sub)),
+    columns: { permissions: true },
+  })
+  return (entityUser?.permissions as Record<string, boolean> | undefined)?.manageCompanyProfile === true
+}
+
+// API anahtarı / model rolü ataması sadece Custom Model paketinde aktiftir.
+async function requireCustomModelsPlan(tenantId: string): Promise<boolean> {
+  const entity = await db.query.kibiEntities.findFirst({
+    where: (t, { eq }) => eq(t.entityId, tenantId),
+    columns: { planName: true },
+  })
+  return entity?.planName === 'custom_models'
+}
 
 export const tenantRoutes: FastifyPluginAsync = async (app) => {
 
@@ -64,9 +90,9 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
     return usage
   })
 
-  // GET /api/v1/tenants/plans — tüm plan seçenekleri
+  // GET /api/v1/tenants/plans — tüm plan seçenekleri (kibi_pricing_packages)
   app.get('/plans', async () => {
-    return { plans: Object.values(PLAN_DEFS) }
+    return getAllPlanDefs()
   })
 
   // GET /api/v1/tenants/storage-usage
@@ -161,6 +187,9 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
     const user = req.user as { sub: string; tenantId: string; role: string }
     if (!isUUID(user.tenantId)) {
       return reply.status(400).send({ error: 'AI yapılandırması için entity bağlantısı gerekli. Admin kullanıcılar Platform Ayarları\'nı kullanmalıdır.' })
+    }
+    if (!['admin', 'supervisor'].includes(user.role) && !await requireCustomModelsPlan(user.tenantId)) {
+      return reply.status(403).send({ error: 'Bu özellik sadece Custom Model paketinde aktiftir.' })
     }
     const body = req.body as {
       provider?:              string
@@ -615,7 +644,10 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
   app.put('/ai-providers/:providerId', { onRequest: [app.authenticate] }, async (req, reply) => {
     const user = req.user as { sub: string; tenantId: string; role: string }
     if (!isUUID(user.tenantId)) return reply.status(400).send({ error: 'Entity bağlantısı gerekli' })
-    if (!['entity_main', 'admin'].includes(user.role)) return reply.status(403).send({ error: 'Yetkisiz' })
+    if (!await canManageCompanyProfile(user)) return reply.status(403).send({ error: 'Yetkisiz' })
+    if (!['admin', 'supervisor'].includes(user.role) && !await requireCustomModelsPlan(user.tenantId)) {
+      return reply.status(403).send({ error: 'Bu özellik sadece Custom Model paketinde aktiftir.' })
+    }
 
     const { providerId } = req.params as { providerId: string }
     if (!PROVIDERS.find(p => p.id === providerId)) return reply.status(400).send({ error: 'Bilinmeyen provider' })
@@ -654,7 +686,10 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
   app.delete('/ai-providers/:providerId', { onRequest: [app.authenticate] }, async (req, reply) => {
     const user = req.user as { sub: string; tenantId: string; role: string }
     if (!isUUID(user.tenantId)) return reply.status(400).send({ error: 'Entity bağlantısı gerekli' })
-    if (!['entity_main', 'admin'].includes(user.role)) return reply.status(403).send({ error: 'Yetkisiz' })
+    if (!await canManageCompanyProfile(user)) return reply.status(403).send({ error: 'Yetkisiz' })
+    if (!['admin', 'supervisor'].includes(user.role) && !await requireCustomModelsPlan(user.tenantId)) {
+      return reply.status(403).send({ error: 'Bu özellik sadece Custom Model paketinde aktiftir.' })
+    }
 
     const { providerId } = req.params as { providerId: string }
 
@@ -757,6 +792,99 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
     }
 
     return reply.send({ providers: results })
+  })
+
+  // GET /api/v1/tenants/ai-providers/roles — entity's role→model overrides
+  app.get('/ai-providers/roles', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = req.user as { sub: string; tenantId: string }
+    if (!isUUID(user.tenantId)) return reply.send({ roles: [] })
+
+    const aiConfig = await db.query.aiConfigs.findFirst({
+      where: (t, { eq }) => eq(t.tenantId, user.tenantId),
+    })
+    const overrides = (aiConfig?.settings as any)?.modelOverrides as Record<string, any> | undefined ?? {}
+
+    const roles = Object.entries(overrides).map(([modelRole, override]) => {
+      const primary   = typeof override === 'string' ? override : override?.primary ?? ''
+      const fallbacks = Array.isArray(override) ? override : (override?.fallbacks ?? [])
+      return { modelRole, primaryModel: primary, fallback1: fallbacks[0], fallback2: fallbacks[1] }
+    })
+    return reply.send({ roles })
+  })
+
+  // PUT /api/v1/tenants/ai-providers/roles — save entity's role→model overrides
+  app.put('/ai-providers/roles', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = req.user as { sub: string; tenantId: string; role: string }
+    if (!isUUID(user.tenantId)) return reply.status(400).send({ error: 'Entity bağlantısı gerekli' })
+    if (!await canManageCompanyProfile(user)) return reply.status(403).send({ error: 'Yetkisiz' })
+    if (!['admin', 'supervisor'].includes(user.role) && !await requireCustomModelsPlan(user.tenantId)) {
+      return reply.status(403).send({ error: 'Bu özellik sadece Custom Model paketinde aktiftir.' })
+    }
+
+    const { roles } = req.body as { roles: Record<string, { primary: string; fallback1?: string; fallback2?: string }> }
+    if (!roles || typeof roles !== 'object') return reply.status(400).send({ error: 'roles zorunlu' })
+
+    const existing = await db.query.aiConfigs.findFirst({
+      where: (t, { eq }) => eq(t.tenantId, user.tenantId),
+    })
+    const existingSettings = (existing?.settings ?? {}) as Record<string, any>
+    const modelOverrides = { ...(existingSettings.modelOverrides ?? {}) }
+
+    for (const [role, cfg] of Object.entries(roles)) {
+      if (!cfg?.primary) continue
+      modelOverrides[role] = { primary: cfg.primary, fallbacks: [cfg.fallback1, cfg.fallback2].filter((v): v is string => !!v) }
+    }
+
+    if (existing) {
+      await db.update(aiConfigs)
+        .set({ settings: { ...existingSettings, modelOverrides } as any })
+        .where(eq(aiConfigs.id, existing.id))
+    } else {
+      await db.insert(aiConfigs).values({
+        tenantId: user.tenantId,
+        provider: 'openrouter' as any,
+        model:    'meta-llama/llama-3.3-70b-instruct:free',
+        isDefault: true,
+        settings: { modelOverrides } as any,
+      })
+    }
+
+    return reply.send({ ok: true })
+  })
+
+  // POST /api/v1/tenants/ai-providers/test-model — ping a model using the entity's own (or platform-shared) key
+  app.post('/ai-providers/test-model', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = req.user as { sub: string; tenantId: string }
+    if (!isUUID(user.tenantId)) return reply.status(400).send({ error: 'Entity bağlantısı gerekli' })
+
+    const { model } = req.body as { model: string }
+    if (!model) return reply.status(400).send({ error: 'model zorunlu (format: provider::modelId)' })
+
+    const [providerId, ...modelParts] = model.split('::')
+    const modelId = modelParts.join('::')
+    if (!providerId || !modelId) return reply.status(400).send({ error: 'Geçersiz model formatı (beklenen: provider::modelId)' })
+
+    if (providerId === 'kibi_free') return reply.send({ ok: true, latencyMs: 0, speed: 'fast' as const })
+
+    const providerDef = PROVIDERS.find(p => p.id === providerId)
+    if (!providerDef) return reply.status(400).send({ error: `Bilinmeyen sağlayıcı: ${providerId}` })
+
+    const aiConfig = await db.query.aiConfigs.findFirst({
+      where: (t, { eq }) => eq(t.tenantId, user.tenantId),
+    })
+    let encryptedKey = ((aiConfig?.settings as any)?.providerKeys as Record<string, string> | undefined)?.[providerId]
+
+    if (!encryptedKey) {
+      const allPlatformRows = await db.select().from(platformConfigs)
+      encryptedKey = allPlatformRows.find(r => r.key === `ai_provider_entity_free_${providerId}`)?.value
+    }
+    if (!encryptedKey) return reply.status(400).send({ error: `${providerDef.name} için API key yapılandırılmamış` })
+
+    let apiKey: string
+    try { apiKey = decrypt(encryptedKey) } catch { return reply.status(500).send({ error: 'API key çözümlenemedi' }) }
+
+    const result = await pingProviderModel(providerDef, modelId, apiKey)
+    return reply.send(result)
   })
 
   // GET /api/v1/tenants/external-users — list external users for this entity
@@ -916,6 +1044,136 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
 
     return reply.send({ ok: true })
   })
+
+  // ── Business profile (sector, size, revenue, etc.) ───────────────────────────
+
+  // GET /api/v1/tenants/me/business-profile
+  app.get('/me/business-profile', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = req.user as { sub: string; tenantId: string }
+    if (!isUUID(user.tenantId)) return reply.send({ profile: {} })
+    const tenant = await db.query.tenants.findFirst({ where: (t, { eq }) => eq(t.id, user.tenantId) })
+    const settings = (tenant?.settings ?? {}) as Record<string, any>
+    return reply.send({ profile: settings.businessProfile ?? {} })
+  })
+
+  // PUT /api/v1/tenants/me/business-profile
+  app.put('/me/business-profile', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = req.user as { sub: string; tenantId: string; role: string }
+    if (!isUUID(user.tenantId)) return reply.status(400).send({ error: 'Entity bağlantısı gerekli' })
+    if (!(await canManageCompanyProfile(user))) return reply.status(403).send({ error: 'Yetkisiz' })
+
+    const body = req.body as {
+      sector?:               string
+      employee_count?:       string
+      annual_revenue?:       string
+      address?:              string
+      city?:                 string
+      postal_code?:          string
+      country?:              string
+      tax_number?:           string
+      registration_number?:  string
+      founded_date?:         string
+      logo_url?:             string
+      fiscal_year_start?:    string
+    }
+
+    const tenant = await db.query.tenants.findFirst({ where: (t, { eq }) => eq(t.id, user.tenantId) })
+    const existing = (tenant?.settings ?? {}) as Record<string, any>
+    const current = existing.businessProfile ?? {}
+    await db.update(tenants)
+      .set({ settings: { ...existing, businessProfile: { ...current, ...body } } as any })
+      .where(eq(tenants.id, user.tenantId))
+    return reply.send({ ok: true })
+  })
+
+  // ── Channel identifiers (for inbound routing: WA, IG, TG, email) ─────────────
+
+  // GET /api/v1/tenants/me/channel-ids
+  app.get('/me/channel-ids', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = req.user as { sub: string; tenantId: string }
+    if (!isUUID(user.tenantId)) return reply.send({ channelIds: {} })
+    const tenant = await db.query.tenants.findFirst({ where: (t, { eq }) => eq(t.id, user.tenantId) })
+    const settings = (tenant?.settings ?? {}) as Record<string, any>
+    return reply.send({ channelIds: settings.channelIds ?? {} })
+  })
+
+  // PUT /api/v1/tenants/me/channel-ids
+  app.put('/me/channel-ids', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = req.user as { sub: string; tenantId: string; role: string }
+    if (!isUUID(user.tenantId)) return reply.status(400).send({ error: 'Entity bağlantısı gerekli' })
+    if (!(await canManageCompanyProfile(user))) return reply.status(403).send({ error: 'Yetkisiz' })
+
+    const body = req.body as {
+      whatsapp_phones?:    string[]
+      instagram_handles?:  string[]
+      telegram_ids?:       string[]
+      email_domains?:      string[]
+    }
+
+    const tenant = await db.query.tenants.findFirst({ where: (t, { eq }) => eq(t.id, user.tenantId) })
+    const existing = (tenant?.settings ?? {}) as Record<string, any>
+    const current = existing.channelIds ?? {}
+    await db.update(tenants)
+      .set({ settings: { ...existing, channelIds: { ...current, ...body } } as any })
+      .where(eq(tenants.id, user.tenantId))
+    return reply.send({ ok: true })
+  })
+
+  // GET /api/v1/tenants/me/permissions — caller's own kibiEntityUsers.permissions flags
+  app.get('/me/permissions', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = req.user as { sub: string; tenantId: string }
+    if (!isUUID(user.tenantId)) return reply.send({ permissions: {} })
+    const entity = await db.query.kibiEntities.findFirst({
+      where: (t, { eq }) => eq(t.entityId, user.tenantId),
+      columns: { id: true },
+    })
+    if (!entity) return reply.send({ permissions: {} })
+    const entityUser = await db.query.kibiEntityUsers.findFirst({
+      where: (t, { and, eq }) => and(eq(t.entityId, entity.id), eq(t.userId, user.sub)),
+      columns: { permissions: true },
+    })
+    return reply.send({ permissions: entityUser?.permissions ?? {} })
+  })
+
+  // PUT /api/v1/tenants/users/:userId/company-profile-permission — entity_main grants/revokes
+  // an entity_supervisor's right to view/edit Şirket Profili + Ekip
+  app.put('/users/:userId/company-profile-permission', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = req.user as { sub: string; tenantId: string; role: string }
+    const { userId } = req.params as { userId: string }
+    const { allow } = req.body as { allow: boolean }
+
+    if (!['entity_main', 'admin', 'supervisor'].includes(user.role)) {
+      return reply.status(403).send({ error: 'Bu işlem için yetkiniz yok' })
+    }
+    if (!isUUID(user.tenantId)) return reply.status(403).send({ error: 'Entity bağlantısı gerekli' })
+
+    const entity = await db.query.kibiEntities.findFirst({
+      where: (t, { eq }) => eq(t.entityId, user.tenantId),
+      columns: { id: true },
+    })
+    if (!entity) return reply.status(404).send({ error: 'Entity bulunamadı' })
+
+    const entityUser = await db.query.kibiEntityUsers.findFirst({
+      where: (t, { and, eq }) => and(eq(t.entityId, entity.id), eq(t.userId, userId)),
+    })
+
+    if (entityUser) {
+      const current = (entityUser.permissions ?? {}) as Record<string, boolean>
+      await db.update(kibiEntityUsers)
+        .set({ permissions: { ...current, manageCompanyProfile: allow } })
+        .where(and(eq(kibiEntityUsers.entityId, entity.id), eq(kibiEntityUsers.userId, userId)))
+    } else {
+      await db.insert(kibiEntityUsers).values({
+        entityId:    entity.id,
+        userId,
+        role:        'entity_supervisor',
+        permissions: { manageCompanyProfile: allow },
+      })
+    }
+
+    return reply.send({ ok: true })
+  })
+
 }
 
 // ─── Channel Routes (prefix: /channels) ──────────────────────────────────────
@@ -956,77 +1214,5 @@ export const channelRoutes: FastifyPluginAsync = async (app) => {
 
     // For other channels: config presence is sufficient for a basic test
     return reply.send({ ok: true, message: 'Kanal yapılandırması mevcut' })
-  })
-
-  // ── Business profile (sector, size, revenue, etc.) ───────────────────────────
-
-  // GET /api/v1/tenants/me/business-profile
-  app.get('/me/business-profile', { onRequest: [app.authenticate] }, async (req, reply) => {
-    const user = req.user as { sub: string; tenantId: string }
-    if (!isUUID(user.tenantId)) return reply.send({ profile: {} })
-    const tenant = await db.query.tenants.findFirst({ where: (t, { eq }) => eq(t.id, user.tenantId) })
-    const settings = (tenant?.settings ?? {}) as Record<string, any>
-    return reply.send({ profile: settings.businessProfile ?? {} })
-  })
-
-  // PUT /api/v1/tenants/me/business-profile
-  app.put('/me/business-profile', { onRequest: [app.authenticate] }, async (req, reply) => {
-    const user = req.user as { sub: string; tenantId: string; role: string }
-    if (!isUUID(user.tenantId)) return reply.status(400).send({ error: 'Entity bağlantısı gerekli' })
-    if (!['entity_main', 'admin', 'supervisor'].includes(user.role)) return reply.status(403).send({ error: 'Yetkisiz' })
-
-    const body = req.body as {
-      sector?:               string
-      employee_count?:       string
-      annual_revenue?:       string
-      address?:              string
-      country?:              string
-      tax_number?:           string
-      registration_number?:  string
-      founded_date?:         string
-      logo_url?:             string
-      fiscal_year_start?:    string
-    }
-
-    const tenant = await db.query.tenants.findFirst({ where: (t, { eq }) => eq(t.id, user.tenantId) })
-    const existing = (tenant?.settings ?? {}) as Record<string, any>
-    const current = existing.businessProfile ?? {}
-    await db.update(tenants)
-      .set({ settings: { ...existing, businessProfile: { ...current, ...body } } as any })
-      .where(eq(tenants.id, user.tenantId))
-    return reply.send({ ok: true })
-  })
-
-  // ── Channel identifiers (for inbound routing: WA, IG, TG, email) ─────────────
-
-  // GET /api/v1/tenants/me/channel-ids
-  app.get('/me/channel-ids', { onRequest: [app.authenticate] }, async (req, reply) => {
-    const user = req.user as { sub: string; tenantId: string }
-    if (!isUUID(user.tenantId)) return reply.send({ channelIds: {} })
-    const tenant = await db.query.tenants.findFirst({ where: (t, { eq }) => eq(t.id, user.tenantId) })
-    const settings = (tenant?.settings ?? {}) as Record<string, any>
-    return reply.send({ channelIds: settings.channelIds ?? {} })
-  })
-
-  // PUT /api/v1/tenants/me/channel-ids
-  app.put('/me/channel-ids', { onRequest: [app.authenticate] }, async (req, reply) => {
-    const user = req.user as { sub: string; tenantId: string; role: string }
-    if (!isUUID(user.tenantId)) return reply.status(400).send({ error: 'Entity bağlantısı gerekli' })
-    if (!['entity_main', 'admin', 'supervisor'].includes(user.role)) return reply.status(403).send({ error: 'Yetkisiz' })
-
-    const body = req.body as {
-      whatsapp_phones?:    string[]
-      instagram_handles?:  string[]
-      telegram_ids?:       string[]
-      email_domains?:      string[]
-    }
-
-    const tenant = await db.query.tenants.findFirst({ where: (t, { eq }) => eq(t.id, user.tenantId) })
-    const existing = (tenant?.settings ?? {}) as Record<string, any>
-    const current = existing.channelIds ?? {}
-    await db.update(tenants)
-      .set({ settings: { ...existing, channelIds: { ...current, ...body } } as any })
-      .where(eq(tenants.id, user.tenantId))
-    return reply.send({ ok: true })
   })
 }

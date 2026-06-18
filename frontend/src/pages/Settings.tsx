@@ -8,6 +8,10 @@ import {
 import { Link } from 'react-router-dom'
 import api from '../lib/api'
 import { UniversalConnectorWizard } from '../components/UniversalConnectorWizard'
+import { SearchableSelect } from '../components/SearchableSelect'
+import { PhoneInput } from '../components/PhoneInput'
+import { COUNTRIES, TR_PROVINCES, getTaxLabel } from '../lib/geoData'
+import { AiProviderPanel, ENTITY_MODEL_ROLE_LABELS } from '../components/AiProviderPanel'
 
 // ─── Channel schemas (based on official API docs) ─────────────────────────────
 
@@ -747,6 +751,7 @@ export default function Settings() {
 
   const [tenant, setTenant] = useState<any>(null)
   const [userRole, setUserRole] = useState<string>('')
+  const [currentUserPerms, setCurrentUserPerms] = useState<Record<string, boolean>>({})
   const [accountSettings, setAccountSettings] = useState({ language: 'tr', timezone: 'Europe/Istanbul' })
   const [crmConnections, setCrmConnections] = useState<any[]>([])
   const [accountingConnections, setAccountingConnections] = useState<any[]>([])
@@ -802,12 +807,7 @@ export default function Settings() {
   const [loadingModels, setLoadingModels] = useState(false)
 
   // New multi-provider state
-  const [aiProviders,   setAiProviders]   = useState<any[]>([])
   const [aiModelGroups, setAiModelGroups] = useState<any[]>([])
-  const [loadingAiProv, setLoadingAiProv] = useState(false)
-  const [addingKeyFor,  setAddingKeyFor]  = useState<string | null>(null)
-  const [newKeyInput,   setNewKeyInput]   = useState('')
-  const [savingProvKey, setSavingProvKey] = useState(false)
 
   // Vector docs
   const [vectorDocs,        setVectorDocs]        = useState<any[]>([])
@@ -872,6 +872,7 @@ export default function Settings() {
   // Business profile state
   const [businessProfile, setBusinessProfile] = useState({
     sector: '', employee_count: '', annual_revenue: '', address: '', country: '',
+    city: '', postal_code: '',
     tax_number: '', registration_number: '', founded_date: '', logo_url: '', fiscal_year_start: '',
   })
   const [savingBp, setSavingBp] = useState(false)
@@ -889,13 +890,15 @@ export default function Settings() {
   const loadData = async () => {
     try {
       setLoading(true)
-      const [tenantRes, crmRes, accountingRes] = await Promise.all([
+      const [tenantRes, crmRes, accountingRes, permsRes] = await Promise.all([
         api.get('/tenants/me'),
         api.get('/crm/connections'),
         api.get('/accounting/connections'),
+        api.get('/tenants/me/permissions').catch(() => ({ data: { permissions: {} } })),
       ])
       setTenant(tenantRes.data)
       setUserRole(tenantRes.data.role ?? '')
+      setCurrentUserPerms(permsRes.data.permissions ?? {})
       setAccountSettings({
         language: tenantRes.data.tenant?.settings?.language ?? 'tr',
         timezone: tenantRes.data.tenant?.settings?.timezone ?? 'Europe/Istanbul',
@@ -991,43 +994,10 @@ export default function Settings() {
   }
 
   const loadAiProviders = async () => {
-    setLoadingAiProv(true)
     try {
-      const [provRes, modRes] = await Promise.allSettled([
-        api.get('/tenants/ai-providers'),
-        api.get('/tenants/ai-providers/all-models'),
-      ])
-      if (provRes.status === 'fulfilled') setAiProviders(provRes.value.data.providers ?? [])
-      if (modRes.status === 'fulfilled') setAiModelGroups(modRes.value.data.providers ?? [])
-    } catch { /* ignore */ } finally {
-      setLoadingAiProv(false)
-    }
-  }
-
-  const saveProviderKey = async (providerId: string) => {
-    if (!newKeyInput.trim()) return
-    setSavingProvKey(true)
-    try {
-      await api.put(`/tenants/ai-providers/${providerId}`, { apiKey: newKeyInput.trim() })
-      showSuccess('API key kaydedildi')
-      setAddingKeyFor(null)
-      setNewKeyInput('')
-      await loadAiProviders()
-    } catch (e: any) {
-      setError(e.response?.data?.error || 'Kaydedilemedi')
-    } finally {
-      setSavingProvKey(false)
-    }
-  }
-
-  const deleteProviderKey = async (providerId: string) => {
-    try {
-      await api.delete(`/tenants/ai-providers/${providerId}`)
-      showSuccess('Key silindi')
-      await loadAiProviders()
-    } catch (e: any) {
-      setError(e.response?.data?.error || 'Silinemedi')
-    }
+      const res = await api.get('/tenants/ai-providers/all-models')
+      setAiModelGroups(res.data.providers ?? [])
+    } catch { /* ignore */ }
   }
 
   const loadVectorDocs = async () => {
@@ -1091,9 +1061,13 @@ export default function Settings() {
       loadOpenRouterModels()
       loadAiProviders()
       loadVectorDocs()
+      if (!planUsage) {
+        api.get('/tenants/plan').then(r => setPlanUsage(r.data)).catch(() => {})
+      }
     }
     if (activeTab === 'company') {
       loadBusinessProfile()
+      api.get('/tenants/me/members').then(r => setTeamMembers(r.data.members ?? [])).catch(() => {})
     }
     if (activeTab === 'channels') {
       loadChannelConfigs()
@@ -1101,9 +1075,6 @@ export default function Settings() {
         const tpl = r.data.tenant?.settings?.messageTemplates ?? {}
         setMsgTemplates(tpl)
       }).catch(() => {})
-    }
-    if (activeTab === 'team') {
-      api.get('/tenants/me/members').then(r => setTeamMembers(r.data.members ?? [])).catch(() => {})
     }
     if (activeTab === 'plan') {
       setPlanLoading(true)
@@ -1545,6 +1516,9 @@ export default function Settings() {
     alert('Kopyalandı!')
   }
 
+  const isAuthorizedSupervisor = userRole === 'entity_supervisor' && currentUserPerms.manageCompanyProfile === true
+  const canManageCompanyProfile = userRole === 'entity_main' || isAuthorizedSupervisor || userRole === 'admin' || userRole === 'supervisor'
+
   const tabs = [
     { id: 'account',    label: 'Hesap',             icon: User },
     { id: 'company',    label: 'Şirket Profili',    icon: Building2 },
@@ -1553,7 +1527,6 @@ export default function Settings() {
     { id: 'accounting', label: 'Muhasebe',           icon: CreditCard },
     { id: 'channels',   label: 'Kanallar',           icon: MessageSquare },
     { id: 'plan',       label: 'Plan & Kullanım',    icon: Zap },
-    { id: 'team',       label: 'Ekip',               icon: Users },
     { id: 'security',   label: '2FA & Güvenlik',     icon: Shield },
   ]
 
@@ -1657,8 +1630,7 @@ export default function Settings() {
               </div>
               <div>
                 <label className="text-gray-400 text-sm mb-1 block flex items-center gap-1.5"><Phone size={11} /> Telefon</label>
-                <input value={profile.phone} onChange={e => setProfile(p => ({ ...p, phone: e.target.value }))}
-                  className="w-full px-3 py-2 bg-[#0a0a0a] border border-[#2a2a2a] rounded-lg text-white text-sm" placeholder="+90 555 000 0000" />
+                <PhoneInput value={profile.phone} onChange={phone => setProfile(p => ({ ...p, phone }))} />
               </div>
               <div>
                 <label className="text-gray-400 text-sm mb-1 block flex items-center gap-1.5"><MapPin size={11} /> Adres</label>
@@ -1737,13 +1709,52 @@ export default function Settings() {
           <div className="p-6 bg-[#111111] rounded-xl border border-[#2a2a2a]">
             <h3 className="text-lg font-semibold text-white mb-6 flex items-center gap-2"><Building2 size={18} /> Şirket Profili</h3>
             <p className="text-sm text-gray-400 mb-6">Bu bilgiler Entity AI ve KIBI AI tarafından konuşma başında şirketinizi tanımak için kullanılır.</p>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {!canManageCompanyProfile && (
+              <div className="mb-4 px-4 py-3 rounded-lg text-sm" style={{ background: 'rgba(251,191,36,0.08)', border: '1px solid rgba(251,191,36,0.20)', color: '#fbbf24' }}>
+                Bu bölümü sadece Entity Ana Yetkilisi veya yetkilendirilmiş bir Süpervizör düzenleyebilir. Bilgiler salt okunur gösteriliyor.
+              </div>
+            )}
+            <fieldset disabled={!canManageCompanyProfile} className="grid grid-cols-1 md:grid-cols-2 gap-4">
               {[
                 { key: 'sector',              label: 'Sektör',                    placeholder: 'Yazılım / Teknoloji' },
                 { key: 'employee_count',       label: 'Çalışan Sayısı',            placeholder: '50' },
                 { key: 'annual_revenue',       label: 'Son Yıl Cirosu',            placeholder: '5.000.000 TL' },
-                { key: 'country',              label: 'Kuruluş Ülkesi',            placeholder: 'Türkiye' },
-                { key: 'tax_number',           label: 'Vergi No / Kayıt No',       placeholder: '1234567890' },
+              ].map(({ key, label, placeholder }) => (
+                <div key={key}>
+                  <label className="text-gray-400 text-sm mb-1 block">{label}</label>
+                  <input
+                    className={inputCls}
+                    value={(businessProfile as any)[key]}
+                    placeholder={placeholder}
+                    onChange={e => setBusinessProfile(prev => ({ ...prev, [key]: e.target.value }))}
+                  />
+                </div>
+              ))}
+
+              <div>
+                <label className="text-gray-400 text-sm mb-1 block">Kuruluş Ülkesi</label>
+                <SearchableSelect
+                  disabled={!canManageCompanyProfile}
+                  options={COUNTRIES.map(c => ({ value: c.code, label: c.name }))}
+                  value={businessProfile.country}
+                  onChange={code => setBusinessProfile(prev => ({ ...prev, country: code }))}
+                  placeholder="Ülke seçiniz"
+                />
+              </div>
+
+              {(() => { const taxLabel = getTaxLabel(businessProfile.country); return (
+                <div>
+                  <label className="text-gray-400 text-sm mb-1 block">{taxLabel.label}</label>
+                  <input
+                    className={inputCls}
+                    value={businessProfile.tax_number}
+                    placeholder={taxLabel.placeholder}
+                    onChange={e => setBusinessProfile(prev => ({ ...prev, tax_number: e.target.value }))}
+                  />
+                </div>
+              ) })()}
+
+              {[
                 { key: 'registration_number',  label: 'Ticaret Sicil No',          placeholder: 'TR-12345' },
                 { key: 'founded_date',         label: 'Kuruluş Tarihi',            placeholder: '2015-03-01' },
                 { key: 'fiscal_year_start',    label: 'Mali Yıl Başlangıcı',       placeholder: 'Ocak' },
@@ -1759,16 +1770,48 @@ export default function Settings() {
                   />
                 </div>
               ))}
+
               <div className="md:col-span-2">
                 <label className="text-gray-400 text-sm mb-1 block">Adres</label>
                 <input
                   className={inputCls}
                   value={businessProfile.address}
-                  placeholder="Örn: Levent Mahallesi, Büyükdere Caddesi No:1, İstanbul"
+                  placeholder="Örn: Levent Mahallesi, Büyükdere Caddesi No:1"
                   onChange={e => setBusinessProfile(prev => ({ ...prev, address: e.target.value }))}
                 />
               </div>
-            </div>
+
+              <div>
+                <label className="text-gray-400 text-sm mb-1 block">Şehir / İl</label>
+                {businessProfile.country === 'TR' ? (
+                  <SearchableSelect
+                    disabled={!canManageCompanyProfile}
+                    options={TR_PROVINCES.map(p => ({ value: p, label: p }))}
+                    value={businessProfile.city}
+                    onChange={city => setBusinessProfile(prev => ({ ...prev, city }))}
+                    placeholder="İl seçiniz"
+                  />
+                ) : (
+                  <input
+                    className={inputCls}
+                    value={businessProfile.city}
+                    placeholder="Şehir"
+                    onChange={e => setBusinessProfile(prev => ({ ...prev, city: e.target.value }))}
+                  />
+                )}
+              </div>
+
+              <div>
+                <label className="text-gray-400 text-sm mb-1 block">Posta Kodu</label>
+                <input
+                  className={inputCls}
+                  value={businessProfile.postal_code}
+                  placeholder="34000"
+                  onChange={e => setBusinessProfile(prev => ({ ...prev, postal_code: e.target.value }))}
+                />
+              </div>
+            </fieldset>
+            {canManageCompanyProfile && (
             <button
               onClick={async () => {
                 setSavingBp(true)
@@ -1784,12 +1827,14 @@ export default function Settings() {
             >
               <Save size={14} />{savingBp ? 'Kaydediliyor...' : 'Profili Kaydet'}
             </button>
+            )}
           </div>
 
           {/* Channel identifiers card */}
           <div className="p-6 bg-[#111111] rounded-xl border border-[#2a2a2a]">
             <h3 className="text-lg font-semibold text-white mb-2 flex items-center gap-2"><MessageSquare size={18} /> Kanal Tanımlayıcıları</h3>
             <p className="text-sm text-gray-400 mb-6">WhatsApp, Instagram, Telegram veya e-posta üzerinden gelen mesajlar bu tanımlayıcılarla eşleştirilir. AI, hangi şirketten geldiğini otomatik anlar.</p>
+            <fieldset disabled={!canManageCompanyProfile}>
             {([
               { field: 'whatsapp_phones',   label: 'WhatsApp Telefon Numaraları', placeholder: '+905551234567' },
               { field: 'instagram_handles', label: 'Instagram Hesapları',          placeholder: '@sirketiniz' },
@@ -1832,6 +1877,8 @@ export default function Settings() {
                 </div>
               </div>
             ))}
+            </fieldset>
+            {canManageCompanyProfile && (
             <button
               onClick={async () => {
                 setSavingChannelIds(true)
@@ -1847,7 +1894,133 @@ export default function Settings() {
             >
               <Save size={14} />{savingChannelIds ? 'Kaydediliyor...' : 'Tanımlayıcıları Kaydet'}
             </button>
+            )}
           </div>
+
+          {/* ── Ekip (Team) — Şirket Profili altında, sadece yetkili kullanıcılara görünür ── */}
+          {canManageCompanyProfile && (
+            <>
+              {/* Invite form */}
+              <div className="p-5 rounded-2xl" style={{ background: 'var(--surface-modal)', border: '1px solid var(--border)' }}>
+                <h3 className="font-semibold text-sm mb-4 flex items-center gap-2" style={{ color: 'var(--text-1)' }}><Users size={16} /> Ekip Üyesi Davet Et</h3>
+                <div className="flex gap-3 flex-wrap">
+                  <div className="relative flex-1 min-w-[200px]">
+                    <Mail size={13} className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: 'var(--text-3)' }} />
+                    <input
+                      type="email" value={inviteEmail} onChange={e => setInviteEmail(e.target.value)}
+                      placeholder="e-posta adresi"
+                      className="w-full pl-8 pr-3 py-2 rounded-xl text-sm outline-none"
+                      style={{ background: 'var(--surface-2)', color: 'var(--text-1)', border: '1px solid var(--border)' }}
+                      onKeyDown={e => e.key === 'Enter' && sendInvite()}
+                    />
+                  </div>
+                  <select value={inviteRole} onChange={e => setInviteRole(e.target.value)}
+                    className="px-3 py-2 rounded-xl text-sm outline-none"
+                    style={{ background: 'var(--surface-2)', color: 'var(--text-1)', border: '1px solid var(--border)' }}>
+                    <option value="entity_sub">Standart Kullanıcı</option>
+                    <option value="entity_supervisor">Süpervizör</option>
+                    <option value="entity_main">Yönetici</option>
+                  </select>
+                  <button onClick={sendInvite} disabled={inviting || !inviteEmail.trim()}
+                    className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium disabled:opacity-40 transition-all"
+                    style={{ background: 'rgba(45,138,107,0.85)', color: '#fff' }}>
+                    <UserPlus size={14} />
+                    {inviting ? 'Gönderiliyor…' : 'Davet Et'}
+                  </button>
+                </div>
+                {inviteMsg && (
+                  <p className="text-xs mt-2" style={{ color: inviteMsg.includes('gönderildi') || inviteMsg.includes('eklendi') ? 'var(--forest)' : '#f87171' }}>
+                    {inviteMsg}
+                  </p>
+                )}
+              </div>
+
+              {/* Members list */}
+              <div className="p-5 rounded-2xl" style={{ background: 'var(--surface-modal)', border: '1px solid var(--border)' }}>
+                <h3 className="font-semibold text-sm mb-4" style={{ color: 'var(--text-1)' }}>
+                  Ekip Üyeleri ({teamMembers.length})
+                </h3>
+                {teamMembers.length === 0 ? (
+                  <p className="text-sm text-center py-6" style={{ color: 'var(--text-3)' }}>Henüz ekip üyesi yok</p>
+                ) : (
+                  <div className="space-y-2">
+                    {teamMembers.map((m: any) => {
+                      const isSubUser = m.role === 'entity_sub'
+                      const isSupervisor = m.role === 'entity_supervisor'
+                      const canManage = userRole === 'entity_main' || userRole === 'admin' || userRole === 'supervisor'
+                      const hasCrmPerm = m.permissions?.viewCrmStructure === true
+                      const hasCompanyProfilePerm = m.permissions?.manageCompanyProfile === true
+
+                      const toggleCrmPerm = async () => {
+                        try {
+                          await api.put(`/crm/users/${m.userId ?? m.id}/structure-permission`, { allow: !hasCrmPerm })
+                          api.get('/tenants/me/members').then(r => setTeamMembers(r.data.members ?? [])).catch(() => {})
+                        } catch { /* non-fatal */ }
+                      }
+
+                      const toggleCompanyProfilePerm = async () => {
+                        try {
+                          await api.put(`/tenants/users/${m.userId ?? m.id}/company-profile-permission`, { allow: !hasCompanyProfilePerm })
+                          api.get('/tenants/me/members').then(r => setTeamMembers(r.data.members ?? [])).catch(() => {})
+                        } catch { /* non-fatal */ }
+                      }
+
+                      return (
+                        <div key={m.userId ?? m.id} className="px-4 py-3 rounded-xl"
+                          style={{ background: 'var(--surface-2)', border: '1px solid var(--border)' }}>
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-3">
+                              <div className="w-8 h-8 rounded-full flex items-center justify-center text-sm font-semibold"
+                                style={{ background: 'rgba(45,138,107,0.15)', color: 'var(--forest)' }}>
+                                {(m.name ?? m.email ?? '?')[0].toUpperCase()}
+                              </div>
+                              <div>
+                                <p className="text-sm font-medium" style={{ color: 'var(--text-1)' }}>{m.name || m.email}</p>
+                                {m.name && <p className="text-xs" style={{ color: 'var(--text-3)' }}>{m.email}</p>}
+                              </div>
+                            </div>
+                            <span className="px-2 py-1 rounded-lg text-xs capitalize"
+                              style={{ background: 'var(--surface-modal)', color: 'var(--text-3)', border: '1px solid var(--border)' }}>
+                              {m.role?.replace('entity_', '') ?? 'üye'}
+                            </span>
+                          </div>
+                          {/* CRM yapısı yetki toggle — sadece entity_sub için */}
+                          {isSubUser && canManage && (
+                            <div className="flex items-center justify-between mt-2 pt-2" style={{ borderTop: '1px solid var(--border)' }}>
+                              <span className="text-xs" style={{ color: 'var(--text-3)' }}>CRM Yapısı Görme Yetkisi</span>
+                              <button
+                                onClick={toggleCrmPerm}
+                                className="relative inline-flex h-5 w-9 items-center rounded-full transition-colors"
+                                style={{ background: hasCrmPerm ? 'var(--accent)' : 'var(--surface-3)', border: '1px solid var(--border)' }}>
+                                <span className="inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform"
+                                  style={{ transform: `translateX(${hasCrmPerm ? '18px' : '2px'})` }} />
+                              </button>
+                            </div>
+                          )}
+                          {/* Şirket Profili & Ekip yönetimi yetki toggle — sadece entity_supervisor için, sadece entity_main/admin atayabilir */}
+                          {isSupervisor && (userRole === 'entity_main' || userRole === 'admin' || userRole === 'supervisor') && (
+                            <div className="flex items-center justify-between mt-2 pt-2" style={{ borderTop: '1px solid var(--border)' }}>
+                              <span className="text-xs" style={{ color: 'var(--text-3)' }}>Şirket Profili & Ekip Yönetimi Yetkisi</span>
+                              <button
+                                onClick={toggleCompanyProfilePerm}
+                                className="relative inline-flex h-5 w-9 items-center rounded-full transition-colors"
+                                style={{ background: hasCompanyProfilePerm ? 'var(--accent)' : 'var(--surface-3)', border: '1px solid var(--border)' }}>
+                                <span className="inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform"
+                                  style={{ transform: `translateX(${hasCompanyProfilePerm ? '18px' : '2px'})` }} />
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      )
+                    })}
+                  </div>
+                )}
+              </div>
+
+              {/* Support Agent Settings */}
+              <SupportAgentPanel />
+            </>
+          )}
         </div>
       )}
 
@@ -1868,113 +2041,30 @@ export default function Settings() {
             </div>
           )}
 
-          {/* ── Provider cards ── */}
-          <div className="rounded-2xl p-5" style={{ background: 'var(--surface-modal)', border: '1px solid var(--border)' }}>
-            <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
+          {/* ── AI Sağlayıcıları & Rol Modelleri ── */}
+          {planUsage && planUsage.planName !== 'custom_models' && (
+            <div className="p-4 rounded-xl flex items-start gap-3" style={{ background: 'rgba(251,191,36,0.06)', border: '1px solid rgba(251,191,36,0.20)' }}>
+              <AlertTriangle size={18} className="mt-0.5 flex-shrink-0" style={{ color: '#fbbf24' }} />
               <div>
-                <h3 className="font-bold" style={{ color: 'var(--text-1)' }}>AI Sağlayıcıları</h3>
-                <p className="text-xs mt-0.5" style={{ color: 'var(--text-3)' }}>Kendi API key'inizi girerek platform sağlayıcılarını override edebilirsiniz</p>
+                <p className="text-sm" style={{ color: '#fbbf24' }}>
+                  API anahtarı girişleri ve model seçiciler sadece <strong>Custom Model</strong> paketinde aktiftir.
+                </p>
+                <button onClick={() => setActiveTab('plan')} className="mt-1.5 inline-flex items-center gap-1 text-sm hover:opacity-80" style={{ color: '#fbbf24' }}>
+                  Plan & Kullanım'a Git <ExternalLink size={11} />
+                </button>
               </div>
-              <button onClick={loadAiProviders} disabled={loadingAiProv}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs"
-                style={{ background: 'var(--surface-modal-2)', border: '1px solid var(--border)', color: 'var(--text-2)' }}>
-                <RefreshCw size={12} className={loadingAiProv ? 'animate-spin' : ''} /> Yenile
-              </button>
             </div>
+          )}
 
-            {loadingAiProv
-              ? <div className="text-center py-6 text-sm" style={{ color: 'var(--text-3)' }}>Yükleniyor...</div>
-              : (
-                <div className="space-y-2">
-                  {/* kibi_free special card */}
-                  {(() => {
-                    const kf = aiProviders.find(p => p.id === 'kibi_free')
-                    if (!kf) return null
-                    return (
-                      <div className="rounded-xl p-4" style={{ background: 'rgba(38,166,154,0.06)', border: '1px solid rgba(38,166,154,0.25)' }}>
-                        <div className="flex items-start gap-3">
-                          <div className="w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0" style={{ background: 'linear-gradient(135deg, var(--accent), var(--forest))' }}>
-                            <Zap size={16} className="text-white" />
-                          </div>
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-center gap-2 flex-wrap">
-                              <span className="font-semibold" style={{ color: 'var(--text-1)' }}>KIBI Ücretsiz Altyapısı</span>
-                              <span className="text-[10px] px-2 py-0.5 rounded-full" style={{ background: 'rgba(38,166,154,0.15)', color: 'var(--accent)' }}>Platform Sağlıyor</span>
-                            </div>
-                            <p className="text-xs mt-1" style={{ color: 'var(--text-3)' }}>
-                              KIBI'nin yönettiği paylaşımlı AI altyapısı. Herhangi bir API key gerektirmez. Yüksek kullanımda rate limit'e girebilir.
-                            </p>
-                            <div className="flex items-center gap-1.5 mt-2 p-2 rounded-lg" style={{ background: 'rgba(251,191,36,0.08)', border: '1px solid rgba(251,191,36,0.20)' }}>
-                              <AlertTriangle size={12} style={{ color: '#fbbf24', flexShrink: 0 }} />
-                              <span className="text-[11px]" style={{ color: '#fbbf24' }}>Paylaşımlı altyapı — yoğun dönemlerde yavaşlayabilir</span>
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                    )
-                  })()}
-
-                  {/* Other providers */}
-                  {aiProviders.filter(p => p.id !== 'kibi_free').map((p: any) => (
-                    <div key={p.id} className="rounded-xl p-3.5" style={{ background: 'var(--surface-modal-2)', border: '1px solid var(--border)' }}>
-                      <div className="flex items-center justify-between gap-3 flex-wrap">
-                        <div className="flex items-center gap-2 min-w-0">
-                          <div className="min-w-0">
-                            <div className="flex items-center gap-2 flex-wrap">
-                              <span className="text-sm font-medium" style={{ color: p.source === 'none' ? 'var(--text-3)' : 'var(--text-1)' }}>{p.name}</span>
-                              {p.source === 'own' && (
-                                <span className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full" style={{ background: 'rgba(38,166,154,0.15)', color: 'var(--accent)' }}>
-                                  <CheckCircle size={9} /> Kendi Anahtarınız
-                                </span>
-                              )}
-                              {p.source === 'platform' && (
-                                <span className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-full" style={{ background: 'rgba(148,163,184,0.12)', color: 'var(--text-3)' }}>
-                                  Platform sağlıyor
-                                </span>
-                              )}
-                              {p.freeModels && <span className="text-[10px] px-1.5 py-0.5 rounded-full" style={{ background: 'rgba(74,222,128,0.12)', color: '#4ade80' }}>Ücretsiz</span>}
-                            </div>
-                          </div>
-                        </div>
-                        <div className="flex items-center gap-2 flex-shrink-0">
-                          <button onClick={() => { setAddingKeyFor(p.id === addingKeyFor ? null : p.id); setNewKeyInput('') }}
-                            className="text-xs px-3 py-1.5 rounded-lg transition-colors"
-                            style={{ background: 'rgba(38,166,154,0.10)', color: 'var(--accent)', border: '1px solid rgba(38,166,154,0.20)' }}>
-                            {p.source === 'own' ? 'Güncelle' : 'Kendi Key\'ini Ekle'}
-                          </button>
-                          {p.source === 'own' && (
-                            <button onClick={() => deleteProviderKey(p.id)}
-                              className="p-1.5 rounded-lg"
-                              style={{ background: 'rgba(239,68,68,0.08)', color: '#f87171', border: '1px solid rgba(239,68,68,0.15)' }}>
-                              <Trash2 size={12} />
-                            </button>
-                          )}
-                        </div>
-                      </div>
-                      {addingKeyFor === p.id && (
-                        <div className="mt-3 flex gap-2">
-                          <input type="password" value={newKeyInput} onChange={e => setNewKeyInput(e.target.value)}
-                            placeholder={`${p.name} API key...`}
-                            className="flex-1 px-3 py-2 rounded-lg text-sm outline-none"
-                            style={{ background: 'var(--surface-modal)', border: '1px solid var(--accent)', color: 'var(--text-1)' }} />
-                          <button onClick={() => saveProviderKey(p.id)} disabled={savingProvKey || !newKeyInput.trim()}
-                            className="flex items-center gap-1 px-3 py-2 rounded-lg text-xs text-white disabled:opacity-50"
-                            style={{ background: 'linear-gradient(135deg, var(--accent), var(--forest))' }}>
-                            <Save size={12} /> {savingProvKey ? '...' : 'Kaydet'}
-                          </button>
-                          <button onClick={() => { setAddingKeyFor(null); setNewKeyInput('') }}
-                            className="px-3 py-2 rounded-lg text-xs"
-                            style={{ background: 'var(--surface-modal-2)', color: 'var(--text-2)', border: '1px solid var(--border)' }}>
-                            İptal
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              )
-            }
-          </div>
+          <AiProviderPanel
+            scope="entity"
+            baseEndpoint="/tenants/ai-providers"
+            modelsPath="/tenants/ai-providers/all-models"
+            roleLabels={ENTITY_MODEL_ROLE_LABELS}
+            isAdmin={canManageCompanyProfile}
+            disabled={!!planUsage && planUsage.planName !== 'custom_models'}
+            showToast={(msg, ok = true) => ok ? showSuccess(msg) : setError(msg)}
+          />
 
           {/* ── Model assignments (existing tri-model) ── */}
           <div className="rounded-2xl p-5" style={{ background: 'var(--surface-modal)', border: '1px solid var(--border)' }}>
@@ -1995,7 +2085,7 @@ export default function Settings() {
               {openRouterModels.map(m => <option key={m.id} value={m.id} label={m.name} />)}
             </datalist>
 
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
+            <fieldset disabled={!!planUsage && planUsage.planName !== 'custom_models'} className="grid grid-cols-1 lg:grid-cols-3 gap-5">
               {[
                 { key: 'analysisModel', f1: 'analysisF1', f2: 'analysisF2', label: 'DB Analiz', desc: 'SQL · Yapısal sorgulama', color: 'var(--accent)' },
                 { key: 'vectorModel',   f1: 'vectorF1',   f2: 'vectorF2',   label: 'Vektör Analiz', desc: 'Qdrant · Semantik arama', color: '#a855f7' },
@@ -2024,15 +2114,17 @@ export default function Settings() {
                   ))}
                 </div>
               ))}
-            </div>
+            </fieldset>
 
-            <div className="flex justify-end mt-5">
-              <button onClick={saveAiConfig}
-                className="flex items-center gap-1.5 px-5 py-2 rounded-xl text-sm font-medium text-white"
-                style={{ background: 'linear-gradient(135deg, var(--accent), var(--forest))' }}>
-                <Save size={13} /> Kaydet
-              </button>
-            </div>
+            {(!planUsage || planUsage.planName === 'custom_models') && (
+              <div className="flex justify-end mt-5">
+                <button onClick={saveAiConfig}
+                  className="flex items-center gap-1.5 px-5 py-2 rounded-xl text-sm font-medium text-white"
+                  style={{ background: 'linear-gradient(135deg, var(--accent), var(--forest))' }}>
+                  <Save size={13} /> Kaydet
+                </button>
+              </div>
+            )}
           </div>
 
           {/* ── Vector Docs (Entity Knowledge Base) ── */}
@@ -2494,7 +2586,7 @@ export default function Settings() {
                         <div className="flex items-center justify-between mb-1">
                           <span className="text-sm" style={{ color: 'var(--text-2)' }}>{label}</span>
                           <span className="text-xs" style={{ color: pct >= 90 ? '#ef4444' : 'var(--text-3)' }}>
-                            {u.used} / {u.limit === 999999 ? '∞' : u.limit} {unit} ({pct}%)
+                            {u.used} / {u.limit == null ? 'Sınırsız' : u.limit} {unit}{u.limit == null ? '' : ` (${pct}%)`}
                           </span>
                         </div>
                         <div className="w-full rounded-full h-2" style={{ background: 'var(--surface-2)' }}>
@@ -2557,7 +2649,7 @@ export default function Settings() {
                             {isCurrent && <span className="ml-1 text-xs">(Aktif)</span>}
                           </p>
                           <p className="text-xs mb-2" style={{ color: 'var(--text-3)' }}>
-                            {p.monthlyMessages === 999999 ? 'Sınırsız' : p.monthlyMessages.toLocaleString()} mesaj/ay
+                            {p.monthlyMessages == null ? 'Sınırsız' : p.monthlyMessages.toLocaleString()} mesaj/ay
                           </p>
                           <p className="text-xs" style={{ color: 'var(--text-3)' }}>{p.maxUsers === 999 ? 'Sınırsız' : p.maxUsers} kullanıcı</p>
                           <p className="text-xs" style={{ color: 'var(--text-3)' }}>{p.maxConnections === 999 ? 'Sınırsız' : p.maxConnections} bağlantı</p>
@@ -2580,109 +2672,6 @@ export default function Settings() {
               Plan bilgisi yüklenemedi.
             </div>
           )}
-        </div>
-      )}
-
-      {/* ── Team tab ── */}
-      {activeTab === 'team' && (
-        <div className="space-y-6">
-          {/* Invite form */}
-          <div className="p-5 rounded-2xl" style={{ background: 'var(--surface-modal)', border: '1px solid var(--border)' }}>
-            <h3 className="font-semibold text-sm mb-4" style={{ color: 'var(--text-1)' }}>Ekip Üyesi Davet Et</h3>
-            <div className="flex gap-3 flex-wrap">
-              <div className="relative flex-1 min-w-[200px]">
-                <Mail size={13} className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: 'var(--text-3)' }} />
-                <input
-                  type="email" value={inviteEmail} onChange={e => setInviteEmail(e.target.value)}
-                  placeholder="e-posta adresi"
-                  className="w-full pl-8 pr-3 py-2 rounded-xl text-sm outline-none"
-                  style={{ background: 'var(--surface-2)', color: 'var(--text-1)', border: '1px solid var(--border)' }}
-                  onKeyDown={e => e.key === 'Enter' && sendInvite()}
-                />
-              </div>
-              <select value={inviteRole} onChange={e => setInviteRole(e.target.value)}
-                className="px-3 py-2 rounded-xl text-sm outline-none"
-                style={{ background: 'var(--surface-2)', color: 'var(--text-1)', border: '1px solid var(--border)' }}>
-                <option value="entity_sub">Standart Kullanıcı</option>
-                <option value="entity_supervisor">Süpervizör</option>
-                <option value="entity_main">Yönetici</option>
-              </select>
-              <button onClick={sendInvite} disabled={inviting || !inviteEmail.trim()}
-                className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium disabled:opacity-40 transition-all"
-                style={{ background: 'rgba(45,138,107,0.85)', color: '#fff' }}>
-                <UserPlus size={14} />
-                {inviting ? 'Gönderiliyor…' : 'Davet Et'}
-              </button>
-            </div>
-            {inviteMsg && (
-              <p className="text-xs mt-2" style={{ color: inviteMsg.includes('gönderildi') || inviteMsg.includes('eklendi') ? 'var(--forest)' : '#f87171' }}>
-                {inviteMsg}
-              </p>
-            )}
-          </div>
-
-          {/* Members list */}
-          <div className="p-5 rounded-2xl" style={{ background: 'var(--surface-modal)', border: '1px solid var(--border)' }}>
-            <h3 className="font-semibold text-sm mb-4" style={{ color: 'var(--text-1)' }}>
-              Ekip Üyeleri ({teamMembers.length})
-            </h3>
-            {teamMembers.length === 0 ? (
-              <p className="text-sm text-center py-6" style={{ color: 'var(--text-3)' }}>Henüz ekip üyesi yok</p>
-            ) : (
-              <div className="space-y-2">
-                {teamMembers.map((m: any) => {
-                  const isSubUser = m.role === 'entity_sub'
-                  const canManage = userRole === 'entity_main' || userRole === 'admin' || userRole === 'supervisor'
-                  const hasCrmPerm = m.permissions?.viewCrmStructure === true
-
-                  const toggleCrmPerm = async () => {
-                    try {
-                      await api.put(`/crm/users/${m.userId ?? m.id}/structure-permission`, { allow: !hasCrmPerm })
-                      api.get('/tenants/me/members').then(r => setTeamMembers(r.data.members ?? [])).catch(() => {})
-                    } catch { /* non-fatal */ }
-                  }
-
-                  return (
-                    <div key={m.userId ?? m.id} className="px-4 py-3 rounded-xl"
-                      style={{ background: 'var(--surface-2)', border: '1px solid var(--border)' }}>
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-3">
-                          <div className="w-8 h-8 rounded-full flex items-center justify-center text-sm font-semibold"
-                            style={{ background: 'rgba(45,138,107,0.15)', color: 'var(--forest)' }}>
-                            {(m.name ?? m.email ?? '?')[0].toUpperCase()}
-                          </div>
-                          <div>
-                            <p className="text-sm font-medium" style={{ color: 'var(--text-1)' }}>{m.name || m.email}</p>
-                            {m.name && <p className="text-xs" style={{ color: 'var(--text-3)' }}>{m.email}</p>}
-                          </div>
-                        </div>
-                        <span className="px-2 py-1 rounded-lg text-xs capitalize"
-                          style={{ background: 'var(--surface-modal)', color: 'var(--text-3)', border: '1px solid var(--border)' }}>
-                          {m.role?.replace('entity_', '') ?? 'üye'}
-                        </span>
-                      </div>
-                      {/* CRM yapısı yetki toggle — sadece entity_sub için */}
-                      {isSubUser && canManage && (
-                        <div className="flex items-center justify-between mt-2 pt-2" style={{ borderTop: '1px solid var(--border)' }}>
-                          <span className="text-xs" style={{ color: 'var(--text-3)' }}>CRM Yapısı Görme Yetkisi</span>
-                          <button
-                            onClick={toggleCrmPerm}
-                            className="relative inline-flex h-5 w-9 items-center rounded-full transition-colors"
-                            style={{ background: hasCrmPerm ? 'var(--accent)' : 'var(--surface-3)', border: '1px solid var(--border)' }}>
-                            <span className="inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform"
-                              style={{ transform: `translateX(${hasCrmPerm ? '18px' : '2px'})` }} />
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                  )
-                })}
-              </div>
-            )}
-          </div>
-
-          {/* Support Agent Settings */}
-          <SupportAgentPanel />
         </div>
       )}
 

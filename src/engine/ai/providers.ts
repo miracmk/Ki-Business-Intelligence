@@ -206,3 +206,69 @@ export function buildModelString(provider: string, model: string): string {
 
 /** Virtual model string for entity free tier routing */
 export const KIBI_FREE_MODEL = 'kibi_free::default'
+
+export interface PingResult {
+  ok:         boolean
+  latencyMs:  number
+  status?:    number
+  speed?:     'fast' | 'slow' | 'very_slow'
+  errorType?: string
+  error?:     string
+}
+
+/** Sends a minimal 1-token chat request to a provider/model to measure latency and reachability. */
+export async function pingProviderModel(providerDef: ProviderDef, modelId: string, apiKey: string): Promise<PingResult> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...providerDef.extraHeaders,
+    ...(providerDef.authHeader === 'x-api-key'
+      ? { 'x-api-key': apiKey }
+      : { 'Authorization': `Bearer ${apiKey}` }),
+  }
+
+  const isAnthropic = providerDef.id === 'anthropic'
+  const body = JSON.stringify({ model: modelId, max_tokens: 1, messages: [{ role: 'user', content: 'ping' }] })
+  const pingPath = isAnthropic ? '/messages' : '/chat/completions'
+
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 15_000)
+  const t0 = Date.now()
+
+  try {
+    const res = await fetch(`${providerDef.baseUrl}${pingPath}`, {
+      method: 'POST', headers, body, signal: controller.signal,
+    })
+    clearTimeout(timer)
+    const latencyMs = Date.now() - t0
+
+    if (res.ok || res.status === 200) {
+      const speed = latencyMs < 1000 ? 'fast' : latencyMs < 3000 ? 'slow' : 'very_slow'
+      return { ok: true, latencyMs, status: res.status, speed }
+    }
+
+    const errBody = await res.text().catch(() => '')
+    let errorType: string
+    if (res.status === 401 || res.status === 403) errorType = 'auth'
+    else if (res.status === 404)                  errorType = 'not_found'
+    else if (res.status === 429)                  errorType = 'rate_limit'
+    else if (res.status >= 500)                   errorType = 'server_error'
+    else                                          errorType = 'error'
+
+    let errMsg = errBody.slice(0, 300)
+    try {
+      const parsed = JSON.parse(errBody)
+      errMsg = parsed?.error?.message ?? parsed?.message ?? errMsg
+    } catch {}
+
+    return { ok: false, latencyMs, status: res.status, errorType, error: errMsg.slice(0, 200) }
+  } catch (e: any) {
+    clearTimeout(timer)
+    const latencyMs = Date.now() - t0
+    const isTimeout = e.name === 'AbortError'
+    return {
+      ok: false, latencyMs,
+      errorType: isTimeout ? 'timeout' : 'network',
+      error: isTimeout ? 'Zaman aşımı (15s)' : e.message,
+    }
+  }
+}

@@ -1,76 +1,44 @@
 /**
- * Plan Limits — YFZ 27
+ * Plan Limits — YFZ 27, rewired onto the YFZ 32 5-tier pricing system
  * Merkezi plan limit tanımları + kontrol fonksiyonu
  */
 
 import { db }          from './db.js'
-import { kibiEntities, entityMetrics } from '../../db/schema.js'
-import { eq }          from 'drizzle-orm'
+import { kibiEntities, entityMetrics, kibiPricingPackages } from '../../db/schema.js'
+import { getEntityPackage } from '../engine/billing/billing.js'
+import { eq, asc, sql } from 'drizzle-orm'
 
 export interface PlanDef {
   name:            string
   displayName:     string
-  monthlyMessages: number
+  monthlyMessages: number | null   // null = unlimited
   maxUsers:        number
   maxConnections:  number
   maxStorageMb:    number
-  channels:        string[]
-  aiModels:        'free' | 'standard' | 'premium' | 'unlimited'
-  supportSla:      string
 }
 
-export const PLAN_DEFS: Record<string, PlanDef> = {
-  free: {
-    name:            'free',
-    displayName:     'Ücretsiz',
-    monthlyMessages: 100,
-    maxUsers:        2,
-    maxConnections:  1,
-    maxStorageMb:    512,
-    channels:        ['portal'],
-    aiModels:        'free',
-    supportSla:      '72 saat',
-  },
-  starter: {
-    name:            'starter',
-    displayName:     'Başlangıç',
-    monthlyMessages: 1000,
-    maxUsers:        5,
-    maxConnections:  3,
-    maxStorageMb:    2048,
-    channels:        ['portal', 'whatsapp', 'email'],
-    aiModels:        'standard',
-    supportSla:      '24 saat',
-  },
-  growth: {
-    name:            'growth',
-    displayName:     'Büyüme',
-    monthlyMessages: 5000,
-    maxUsers:        15,
-    maxConnections:  10,
-    maxStorageMb:    10240,
-    channels:        ['portal', 'whatsapp', 'email', 'telegram', 'instagram'],
-    aiModels:        'premium',
-    supportSla:      '4 saat',
-  },
-  enterprise: {
-    name:            'enterprise',
-    displayName:     'Kurumsal',
-    monthlyMessages: 999999,
-    maxUsers:        999,
-    maxConnections:  999,
-    maxStorageMb:    102400,
-    channels:        ['portal', 'whatsapp', 'email', 'telegram', 'instagram', 'api'],
-    aiModels:        'unlimited',
-    supportSla:      '1 saat (SLA)',
-  },
+// Display-only limits not tracked by kibi_pricing_packages (connections/storage were
+// never billing-relevant — kept generous so they don't falsely block usage).
+const DISPLAY_DEFAULTS = { maxConnections: 999, maxStorageMb: 102400 }
+
+export async function getAllPlanDefs(): Promise<PlanDef[]> {
+  const packages = await db.select().from(kibiPricingPackages)
+    .where(eq(kibiPricingPackages.isActive, true))
+    .orderBy(asc(kibiPricingPackages.sortOrder))
+  return packages.map(pkg => ({
+    name:            pkg.planName ?? pkg.name,
+    displayName:     pkg.displayName,
+    monthlyMessages: pkg.monthlyMessageLimit,
+    maxUsers:        pkg.maxUsers,
+    ...DISPLAY_DEFAULTS,
+  }))
 }
 
 export interface PlanUsage {
   planName:        string
   plan:            PlanDef
   usage: {
-    monthlyMessages: { used: number; limit: number; pct: number }
+    monthlyMessages: { used: number; limit: number | null; pct: number }
     users:           { used: number; limit: number; pct: number }
     connections:     { used: number; limit: number; pct: number }
     storageMb:       { used: number; limit: number; pct: number }
@@ -82,20 +50,24 @@ export interface PlanUsage {
 export async function getPlanUsage(tenantId: string): Promise<PlanUsage | null> {
   const entity = await db.query.kibiEntities.findFirst({
     where: (t, { eq }) => eq(t.entityId, tenantId),
-    columns: { id: true, planName: true },
+    columns: { id: true, planName: true, messagesUsedThisMonth: true },
   })
   if (!entity) return null
 
   const planName = entity.planName ?? 'free'
-  const plan     = PLAN_DEFS[planName] ?? PLAN_DEFS.free
+  const pkg       = await getEntityPackage(planName)
+
+  const plan: PlanDef = pkg
+    ? { name: planName, displayName: pkg.displayName, monthlyMessages: pkg.monthlyMessageLimit, maxUsers: pkg.maxUsers, ...DISPLAY_DEFAULTS }
+    : { name: planName, displayName: planName, monthlyMessages: 100, maxUsers: 2, ...DISPLAY_DEFAULTS }
 
   const [metrics, memberCount, connectionCount] = await Promise.allSettled([
     db.query.entityMetrics.findFirst({ where: (t, { eq }) => eq(t.entityId, entity.id) }),
-    db.execute(`SELECT COUNT(*) FROM tenant_memberships WHERE tenant_id = (SELECT entity_id FROM kibi_entities WHERE id = '${entity.id}')` as any),
-    db.execute(`SELECT COUNT(*) FROM crm_connections WHERE entity_id = '${entity.id}'` as any),
+    db.execute(sql`SELECT COUNT(*) FROM tenant_memberships WHERE tenant_id = (SELECT entity_id FROM kibi_entities WHERE id = ${entity.id})`),
+    db.execute(sql`SELECT COUNT(*) FROM crm_connections WHERE entity_id = ${entity.id}`),
   ])
 
-  const msgs  = metrics.status === 'fulfilled' ? (metrics.value?.currentMonthMessages ?? 0) : 0
+  const msgs  = entity.messagesUsedThisMonth ?? 0
   const users = memberCount.status === 'fulfilled'
     ? Number((Array.isArray(memberCount.value) ? memberCount.value[0] : (memberCount.value as any).rows?.[0])?.count ?? 1)
     : 1
@@ -106,7 +78,7 @@ export async function getPlanUsage(tenantId: string): Promise<PlanUsage | null> 
     ? Number(metrics.value?.totalStorageMb ?? 0)
     : 0
 
-  const pct = (used: number, limit: number) => Math.min(100, Math.round(used / Math.max(limit, 1) * 100))
+  const pct = (used: number, limit: number | null) => limit == null ? 0 : Math.min(100, Math.round(used / Math.max(limit, 1) * 100))
 
   const usage = {
     monthlyMessages: { used: msgs,      limit: plan.monthlyMessages, pct: pct(msgs,      plan.monthlyMessages) },
@@ -127,6 +99,7 @@ export async function getPlanUsage(tenantId: string): Promise<PlanUsage | null> 
 export async function checkMessageLimit(tenantId: string): Promise<{ allowed: boolean; reason?: string }> {
   const usage = await getPlanUsage(tenantId).catch(() => null)
   if (!usage) return { allowed: true }
+  if (usage.plan.monthlyMessages == null) return { allowed: true }  // unlimited (e.g. custom_models)
   if (usage.usage.monthlyMessages.pct >= 100) {
     return { allowed: false, reason: `Aylık ${usage.plan.monthlyMessages} mesaj limitinize ulaştınız. Planınızı yükseltin.` }
   }

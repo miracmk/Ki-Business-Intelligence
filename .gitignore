@@ -18,3 +18,14 @@ npm-debug.log*
 # Build caches
 *.tsbuildinfo
 node_modules
+
+# n8n-as-code (local-only, not yet adopted for this project)
+AGENTS.md
+.agents/
+.github/agents/
+.n8nac/
+n8nac-config.json
+workflows/
+
+# Continue (contains live API keys/tokens in plaintext)
+.continue/mcpServers/

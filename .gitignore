@@ -28,4 +28,7 @@ n8nac-config.json
 workflows/
 
 # Continue (contains live API keys/tokens in plaintext)
-.continue/mcpServers/
+.continue/
+
+# Editor config (local-only)
+.vscode/

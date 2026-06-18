@@ -72,7 +72,7 @@ async function completeWithRole(
   tenantId: string,
   opts: { temperature?: number; maxTokens?: number } = {},
 ): Promise<{ content: string; usedModel: string }> {
-  const { primary, fallbacks } = await getModelForRole(role, 'entity_free', tenantId)
+  const { primary, fallbacks } = await getModelForRole(role, 'entity', tenantId)
   const chain = [primary, ...fallbacks].filter(Boolean)
 
   for (const modelStr of chain) {

@@ -12,6 +12,36 @@ import { db } from '../../lib/db.js'
 import { kibiModelConfigs } from '../../../db/schema.js'
 import { ANALYSIS_MODELS, CONVERSATION_MODELS } from './gateway.js'
 
+const PLAN_SCOPE_MAP: Record<string, string> = {
+  free:          'entity_free',
+  basic:         'entity_basic',
+  premium:       'entity_premium',
+  enterprise:    'entity_enterprise',
+  custom_models: 'entity_custom_models',
+}
+
+const PLAN_CACHE_TTL_MS = 5 * 60 * 1000
+const planCache = new Map<string, { planName: string; ts: number }>()
+
+/** Resolve an entity's plan-specific model scope (entity_free/basic/premium/enterprise/custom_models). */
+async function getEntityScope(tenantId: string): Promise<string> {
+  const now    = Date.now()
+  const cached = planCache.get(tenantId)
+  if (cached && now - cached.ts < PLAN_CACHE_TTL_MS) return PLAN_SCOPE_MAP[cached.planName] ?? 'entity_free'
+
+  try {
+    const entity = await db.query.kibiEntities.findFirst({
+      where:   (t, { eq }) => eq(t.entityId, tenantId),
+      columns: { planName: true },
+    })
+    const planName = entity?.planName ?? 'free'
+    planCache.set(tenantId, { planName, ts: now })
+    return PLAN_SCOPE_MAP[planName] ?? 'entity_free'
+  } catch {
+    return 'entity_free'
+  }
+}
+
 type ModelRole =
   | 'conversation'
   | 'db_search'
@@ -102,15 +132,17 @@ export const getIntentModels       = () => getPlatformModels('intent_analysis', 
  *
  * Lookup order:
  * 1. Entity override (if tenantId + ai_configs.settings.modelOverrides[role])
- * 2. kibi_model_configs (scope + role) with 5min cache
+ * 2. kibi_model_configs (scope + role) with 5min cache — for scope='entity', the
+ *    DB scope is resolved from the entity's actual plan (entity_free/basic/premium/
+ *    enterprise/custom_models), not hardcoded to entity_free.
  * 3. Hardcoded fallback (ANALYSIS_MODELS / CONVERSATION_MODELS)
  */
 export async function getModelForRole(
   role: ModelRole,
-  scope: 'platform' | 'entity_free',
+  scope: 'platform' | 'entity',
   tenantId?: string,
 ): Promise<{ primary: string; fallbacks: string[] }> {
-  const dbScope = scope === 'platform' ? 'platform' : 'entity_free'
+  const dbScope = scope === 'platform' ? 'platform' : await getEntityScope(tenantId ?? '')
 
   // Step 1: Check entity override
   if (tenantId) {
@@ -135,7 +167,7 @@ export async function getModelForRole(
 
   // Step 2: DB config with cache
   try {
-    const row = await getPlatformModels(role, CONVERSATION_MODELS)
+    const row = await getPlatformModels(role, CONVERSATION_MODELS, dbScope)
     const fallbacks = row.slice(1)
     return { primary: row[0], fallbacks }
   } catch (e) {

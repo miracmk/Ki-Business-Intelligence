@@ -114,7 +114,7 @@ ${JSON.stringify(queryCatalog.map(c => ({
   ]
 
   try {
-    const { primary, fallbacks } = await getModelForRole('db_query', 'entity_free', tenantId)
+    const { primary, fallbacks } = await getModelForRole('db_query', 'entity', tenantId)
     const chain = [primary, ...fallbacks].filter(Boolean)
 
     let content = '', usedModel = 'fallback'
@@ -173,7 +173,7 @@ Yazılabilir Tablolar: ${JSON.stringify(writable.map(t => ({
   ]
 
   try {
-    const { primary, fallbacks } = await getModelForRole('db_query', 'entity_free', tenantId)
+    const { primary, fallbacks } = await getModelForRole('db_query', 'entity', tenantId)
     const chain = [primary, ...fallbacks].filter(Boolean)
 
     let content = '', usedModel = 'fallback'

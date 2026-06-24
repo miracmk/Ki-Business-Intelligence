@@ -735,90 +735,11 @@ export const accChartOfAccounts = pgTable('acc_chart_of_accounts', {
   isActive:       boolean('is_active').notNull().default(true),
 })
 
-export const accContacts = pgTable('acc_contacts', {
-  id:            uuid('id').primaryKey().defaultRandom(),
-  tenantId:      uuid('tenant_id').notNull().references(() => tenants.id, { onDelete: 'cascade' }),
-  contactType:   varchar('contact_type', { length: 20 }),
-  name:          varchar('name', { length: 255 }),
-  taxNumber:     varchar('tax_number', { length: 100 }),
-  taxOffice:     varchar('tax_office', { length: 255 }),
-  email:         varchar('email', { length: 255 }),
-  phone:         varchar('phone', { length: 50 }),
-  address:       text('address'),
-  country:       varchar('country', { length: 10 }),
-  currencyCode:  varchar('currency_code', { length: 10 }),
-  balance:       numeric('balance', { precision: 15, scale: 2 }).notNull().default('0'),
-  crmContactId:  varchar('crm_contact_id', { length: 100 }),
-  createdAt:     timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-  updatedAt:     timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
-})
-
-export const accInvoices = pgTable('acc_invoices', {
-  id:            uuid('id').primaryKey().defaultRandom(),
-  tenantId:      uuid('tenant_id').notNull().references(() => tenants.id, { onDelete: 'cascade' }),
-  invoiceNumber: varchar('invoice_number', { length: 100 }).notNull(),
-  invoiceType:   varchar('invoice_type', { length: 20 }),
-  contactId:     uuid('contact_id').notNull().references(() => accContacts.id, { onDelete: 'cascade' }),
-  issueDate:     date('issue_date'),
-  dueDate:       date('due_date'),
-  currencyCode:  varchar('currency_code', { length: 10 }),
-  subtotal:      numeric('subtotal', { precision: 15, scale: 2 }),
-  taxTotal:      numeric('tax_total', { precision: 15, scale: 2 }),
-  discountTotal: numeric('discount_total', { precision: 15, scale: 2 }),
-  total:         numeric('total', { precision: 15, scale: 2 }),
-  paidAmount:    numeric('paid_amount', { precision: 15, scale: 2 }).notNull().default('0'),
-  status:        varchar('status', { length: 20 }),
-  notes:         text('notes'),
-  filePath:      text('file_path'),
-  externalId:    varchar('external_id', { length: 100 }),
-  createdAt:     timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-  updatedAt:     timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
-}, (t) => ({
-  invoiceNumberIdx: uniqueIndex('acc_invoices_number_idx').on(t.invoiceNumber),
-}))
-
-export const accInvoiceLines = pgTable('acc_invoice_lines', {
-  id:          uuid('id').primaryKey().defaultRandom(),
-  invoiceId:   uuid('invoice_id').notNull().references(() => accInvoices.id, { onDelete: 'cascade' }),
-  description: varchar('description', { length: 500 }),
-  quantity:    numeric('quantity', { precision: 15, scale: 4 }),
-  unitPrice:   numeric('unit_price', { precision: 15, scale: 4 }),
-  discountRate: numeric('discount_rate', { precision: 5, scale: 2 }).notNull().default('0'),
-  taxRate:      numeric('tax_rate', { precision: 5, scale: 2 }).notNull().default('0'),
-  accountCode: varchar('account_code', { length: 50 }),
-  total:       numeric('total', { precision: 15, scale: 2 }),
-})
-
-export const accPayments = pgTable('acc_payments', {
-  id:                    uuid('id').primaryKey().defaultRandom(),
-  tenantId:              uuid('tenant_id').notNull().references(() => tenants.id, { onDelete: 'cascade' }),
-  paymentNumber:         varchar('payment_number', { length: 100 }),
-  paymentType:           varchar('payment_type', { length: 20 }),
-  contactId:             uuid('contact_id').references(() => accContacts.id, { onDelete: 'set null' }),
-  invoiceId:             uuid('invoice_id').references(() => accInvoices.id, { onDelete: 'set null' }),
-  paymentDate:           date('payment_date'),
-  amount:                numeric('amount', { precision: 15, scale: 2 }),
-  currencyCode:          varchar('currency_code', { length: 10 }),
-  paymentMethod:         varchar('payment_method', { length: 50 }),
-  reference:             varchar('reference', { length: 255 }),
-  notes:                 text('notes'),
-  stripePaymentIntentId: varchar('stripe_payment_intent_id', { length: 255 }),
-  status:                varchar('status', { length: 20 }).notNull().default('completed'),
-})
-
-export const accExpenses = pgTable('acc_expenses', {
-  id:            uuid('id').primaryKey().defaultRandom(),
-  tenantId:      uuid('tenant_id').notNull().references(() => tenants.id, { onDelete: 'cascade' }),
-  expenseDate:   date('expense_date'),
-  category:      varchar('category', { length: 100 }),
-  description:   varchar('description', { length: 500 }),
-  amount:        numeric('amount', { precision: 15, scale: 2 }),
-  currencyCode:  varchar('currency_code', { length: 10 }),
-  contactId:     uuid('contact_id').references(() => accContacts.id, { onDelete: 'set null' }),
-  accountCode:   varchar('account_code', { length: 50 }),
-  receiptPath:   text('receipt_path'),
-  status:        varchar('status', { length: 20 }).notNull().default('pending'),
-})
+// YFZ 34 Faz 2: accContacts/accInvoices/accInvoiceLines/accPayments/accExpenses
+// (public-schema) retired — native CRUD now targets the entity-schema acc_* set
+// (db/entity-schema-template.sql), which is richer (e-fatura, TEKDÜZEN COA, bank
+// reconciliation) and already interconnected with crm_*/erp_* tables. See
+// db/migrations/0017_drop_public_acc_tables.sql and KIBIPR.md §6/§14.2.
 
 export const paymentIntegrations = pgTable('payment_integrations', {
   id:            uuid('id').primaryKey().defaultRandom(),

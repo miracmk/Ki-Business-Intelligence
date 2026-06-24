@@ -4,13 +4,14 @@ import fs from 'fs'
 import path from 'path'
 import { nanoid } from 'nanoid'
 import { db } from '../../lib/db.js'
-import { accountingConnections, accountingRecords, accountingSyncState, accContacts, accInvoices, accInvoiceLines, accPayments, accExpenses, paymentIntegrations, bankIntegrations } from '../../../db/schema.js'
+import { accountingConnections, accountingRecords, accountingSyncState, paymentIntegrations, bankIntegrations } from '../../../db/schema.js'
 import { encryptJson } from '../../lib/crypto.js'
 import { createAccountingAdapter } from '../../adapters/index.js'
 import { syncAccounting } from '../../engine/accounting-sync/sync.js'
-import { eq, and, or, desc, asc, sql } from 'drizzle-orm'
+import { eq } from 'drizzle-orm'
 import { redis } from '../../lib/redis.js'
 import { env } from '../../../config/env.js'
+import { queryEntitySchema } from '../../lib/entity-provisioner.js'
 
 const connectSchema = z.object({
   name: z.string().min(1),
@@ -23,58 +24,96 @@ const testConnectSchema = z.object({
   credentials: z.record(z.unknown()),
 })
 
+// ── YFZ 34 Faz 2: native CRUD now targets entity-schema acc_* tables (consolidated
+// off the old, disconnected public-schema acc_* set). See KIBIPR.md §6 / §14.2. ──
+
 const contactSchema = z.object({
-  contactType: z.enum(['individual', 'corporate']),
+  contactType: z.enum(['customer', 'vendor', 'both']),
   name: z.string().min(1),
+  shortName: z.string().optional(),
   taxNumber: z.string().optional(),
   taxOffice: z.string().optional(),
-  email: z.string().email().optional(),
+  mersisNumber: z.string().optional(),
+  email: z.string().email().optional().or(z.literal('')),
   phone: z.string().optional(),
-  address: z.string().optional(),
+  website: z.string().optional(),
+  addressLine1: z.string().optional(),
+  addressLine2: z.string().optional(),
+  city: z.string().optional(),
   country: z.string().optional(),
-  currencyCode: z.string().optional(),
+  postalCode: z.string().optional(),
+  currency: z.string().optional(),
+  creditLimit: z.number().optional(),
+  paymentTerms: z.string().optional(),
   balance: z.number().optional(),
-  crmContactId: z.string().optional(),
+  bankName: z.string().optional(),
+  bankIban: z.string().optional(),
+  crmContactId: z.string().uuid().optional().nullable(),
+  crmCompanyId: z.string().uuid().optional().nullable(),
+  tags: z.array(z.string()).optional(),
+  isActive: z.boolean().optional(),
 })
 
 const invoiceSchema = z.object({
-  invoiceType: z.enum(['sale', 'purchase']),
+  invoiceType: z.enum(['sale', 'purchase', 'credit_note', 'debit_note']),
   contactId: z.string().uuid(),
+  orderId: z.string().uuid().optional().nullable(),
+  status: z.enum(['draft', 'sent', 'viewed', 'partially_paid', 'paid', 'overdue', 'cancelled']).optional(),
   issueDate: z.string().optional(),
   dueDate: z.string().optional(),
-  currencyCode: z.string().optional(),
+  deliveryDate: z.string().optional(),
   subtotal: z.number().optional(),
-  taxTotal: z.number().optional(),
-  discountTotal: z.number().optional(),
+  discountAmount: z.number().optional(),
+  taxAmount: z.number().optional(),
+  withholdingTax: z.number().optional(),
+  stampTax: z.number().optional(),
   total: z.number().optional(),
   paidAmount: z.number().optional(),
-  status: z.string().optional(),
+  currency: z.string().optional(),
+  exchangeRate: z.number().optional(),
+  efaturaUuid: z.string().optional(),
+  efaturaStatus: z.string().optional(),
+  efaturaType: z.string().optional(),
   notes: z.string().optional(),
-  externalId: z.string().optional(),
+  terms: z.string().optional(),
+  filePath: z.string().optional(),
+  tags: z.array(z.string()).optional(),
 })
 
 const paymentSchema = z.object({
   paymentType: z.enum(['received', 'sent']),
   amount: z.number(),
-  currencyCode: z.string().optional(),
+  currency: z.string().optional(),
+  exchangeRate: z.number().optional(),
+  paymentDate: z.string().optional(),
   paymentMethod: z.string().optional(),
   reference: z.string().optional(),
   notes: z.string().optional(),
-  status: z.string().optional(),
-  contactId: z.string().uuid().optional(),
-  invoiceId: z.string().uuid().optional(),
+  contactId: z.string().uuid().optional().nullable(),
+  invoiceId: z.string().uuid().optional().nullable(),
+  bankAccountId: z.string().uuid().optional().nullable(),
+  isReconciled: z.boolean().optional(),
 })
 
 const expenseSchema = z.object({
-  expenseDate: z.string().optional(),
-  category: z.string().optional(),
+  category: z.string().min(1),
+  subcategory: z.string().optional(),
   description: z.string().optional(),
-  amount: z.number().optional(),
-  currencyCode: z.string().optional(),
-  contactId: z.string().uuid().optional(),
+  amount: z.number(),
+  taxAmount: z.number().optional(),
+  currency: z.string().optional(),
+  expenseDate: z.string().optional(),
+  paymentMethod: z.string().optional(),
+  status: z.enum(['pending', 'approved', 'rejected', 'paid']).optional(),
+  contactId: z.string().uuid().optional().nullable(),
+  supplierId: z.string().uuid().optional().nullable(),
+  isBillable: z.boolean().optional(),
+  projectCode: z.string().optional(),
+  costCenter: z.string().optional(),
+  receiptUrl: z.string().optional(),
+  receiptNumber: z.string().optional(),
   accountCode: z.string().optional(),
-  receiptPath: z.string().optional(),
-  status: z.string().optional(),
+  tags: z.array(z.string()).optional(),
 })
 
 const integrationSchema = z.object({
@@ -84,6 +123,86 @@ const integrationSchema = z.object({
   webhookSecret: z.string().optional(),
   settings: z.record(z.unknown()).optional(),
 })
+
+// camelCase field → snake_case column, per entity-schema table (db/entity-schema-template.sql)
+const COLUMN_MAP: Record<string, Record<string, string>> = {
+  acc_contacts: {
+    contactType: 'contact_type', name: 'name', shortName: 'short_name', taxNumber: 'tax_number',
+    taxOffice: 'tax_office', mersisNumber: 'mersis_number', email: 'email', phone: 'phone',
+    website: 'website', addressLine1: 'address_line1', addressLine2: 'address_line2', city: 'city',
+    country: 'country', postalCode: 'postal_code', currency: 'currency', creditLimit: 'credit_limit',
+    paymentTerms: 'payment_terms', balance: 'balance', bankName: 'bank_name', bankIban: 'bank_iban',
+    crmContactId: 'crm_contact_id', crmCompanyId: 'crm_company_id', tags: 'tags', isActive: 'is_active',
+  },
+  acc_invoices: {
+    invoiceType: 'invoice_type', contactId: 'contact_id', orderId: 'order_id', status: 'status',
+    issueDate: 'issue_date', dueDate: 'due_date', deliveryDate: 'delivery_date', subtotal: 'subtotal',
+    discountAmount: 'discount_amount', taxAmount: 'tax_amount', withholdingTax: 'withholding_tax',
+    stampTax: 'stamp_tax', total: 'total', paidAmount: 'paid_amount', currency: 'currency',
+    exchangeRate: 'exchange_rate', efaturaUuid: 'efatura_uuid', efaturaStatus: 'efatura_status',
+    efaturaType: 'efatura_type', notes: 'notes', terms: 'terms', filePath: 'file_path', tags: 'tags',
+  },
+  acc_payments: {
+    paymentType: 'payment_type', amount: 'amount', currency: 'currency', exchangeRate: 'exchange_rate',
+    paymentDate: 'payment_date', paymentMethod: 'payment_method', reference: 'reference', notes: 'notes',
+    contactId: 'contact_id', invoiceId: 'invoice_id', bankAccountId: 'bank_account_id', isReconciled: 'is_reconciled',
+  },
+  acc_expenses: {
+    category: 'category', subcategory: 'subcategory', description: 'description', amount: 'amount',
+    taxAmount: 'tax_amount', currency: 'currency', expenseDate: 'expense_date', paymentMethod: 'payment_method',
+    status: 'status', contactId: 'contact_id', supplierId: 'supplier_id', isBillable: 'is_billable',
+    projectCode: 'project_code', costCenter: 'cost_center', receiptUrl: 'receipt_url',
+    receiptNumber: 'receipt_number', accountCode: 'account_code', tags: 'tags',
+  },
+}
+
+function selectCols(table: keyof typeof COLUMN_MAP, extra: string[] = []): string {
+  const fieldCols = Object.entries(COLUMN_MAP[table]).map(([camel, snake]) => `${snake} AS "${camel}"`)
+  return ['id', ...fieldCols, ...extra].join(', ')
+}
+
+// Builds INSERT column/placeholder/param lists. `extra` carries server-set raw snake_case
+// columns (e.g. invoice_number) that aren't part of the user-writable camelCase map.
+function buildInsert(table: keyof typeof COLUMN_MAP, data: Record<string, unknown>, extra: Record<string, unknown> = {}) {
+  const map = COLUMN_MAP[table]
+  const cols: string[] = []
+  const params: unknown[] = []
+  for (const [key, val] of Object.entries(data)) {
+    if (val === undefined) continue
+    cols.push(map[key])
+    params.push(Array.isArray(val) ? JSON.stringify(val) : val)
+  }
+  for (const [col, val] of Object.entries(extra)) {
+    cols.push(col)
+    params.push(val)
+  }
+  const placeholders = cols.map((_, i) => `$${i + 1}`)
+  return { cols, placeholders, params }
+}
+
+function buildUpdate(table: keyof typeof COLUMN_MAP, data: Record<string, unknown>) {
+  const map = COLUMN_MAP[table]
+  const sets: string[] = []
+  const params: unknown[] = []
+  for (const [key, val] of Object.entries(data)) {
+    if (val === undefined) continue
+    params.push(Array.isArray(val) ? JSON.stringify(val) : val)
+    sets.push(`${map[key]} = $${params.length}`)
+  }
+  return { sets, params }
+}
+
+async function resolveEntityContext(tenantId: string | null): Promise<{ entityId: string; schema: string } | null> {
+  const isUUID = (s: string | null | undefined) =>
+    !!s && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)
+  if (!isUUID(tenantId)) return null
+  const entity = await db.query.kibiEntities.findFirst({
+    where: (t, { eq }) => eq(t.entityId, tenantId!),
+    columns: { id: true, entityDbSchema: true, isProvisioned: true },
+  })
+  if (!entity?.isProvisioned || !entity.entityDbSchema) return null
+  return { entityId: entity.id, schema: entity.entityDbSchema }
+}
 
 export const accountingRoutes: FastifyPluginAsync = async (app) => {
 
@@ -221,101 +340,149 @@ export const accountingRoutes: FastifyPluginAsync = async (app) => {
     return { syncState: states }
   })
 
-  app.get('/contacts', { onRequest: [app.authenticate] }, async (req) => {
-    const user = req.user as { tenantId: string }
+  // ── Contacts (entity-schema acc_contacts) ─────────────────────────────────
+  app.get('/contacts', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = req.user as { tenantId: string | null }
+    const ctx = await resolveEntityContext(user.tenantId)
+    if (!ctx) return reply.status(404).send({ error: 'Entity şeması hazır değil' })
+
     const { type, search } = req.query as Record<string, string>
-    const contacts = await db.query.accContacts.findMany({
-      where: (t, { and, eq, or }) => {
-        const conditions = [eq(t.tenantId, user.tenantId)] as any[]
-        if (type) conditions.push(eq(t.contactType, type as any))
-        if (search) {
-          conditions.push(or(eq(t.name, search), eq(t.email, search), eq(t.phone, search)))
-        }
-        return and(...conditions as any)
-      },
-      orderBy: (t, { asc }) => [asc(t.name)],
-    })
+    const conditions: string[] = []
+    const params: unknown[] = []
+    if (type) { params.push(type); conditions.push(`contact_type = $${params.length}`) }
+    if (search) { params.push(`%${search}%`); conditions.push(`(name ILIKE $${params.length} OR email ILIKE $${params.length} OR phone ILIKE $${params.length})`) }
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''
+
+    const contacts = await queryEntitySchema(ctx.schema, `
+      SELECT ${selectCols('acc_contacts', ['created_at AS "createdAt"', 'updated_at AS "updatedAt"'])}
+      FROM acc_contacts ${where} ORDER BY name ASC
+    `, params)
     return { contacts }
   })
 
   app.post('/contacts', { onRequest: [app.authenticate] }, async (req, reply) => {
-    const user = req.user as { tenantId: string }
+    const user = req.user as { tenantId: string | null }
+    const ctx = await resolveEntityContext(user.tenantId)
+    if (!ctx) return reply.status(404).send({ error: 'Entity şeması hazır değil' })
     const body = contactSchema.safeParse(req.body)
     if (!body.success) return reply.status(400).send({ error: body.error.flatten() })
-    const [contact] = await db.insert(accContacts).values({
-      tenantId: user.tenantId,
-      ...body.data,
-    } as any).returning()
-    return reply.status(201).send({ contact })
+
+    const { cols, placeholders, params } = buildInsert('acc_contacts', body.data)
+    const rows = await queryEntitySchema(ctx.schema, `
+      INSERT INTO acc_contacts (${cols.join(', ')}) VALUES (${placeholders.join(', ')})
+      RETURNING ${selectCols('acc_contacts')}
+    `, params)
+    return reply.status(201).send({ contact: rows[0] })
   })
 
-  app.put('/contacts/:id', { onRequest: [app.authenticate] }, async (req) => {
+  app.put('/contacts/:id', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = req.user as { tenantId: string | null }
+    const ctx = await resolveEntityContext(user.tenantId)
+    if (!ctx) return reply.status(404).send({ error: 'Entity şeması hazır değil' })
     const { id } = req.params as { id: string }
     const body = contactSchema.partial().safeParse(req.body)
-    if (!body.success) return { error: body.error.flatten() }
-    await db.update(accContacts).set({ ...body.data as any, updatedAt: new Date() }).where(eq(accContacts.id, id))
+    if (!body.success) return reply.status(400).send({ error: body.error.flatten() })
+
+    const { sets, params } = buildUpdate('acc_contacts', body.data)
+    if (sets.length === 0) return { ok: true }
+    params.push(id)
+    await queryEntitySchema(ctx.schema, `
+      UPDATE acc_contacts SET ${sets.join(', ')}, updated_at = NOW() WHERE id = $${params.length}
+    `, params)
     return { ok: true }
   })
 
-  app.delete('/contacts/:id', { onRequest: [app.authenticate] }, async (req) => {
+  app.delete('/contacts/:id', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = req.user as { tenantId: string | null }
+    const ctx = await resolveEntityContext(user.tenantId)
+    if (!ctx) return reply.status(404).send({ error: 'Entity şeması hazır değil' })
     const { id } = req.params as { id: string }
-    await db.delete(accContacts).where(eq(accContacts.id, id))
+    await queryEntitySchema(ctx.schema, `DELETE FROM acc_contacts WHERE id = $1`, [id])
     return { ok: true }
   })
 
-  app.get('/contacts/:id/balance', { onRequest: [app.authenticate] }, async (req) => {
+  app.get('/contacts/:id/balance', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = req.user as { tenantId: string | null }
+    const ctx = await resolveEntityContext(user.tenantId)
+    if (!ctx) return reply.status(404).send({ error: 'Entity şeması hazır değil' })
     const { id } = req.params as { id: string }
-    const contact = await db.query.accContacts.findFirst({ where: (t, { eq }) => eq(t.id, id) })
-    return { balance: contact?.balance ?? 0 }
+    const rows = await queryEntitySchema(ctx.schema, `SELECT balance FROM acc_contacts WHERE id = $1`, [id])
+    return { balance: rows[0]?.balance ?? 0 }
   })
 
-  app.get('/invoices', { onRequest: [app.authenticate] }, async (req) => {
-    const user = req.user as { tenantId: string }
+  // ── Invoices (entity-schema acc_invoices) ─────────────────────────────────
+  app.get('/invoices', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = req.user as { tenantId: string | null }
+    const ctx = await resolveEntityContext(user.tenantId)
+    if (!ctx) return reply.status(404).send({ error: 'Entity şeması hazır değil' })
+
     const { type, status, from, to } = req.query as Record<string, string>
-    const invoices = await db.query.accInvoices.findMany({
-      where: (t, { and, eq }) => {
-        const conditions = [eq(t.tenantId, user.tenantId)] as any[]
-        if (type) conditions.push(eq(t.invoiceType, type as any))
-        if (status) conditions.push(eq(t.status, status))
-        if (from) conditions.push(sql`${t.issueDate} >= ${from}`)
-        if (to) conditions.push(sql`${t.issueDate} <= ${to}`)
-        return and(...conditions as any)
-      },
-      orderBy: (t, { desc }) => [desc(t.issueDate)],
-    })
+    const conditions: string[] = []
+    const params: unknown[] = []
+    if (type) { params.push(type); conditions.push(`invoice_type = $${params.length}`) }
+    if (status) { params.push(status); conditions.push(`status = $${params.length}`) }
+    if (from) { params.push(from); conditions.push(`issue_date >= $${params.length}`) }
+    if (to) { params.push(to); conditions.push(`issue_date <= $${params.length}`) }
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''
+
+    const invoices = await queryEntitySchema(ctx.schema, `
+      SELECT ${selectCols('acc_invoices', [
+        'invoice_number AS "invoiceNumber"', 'remaining_amount AS "remainingAmount"',
+        'created_at AS "createdAt"', 'updated_at AS "updatedAt"', 'cancelled_at AS "cancelledAt"',
+      ])}
+      FROM acc_invoices ${where} ORDER BY issue_date DESC
+    `, params)
     return { invoices }
   })
 
   app.post('/invoices', { onRequest: [app.authenticate] }, async (req, reply) => {
-    const user = req.user as { tenantId: string }
+    const user = req.user as { tenantId: string | null }
+    const ctx = await resolveEntityContext(user.tenantId)
+    if (!ctx) return reply.status(404).send({ error: 'Entity şeması hazır değil' })
     const body = invoiceSchema.safeParse(req.body)
     if (!body.success) return reply.status(400).send({ error: body.error.flatten() })
+
     const invoiceNumber = `INV-${nanoid(8).toUpperCase()}`
-    const [invoice] = await db.insert(accInvoices).values({
-      tenantId: user.tenantId,
-      invoiceNumber,
-      ...body.data,
-    } as any).returning()
-    return reply.status(201).send({ invoice })
+    const { cols, placeholders, params } = buildInsert('acc_invoices', body.data, { invoice_number: invoiceNumber })
+    const rows = await queryEntitySchema(ctx.schema, `
+      INSERT INTO acc_invoices (${cols.join(', ')}) VALUES (${placeholders.join(', ')})
+      RETURNING ${selectCols('acc_invoices', ['invoice_number AS "invoiceNumber"', 'remaining_amount AS "remainingAmount"'])}
+    `, params)
+    return reply.status(201).send({ invoice: rows[0] })
   })
 
-  app.put('/invoices/:id', { onRequest: [app.authenticate] }, async (req) => {
+  app.put('/invoices/:id', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = req.user as { tenantId: string | null }
+    const ctx = await resolveEntityContext(user.tenantId)
+    if (!ctx) return reply.status(404).send({ error: 'Entity şeması hazır değil' })
     const { id } = req.params as { id: string }
     const body = invoiceSchema.partial().safeParse(req.body)
-    if (!body.success) return { error: body.error.flatten() }
-    await db.update(accInvoices).set({ ...body.data as any, updatedAt: new Date() }).where(eq(accInvoices.id, id))
+    if (!body.success) return reply.status(400).send({ error: body.error.flatten() })
+
+    const { sets, params } = buildUpdate('acc_invoices', body.data)
+    if (sets.length === 0) return { ok: true }
+    params.push(id)
+    await queryEntitySchema(ctx.schema, `
+      UPDATE acc_invoices SET ${sets.join(', ')}, updated_at = NOW() WHERE id = $${params.length}
+    `, params)
     return { ok: true }
   })
 
-  app.delete('/invoices/:id', { onRequest: [app.authenticate] }, async (req) => {
+  app.delete('/invoices/:id', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = req.user as { tenantId: string | null }
+    const ctx = await resolveEntityContext(user.tenantId)
+    if (!ctx) return reply.status(404).send({ error: 'Entity şeması hazır değil' })
     const { id } = req.params as { id: string }
-    await db.delete(accInvoices).where(eq(accInvoices.id, id))
+    await queryEntitySchema(ctx.schema, `DELETE FROM acc_invoices WHERE id = $1`, [id])
     return { ok: true }
   })
 
-  app.post('/invoices/:id/send', { onRequest: [app.authenticate] }, async (req) => {
+  app.post('/invoices/:id/send', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = req.user as { tenantId: string | null }
+    const ctx = await resolveEntityContext(user.tenantId)
+    if (!ctx) return reply.status(404).send({ error: 'Entity şeması hazır değil' })
     const { id } = req.params as { id: string }
-    await db.update(accInvoices).set({ status: 'sent', updatedAt: new Date() }).where(eq(accInvoices.id, id))
+    await queryEntitySchema(ctx.schema, `UPDATE acc_invoices SET status = 'sent', updated_at = NOW() WHERE id = $1`, [id])
     return { ok: true, message: 'Invoice email gönderildi (simulated)' }
   })
 
@@ -338,103 +505,181 @@ export const accountingRoutes: FastifyPluginAsync = async (app) => {
   })
 
   app.get('/invoices/:id/pdf', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = req.user as { tenantId: string | null }
+    const ctx = await resolveEntityContext(user.tenantId)
+    if (!ctx) return reply.status(404).send({ error: 'Entity şeması hazır değil' })
     const { id } = req.params as { id: string }
-    const invoice = await db.query.accInvoices.findFirst({ where: (t, { eq }) => eq(t.id, id) })
-    if (!invoice?.filePath) return reply.status(404).send({ error: 'PDF bulunamadı' })
-    return reply.send({ filePath: invoice.filePath })
+    const rows = await queryEntitySchema(ctx.schema, `SELECT file_path AS "filePath" FROM acc_invoices WHERE id = $1`, [id])
+    if (!rows[0]?.filePath) return reply.status(404).send({ error: 'PDF bulunamadı' })
+    return reply.send({ filePath: rows[0].filePath })
   })
 
-  app.get('/payments', { onRequest: [app.authenticate] }, async (req) => {
-    const user = req.user as { tenantId: string }
-    const payments = await db.query.accPayments.findMany({ where: (t, { eq }) => eq(t.tenantId, user.tenantId) })
+  // ── Payments (entity-schema acc_payments) ─────────────────────────────────
+  app.get('/payments', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = req.user as { tenantId: string | null }
+    const ctx = await resolveEntityContext(user.tenantId)
+    if (!ctx) return reply.status(404).send({ error: 'Entity şeması hazır değil' })
+    const payments = await queryEntitySchema(ctx.schema, `
+      SELECT ${selectCols('acc_payments', ['payment_number AS "paymentNumber"', 'created_at AS "createdAt"'])}
+      FROM acc_payments ORDER BY payment_date DESC
+    `)
     return { payments }
   })
 
-  app.post('/payments', { onRequest: [app.authenticate] }, async (req) => {
-    const user = req.user as { tenantId: string }
+  app.post('/payments', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = req.user as { tenantId: string | null }
+    const ctx = await resolveEntityContext(user.tenantId)
+    if (!ctx) return reply.status(404).send({ error: 'Entity şeması hazır değil' })
     const body = paymentSchema.safeParse(req.body)
-    if (!body.success) return { error: body.error.flatten() }
-    const [payment] = await db.insert(accPayments).values({
-      tenantId: user.tenantId,
-      ...body.data,
-    } as any).returning()
-    return { payment }
+    if (!body.success) return reply.status(400).send({ error: body.error.flatten() })
+
+    const { cols, placeholders, params } = buildInsert('acc_payments', body.data)
+    const rows = await queryEntitySchema(ctx.schema, `
+      INSERT INTO acc_payments (${cols.join(', ')}) VALUES (${placeholders.join(', ')})
+      RETURNING ${selectCols('acc_payments', ['payment_number AS "paymentNumber"'])}
+    `, params)
+    return reply.status(201).send({ payment: rows[0] })
   })
 
-  app.get('/expenses', { onRequest: [app.authenticate] }, async (req) => {
-    const user = req.user as { tenantId: string }
+  // ── Expenses (entity-schema acc_expenses) ─────────────────────────────────
+  app.get('/expenses', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = req.user as { tenantId: string | null }
+    const ctx = await resolveEntityContext(user.tenantId)
+    if (!ctx) return reply.status(404).send({ error: 'Entity şeması hazır değil' })
+
     const { category, from, to } = req.query as Record<string, string>
-    const expenses = await db.query.accExpenses.findMany({
-      where: (t, { and, eq }) => {
-        const conditions = [eq(t.tenantId, user.tenantId)] as any[]
-        if (category) conditions.push(eq(t.category, category))
-        if (from) conditions.push(sql`${t.expenseDate} >= ${from}`)
-        if (to) conditions.push(sql`${t.expenseDate} <= ${to}`)
-        return and(...conditions as any)
-      },
-      orderBy: (t, { desc }) => [desc(t.expenseDate)],
-    })
+    const conditions: string[] = []
+    const params: unknown[] = []
+    if (category) { params.push(category); conditions.push(`category = $${params.length}`) }
+    if (from) { params.push(from); conditions.push(`expense_date >= $${params.length}`) }
+    if (to) { params.push(to); conditions.push(`expense_date <= $${params.length}`) }
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''
+
+    const expenses = await queryEntitySchema(ctx.schema, `
+      SELECT ${selectCols('acc_expenses', ['total_amount AS "totalAmount"', 'created_at AS "createdAt"', 'updated_at AS "updatedAt"'])}
+      FROM acc_expenses ${where} ORDER BY expense_date DESC
+    `, params)
     return { expenses }
   })
 
-  app.post('/expenses', { onRequest: [app.authenticate] }, async (req) => {
-    const user = req.user as { tenantId: string }
+  app.post('/expenses', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = req.user as { tenantId: string | null }
+    const ctx = await resolveEntityContext(user.tenantId)
+    if (!ctx) return reply.status(404).send({ error: 'Entity şeması hazır değil' })
     const body = expenseSchema.safeParse(req.body)
-    if (!body.success) return { error: body.error.flatten() }
-    const [expense] = await db.insert(accExpenses).values({
-      tenantId: user.tenantId,
-      ...body.data,
-    } as any).returning()
-    return { expense }
+    if (!body.success) return reply.status(400).send({ error: body.error.flatten() })
+
+    const { cols, placeholders, params } = buildInsert('acc_expenses', body.data)
+    const rows = await queryEntitySchema(ctx.schema, `
+      INSERT INTO acc_expenses (${cols.join(', ')}) VALUES (${placeholders.join(', ')})
+      RETURNING ${selectCols('acc_expenses', ['total_amount AS "totalAmount"'])}
+    `, params)
+    return reply.status(201).send({ expense: rows[0] })
   })
 
-  app.put('/expenses/:id', { onRequest: [app.authenticate] }, async (req) => {
+  app.put('/expenses/:id', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = req.user as { tenantId: string | null }
+    const ctx = await resolveEntityContext(user.tenantId)
+    if (!ctx) return reply.status(404).send({ error: 'Entity şeması hazır değil' })
     const { id } = req.params as { id: string }
     const body = expenseSchema.partial().safeParse(req.body)
-    if (!body.success) return { error: body.error.flatten() }
-    await db.update(accExpenses).set(body.data as any).where(eq(accExpenses.id, id))
+    if (!body.success) return reply.status(400).send({ error: body.error.flatten() })
+
+    const { sets, params } = buildUpdate('acc_expenses', body.data)
+    if (sets.length === 0) return { ok: true }
+    params.push(id)
+    await queryEntitySchema(ctx.schema, `
+      UPDATE acc_expenses SET ${sets.join(', ')}, updated_at = NOW() WHERE id = $${params.length}
+    `, params)
     return { ok: true }
   })
 
-  app.delete('/expenses/:id', { onRequest: [app.authenticate] }, async (req) => {
+  app.delete('/expenses/:id', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = req.user as { tenantId: string | null }
+    const ctx = await resolveEntityContext(user.tenantId)
+    if (!ctx) return reply.status(404).send({ error: 'Entity şeması hazır değil' })
     const { id } = req.params as { id: string }
-    await db.delete(accExpenses).where(eq(accExpenses.id, id))
+    await queryEntitySchema(ctx.schema, `DELETE FROM acc_expenses WHERE id = $1`, [id])
     return { ok: true }
   })
 
-  app.get('/reports/income-statement', { onRequest: [app.authenticate] }, async (req) => {
-    const user = req.user as { tenantId: string }
-    const { from, to, currency } = req.query as Record<string, string>
-    const where = [sql`tenant_id = ${user.tenantId}`]
-    if (from) where.push(sql`issue_date >= ${from}`)
-    if (to) where.push(sql`issue_date <= ${to}`)
+  // ── Reports (entity-schema, fully parameterized — closes the prior string-
+  // interpolation SQL pattern as a side-effect of the schema cutover) ────────
+  app.get('/reports/income-statement', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = req.user as { tenantId: string | null }
+    const ctx = await resolveEntityContext(user.tenantId)
+    if (!ctx) return reply.status(404).send({ error: 'Entity şeması hazır değil' })
+    const { from, to } = req.query as Record<string, string>
 
-    const data = await db.execute(sql.raw(`SELECT COALESCE(SUM(total),0) AS revenue, COALESCE(SUM(discount_total),0) AS discounts FROM acc_invoices WHERE tenant_id = '${user.tenantId}' ${from ? `AND issue_date >= '${from}'` : ''} ${to ? `AND issue_date <= '${to}'` : ''}`))
-    const expenses = await db.execute(sql.raw(`SELECT COALESCE(SUM(amount),0) AS expenses FROM acc_expenses WHERE tenant_id = '${user.tenantId}' ${from ? `AND expense_date >= '${from}'` : ''} ${to ? `AND expense_date <= '${to}'` : ''}`))
-    const revenue = Number(data.rows[0]?.revenue ?? 0)
-    const expenseTotal = Number(expenses.rows[0]?.expenses ?? 0)
+    const invWhere: string[] = [`invoice_type = 'sale'`]
+    const invParams: unknown[] = []
+    if (from) { invParams.push(from); invWhere.push(`issue_date >= $${invParams.length}`) }
+    if (to) { invParams.push(to); invWhere.push(`issue_date <= $${invParams.length}`) }
+
+    const expWhere: string[] = []
+    const expParams: unknown[] = []
+    if (from) { expParams.push(from); expWhere.push(`expense_date >= $${expParams.length}`) }
+    if (to) { expParams.push(to); expWhere.push(`expense_date <= $${expParams.length}`) }
+
+    const [revRows] = await Promise.all([
+      queryEntitySchema(ctx.schema, `SELECT COALESCE(SUM(total),0) AS revenue, COALESCE(SUM(discount_amount),0) AS discounts FROM acc_invoices WHERE ${invWhere.join(' AND ')}`, invParams),
+    ])
+    const expRows = await queryEntitySchema(ctx.schema, `SELECT COALESCE(SUM(amount),0) AS expenses FROM acc_expenses${expWhere.length ? ' WHERE ' + expWhere.join(' AND ') : ''}`, expParams)
+
+    const revenue = Number(revRows[0]?.revenue ?? 0)
+    const expenseTotal = Number(expRows[0]?.expenses ?? 0)
     return { revenue, expenses: expenseTotal, grossProfit: revenue - expenseTotal, netProfit: revenue - expenseTotal, breakdown: { revenue, expenses: expenseTotal } }
   })
 
-  app.get('/reports/balance-sheet', { onRequest: [app.authenticate] }, async (req) => {
-    const date = (req.query as Record<string, string>).date ?? new Date().toISOString().slice(0, 10)
-    const assets = await db.execute(sql.raw(`SELECT COALESCE(SUM(balance),0) AS assets FROM acc_contacts WHERE tenant_id = '${(req.user as any).tenantId}'`))
-    return { assets: { cash: Number(assets.rows[0]?.assets ?? 0), receivables: 0, inventory: 0 }, liabilities: { payables: 0, debt: 0 }, equity: Number(assets.rows[0]?.assets ?? 0) }
+  app.get('/reports/balance-sheet', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = req.user as { tenantId: string | null }
+    const ctx = await resolveEntityContext(user.tenantId)
+    if (!ctx) return reply.status(404).send({ error: 'Entity şeması hazır değil' })
+    const rows = await queryEntitySchema(ctx.schema, `SELECT COALESCE(SUM(balance),0) AS assets FROM acc_contacts`)
+    const assets = Number(rows[0]?.assets ?? 0)
+    return { assets: { cash: assets, receivables: 0, inventory: 0 }, liabilities: { payables: 0, debt: 0 }, equity: assets }
   })
 
-  app.get('/reports/cash-flow', { onRequest: [app.authenticate] }, async (req) => {
+  app.get('/reports/cash-flow', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = req.user as { tenantId: string | null }
+    const ctx = await resolveEntityContext(user.tenantId)
+    if (!ctx) return reply.status(404).send({ error: 'Entity şeması hazır değil' })
     const { from, to } = req.query as Record<string, string>
-    const income = await db.execute(sql.raw(`SELECT COALESCE(SUM(amount),0) AS operating FROM acc_payments WHERE tenant_id = '${(req.user as any).tenantId}' AND payment_type = 'received' ${from ? `AND payment_date >= '${from}'` : ''} ${to ? `AND payment_date <= '${to}'` : ''}`))
-    const expenses = await db.execute(sql.raw(`SELECT COALESCE(SUM(amount),0) AS operating FROM acc_payments WHERE tenant_id = '${(req.user as any).tenantId}' AND payment_type = 'sent' ${from ? `AND payment_date >= '${from}'` : ''} ${to ? `AND payment_date <= '${to}'` : ''}`))
-    return { operating: Number(income.rows[0]?.operating ?? 0) - Number(expenses.rows[0]?.operating ?? 0), investing: 0, financing: 0, net: Number(income.rows[0]?.operating ?? 0) - Number(expenses.rows[0]?.operating ?? 0) }
+
+    const where: string[] = []
+    const params: unknown[] = []
+    if (from) { params.push(from); where.push(`payment_date >= $${params.length}`) }
+    if (to) { params.push(to); where.push(`payment_date <= $${params.length}`) }
+    const dateClause = where.length ? ` AND ${where.join(' AND ')}` : ''
+
+    const income = await queryEntitySchema(ctx.schema, `SELECT COALESCE(SUM(amount),0) AS total FROM acc_payments WHERE payment_type = 'received'${dateClause}`, params)
+    const outgoing = await queryEntitySchema(ctx.schema, `SELECT COALESCE(SUM(amount),0) AS total FROM acc_payments WHERE payment_type = 'sent'${dateClause}`, params)
+
+    const net = Number(income[0]?.total ?? 0) - Number(outgoing[0]?.total ?? 0)
+    return { operating: net, investing: 0, financing: 0, net }
   })
 
-  app.get('/reports/profitability', { onRequest: [app.authenticate] }, async (req) => {
+  app.get('/reports/profitability', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = req.user as { tenantId: string | null }
+    const ctx = await resolveEntityContext(user.tenantId)
+    if (!ctx) return reply.status(404).send({ error: 'Entity şeması hazır değil' })
     const { from, to } = req.query as Record<string, string>
-    const data = await db.execute(sql.raw(`SELECT COALESCE(SUM(total),0) AS revenue FROM acc_invoices WHERE tenant_id = '${(req.user as any).tenantId}' ${from ? `AND issue_date >= '${from}'` : ''} ${to ? `AND issue_date <= '${to}'` : ''}`))
-    const expense = await db.execute(sql.raw(`SELECT COALESCE(SUM(amount),0) AS expenses FROM acc_expenses WHERE tenant_id = '${(req.user as any).tenantId}' ${from ? `AND expense_date >= '${from}'` : ''} ${to ? `AND expense_date <= '${to}'` : ''}`))
-    const revenue = Number(data.rows[0]?.revenue ?? 0)
-    const expenses = Number(expense.rows[0]?.expenses ?? 0)
+
+    const invWhere: string[] = []
+    const invParams: unknown[] = []
+    if (from) { invParams.push(from); invWhere.push(`issue_date >= $${invParams.length}`) }
+    if (to) { invParams.push(to); invWhere.push(`issue_date <= $${invParams.length}`) }
+
+    const expWhere: string[] = []
+    const expParams: unknown[] = []
+    if (from) { expParams.push(from); expWhere.push(`expense_date >= $${expParams.length}`) }
+    if (to) { expParams.push(to); expWhere.push(`expense_date <= $${expParams.length}`) }
+
+    const revRows = await queryEntitySchema(ctx.schema, `SELECT COALESCE(SUM(total),0) AS revenue FROM acc_invoices${invWhere.length ? ' WHERE ' + invWhere.join(' AND ') : ''}`, invParams)
+    const expRows = await queryEntitySchema(ctx.schema, `SELECT COALESCE(SUM(amount),0) AS expenses FROM acc_expenses${expWhere.length ? ' WHERE ' + expWhere.join(' AND ') : ''}`, expParams)
+
+    const revenue = Number(revRows[0]?.revenue ?? 0)
+    const expenses = Number(expRows[0]?.expenses ?? 0)
     return { revenue, expenses, grossMargin: revenue ? (revenue - expenses) / revenue : 0, netMargin: revenue ? (revenue - expenses) / revenue : 0, ROA: 0 }
   })
 

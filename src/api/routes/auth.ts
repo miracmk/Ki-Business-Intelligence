@@ -10,6 +10,7 @@ import { authenticator } from 'otplib'
 import { nanoid } from 'nanoid'
 import nodemailer from 'nodemailer'
 import { eq } from 'drizzle-orm'
+import { provisionEntity } from '../../lib/entity-provisioner.js'
 
 const OTP_TTL  = 300
 const OTP_COOL = 60
@@ -97,7 +98,7 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
 
       const [tenant] = await db.insert(tenants).values({ name: companyName, slug: `${slug}-${nanoid(4)}` }).returning()
 
-      await Promise.all([
+      const [, , [kibiEntity]] = await Promise.all([
         db.insert(tenantMemberships).values({ userId: user.id, tenantId: tenant.id, role: 'entity_main' }),
         db.insert(aiConfigs).values({ tenantId: tenant.id, provider: 'openrouter', model: 'google/gemini-2.0-flash-exp:free' }),
         db.insert(kibiEntities).values({
@@ -106,8 +107,16 @@ export const authRoutes: FastifyPluginAsync = async (app) => {
           companyName,
           industry: industry ?? null,
           mainUserId: user.id,
-        }),
+        }).returning(),
       ])
+
+      // YFZ 34 Faz 2: Base (CRM+ERP+Muhasebe) artık tamamen native CRUD'a bağımlı —
+      // entity şeması her tenant'ta kayıt anında garanti edilmeli, lazy/admin-only değil.
+      try {
+        await provisionEntity(kibiEntity.id, tenant.slug)
+      } catch (err) {
+        console.error('[REGISTER-ENTITY] provisionEntity failed:', err)
+      }
 
       // Send welcome email (non-fatal)
       try {

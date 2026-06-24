@@ -11,7 +11,7 @@ import api from '../lib/api'
 // ── Types ─────────────────────────────────────────────────────────────────────
 interface Contact { id: string; name: string; contactType: string; email?: string; phone?: string; taxNumber?: string; balance?: number }
 interface Invoice { id: string; invoiceNumber: string; invoiceType: string; contactId?: string; issueDate?: string; dueDate?: string; total?: number; status?: string; paidAmount?: number }
-interface Payment { id: string; paymentType: string; amount: number; currencyCode?: string; paymentMethod?: string; status?: string; reference?: string }
+interface Payment { id: string; paymentType: string; amount: number; currency?: string; paymentMethod?: string; isReconciled?: boolean; reference?: string }
 interface Expense { id: string; expenseDate?: string; category?: string; description?: string; amount?: number; status?: string }
 interface PayIntegration { id: string; provider: string; name: string; isActive: boolean }
 interface BankIntegration { id: string; provider: string; bankName: string; country: string; isActive: boolean }
@@ -61,15 +61,15 @@ const fmt = (n: number, currency = 'TRY') =>
   n.toLocaleString('tr-TR', { style: 'currency', currency, minimumFractionDigits: 2 })
 
 const STATUS_CLS: Record<string, string> = {
-  draft: 'bg-gray-700 text-gray-300', sent: 'bg-blue-900 text-blue-300',
-  paid: 'bg-green-900 text-green-300', overdue: 'bg-red-900 text-red-300',
+  draft: 'bg-gray-700 text-gray-300', sent: 'bg-blue-900 text-blue-300', viewed: 'bg-blue-900 text-blue-300',
+  paid: 'bg-green-900 text-green-300', overdue: 'bg-red-900 text-red-300', partially_paid: 'bg-yellow-900 text-yellow-300',
   pending: 'bg-yellow-900 text-yellow-300', approved: 'bg-green-900 text-green-300',
   completed: 'bg-green-900 text-green-300', rejected: 'bg-red-900 text-red-300',
   cancelled: 'bg-gray-700 text-gray-300',
 }
 const STATUS_LBL: Record<string, string> = {
-  draft: 'Taslak', sent: 'Gönderildi', paid: 'Ödendi', overdue: 'Gecikmiş',
-  pending: 'Bekliyor', approved: 'Onaylandı', completed: 'Tamamlandı',
+  draft: 'Taslak', sent: 'Gönderildi', viewed: 'Görüntülendi', paid: 'Ödendi', overdue: 'Gecikmiş',
+  partially_paid: 'Kısmi Ödendi', pending: 'Bekliyor', approved: 'Onaylandı', completed: 'Tamamlandı',
   rejected: 'Reddedildi', cancelled: 'İptal',
 }
 
@@ -431,8 +431,8 @@ export default function Accounting() {
   // ── Modals ──
   function ContactModal() {
     const [form, setForm] = useState(contactModal?.data ?? {
-      contactType: 'individual', name: '', email: '', phone: '',
-      taxNumber: '', taxOffice: '', address: '', country: 'TR', currencyCode: 'TRY',
+      contactType: 'customer', name: '', email: '', phone: '',
+      taxNumber: '', taxOffice: '', addressLine1: '', country: 'TR', currency: 'TRY',
     })
     const save = async () => {
       contactModal?.id ? await api.put(`/accounting/contacts/${contactModal.id}`, form) : await api.post('/accounting/contacts', form)
@@ -441,14 +441,14 @@ export default function Accounting() {
     return (
       <Modal title={contactModal?.id ? 'Kişi Düzenle' : 'Yeni Kişi'} onClose={() => setContactModal(null)}>
         <div className="grid gap-3 sm:grid-cols-2">
-          <F label="Tür"><select value={form.contactType} onChange={e => setForm({ ...form, contactType: e.target.value })} className={iCls}><option value="individual">Bireysel</option><option value="corporate">Kurumsal</option></select></F>
+          <F label="Tür"><select value={form.contactType} onChange={e => setForm({ ...form, contactType: e.target.value })} className={iCls}><option value="customer">Müşteri</option><option value="vendor">Tedarikçi</option><option value="both">İkisi</option></select></F>
           <F label="Ad / Firma"><input value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} className={iCls} /></F>
           <F label="Email"><input value={form.email} onChange={e => setForm({ ...form, email: e.target.value })} className={iCls} /></F>
           <F label="Telefon"><input value={form.phone} onChange={e => setForm({ ...form, phone: e.target.value })} className={iCls} /></F>
           <F label="Vergi No"><input value={form.taxNumber} onChange={e => setForm({ ...form, taxNumber: e.target.value })} className={iCls} /></F>
           <F label="Vergi Dairesi"><input value={form.taxOffice} onChange={e => setForm({ ...form, taxOffice: e.target.value })} className={iCls} /></F>
           <F label="Ülke"><input value={form.country} onChange={e => setForm({ ...form, country: e.target.value })} className={iCls} /></F>
-          <F label="Para Birimi"><input value={form.currencyCode} onChange={e => setForm({ ...form, currencyCode: e.target.value })} className={iCls} /></F>
+          <F label="Para Birimi"><input value={form.currency} onChange={e => setForm({ ...form, currency: e.target.value })} className={iCls} /></F>
         </div>
         <div className="flex gap-3 justify-end">
           <button onClick={() => setContactModal(null)} className="px-4 py-2 rounded-2xl border border-[#2a2a2a] text-gray-400">İptal</button>
@@ -461,11 +461,11 @@ export default function Accounting() {
   function InvoiceModal() {
     const [form, setForm] = useState(invoiceModal?.data ?? {
       invoiceType: 'sale', contactId: '', issueDate: new Date().toISOString().slice(0, 10),
-      dueDate: '', currencyCode: 'TRY', subtotal: 0, taxTotal: 0, discountTotal: 0, total: 0, status: 'draft', notes: '',
+      dueDate: '', currency: 'TRY', subtotal: 0, taxAmount: 0, discountAmount: 0, total: 0, status: 'draft', notes: '',
     })
     const recalc = (patch: Partial<typeof form>) => {
       const m = { ...form, ...patch }
-      m.total = (m.subtotal ?? 0) + (m.taxTotal ?? 0) - (m.discountTotal ?? 0)
+      m.total = (m.subtotal ?? 0) + (m.taxAmount ?? 0) - (m.discountAmount ?? 0)
       setForm(m)
     }
     const save = async () => {
@@ -475,16 +475,16 @@ export default function Accounting() {
     return (
       <Modal title={invoiceModal?.id ? 'Fatura Düzenle' : 'Yeni Fatura'} onClose={() => setInvoiceModal(null)}>
         <div className="grid gap-3 sm:grid-cols-2">
-          <F label="Tür"><select value={form.invoiceType} onChange={e => setForm({ ...form, invoiceType: e.target.value })} className={iCls}><option value="sale">Satış</option><option value="purchase">Alım</option></select></F>
+          <F label="Tür"><select value={form.invoiceType} onChange={e => setForm({ ...form, invoiceType: e.target.value })} className={iCls}><option value="sale">Satış</option><option value="purchase">Alım</option><option value="credit_note">Alacak Dekontu</option><option value="debit_note">Borç Dekontu</option></select></F>
           <F label="Kişi"><select value={form.contactId} onChange={e => setForm({ ...form, contactId: e.target.value })} className={iCls}><option value="">Seçin...</option>{contacts.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</select></F>
           <F label="Düzenleme Tarihi"><input type="date" value={form.issueDate} onChange={e => setForm({ ...form, issueDate: e.target.value })} className={iCls} /></F>
           <F label="Vade Tarihi"><input type="date" value={form.dueDate} onChange={e => setForm({ ...form, dueDate: e.target.value })} className={iCls} /></F>
           <F label="Ara Toplam"><input type="number" value={form.subtotal} onChange={e => recalc({ subtotal: Number(e.target.value) })} className={iCls} /></F>
-          <F label="KDV"><input type="number" value={form.taxTotal} onChange={e => recalc({ taxTotal: Number(e.target.value) })} className={iCls} /></F>
-          <F label="İndirim"><input type="number" value={form.discountTotal} onChange={e => recalc({ discountTotal: Number(e.target.value) })} className={iCls} /></F>
+          <F label="KDV"><input type="number" value={form.taxAmount} onChange={e => recalc({ taxAmount: Number(e.target.value) })} className={iCls} /></F>
+          <F label="İndirim"><input type="number" value={form.discountAmount} onChange={e => recalc({ discountAmount: Number(e.target.value) })} className={iCls} /></F>
           <F label="Toplam"><input type="number" value={form.total} onChange={e => setForm({ ...form, total: Number(e.target.value) })} className={iCls} /></F>
-          <F label="Durum"><select value={form.status} onChange={e => setForm({ ...form, status: e.target.value })} className={iCls}><option value="draft">Taslak</option><option value="sent">Gönderildi</option><option value="paid">Ödendi</option><option value="overdue">Gecikmiş</option><option value="cancelled">İptal</option></select></F>
-          <F label="Para Birimi"><input value={form.currencyCode} onChange={e => setForm({ ...form, currencyCode: e.target.value })} className={iCls} /></F>
+          <F label="Durum"><select value={form.status} onChange={e => setForm({ ...form, status: e.target.value })} className={iCls}><option value="draft">Taslak</option><option value="sent">Gönderildi</option><option value="viewed">Görüntülendi</option><option value="partially_paid">Kısmi Ödendi</option><option value="paid">Ödendi</option><option value="overdue">Gecikmiş</option><option value="cancelled">İptal</option></select></F>
+          <F label="Para Birimi"><input value={form.currency} onChange={e => setForm({ ...form, currency: e.target.value })} className={iCls} /></F>
         </div>
         <F label="Notlar"><textarea value={form.notes} onChange={e => setForm({ ...form, notes: e.target.value })} rows={2} className={iCls} /></F>
         <div className="flex gap-3 justify-end">
@@ -497,8 +497,8 @@ export default function Accounting() {
 
   function PaymentModal() {
     const [form, setForm] = useState({
-      paymentType: 'received', amount: 0, currencyCode: 'TRY',
-      paymentMethod: 'bank_transfer', reference: '', notes: '', status: 'completed', contactId: '', invoiceId: '',
+      paymentType: 'received', amount: 0, currency: 'TRY',
+      paymentMethod: 'bank_transfer', reference: '', notes: '', contactId: '', invoiceId: '',
     })
     const save = async () => {
       await api.post('/accounting/payments', form)
@@ -509,7 +509,7 @@ export default function Accounting() {
         <div className="grid gap-3 sm:grid-cols-2">
           <F label="Tür"><select value={form.paymentType} onChange={e => setForm({ ...form, paymentType: e.target.value })} className={iCls}><option value="received">Alınan</option><option value="sent">Gönderilen</option></select></F>
           <F label="Tutar"><input type="number" value={form.amount} onChange={e => setForm({ ...form, amount: Number(e.target.value) })} className={iCls} /></F>
-          <F label="Yöntem"><select value={form.paymentMethod} onChange={e => setForm({ ...form, paymentMethod: e.target.value })} className={iCls}><option value="bank_transfer">Banka Havalesi</option><option value="credit_card">Kredi Kartı</option><option value="cash">Nakit</option><option value="check">Çek</option><option value="online">Online</option></select></F>
+          <F label="Yöntem"><select value={form.paymentMethod} onChange={e => setForm({ ...form, paymentMethod: e.target.value })} className={iCls}><option value="bank_transfer">Banka Havalesi</option><option value="credit_card">Kredi Kartı</option><option value="cash">Nakit</option><option value="check">Çek</option><option value="stripe">Stripe</option><option value="iyzico">Iyzico</option><option value="papara">Papara</option></select></F>
           <F label="Referans No"><input value={form.reference} onChange={e => setForm({ ...form, reference: e.target.value })} className={iCls} /></F>
           <F label="Kişi"><select value={form.contactId} onChange={e => setForm({ ...form, contactId: e.target.value })} className={iCls}><option value="">Seçin...</option>{contacts.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}</select></F>
           <F label="Fatura"><select value={form.invoiceId} onChange={e => setForm({ ...form, invoiceId: e.target.value })} className={iCls}><option value="">Seçin...</option>{invoices.map(i => <option key={i.id} value={i.id}>{i.invoiceNumber}</option>)}</select></F>
@@ -525,7 +525,7 @@ export default function Accounting() {
   function ExpenseModal() {
     const [form, setForm] = useState(expenseModal?.data ?? {
       expenseDate: new Date().toISOString().slice(0, 10),
-      category: 'general', description: '', amount: 0, currencyCode: 'TRY', status: 'pending',
+      category: 'general', description: '', amount: 0, currency: 'TRY', status: 'pending',
     })
     const save = async () => {
       expenseModal?.id ? await api.put(`/accounting/expenses/${expenseModal.id}`, form) : await api.post('/accounting/expenses', form)
@@ -730,7 +730,7 @@ export default function Accounting() {
           </div>
           <div className="overflow-x-auto rounded-3xl border border-[#2a2a2a] bg-[#111111]">
             <table className="min-w-full text-sm text-gray-300">
-              <thead><tr><th className="px-6 py-4 text-left">Tür</th><th className="px-6 py-4 text-left">Tutar</th><th className="px-6 py-4 text-left">Yöntem</th><th className="px-6 py-4 text-left">Referans</th><th className="px-6 py-4 text-left">Durum</th></tr></thead>
+              <thead><tr><th className="px-6 py-4 text-left">Tür</th><th className="px-6 py-4 text-left">Tutar</th><th className="px-6 py-4 text-left">Yöntem</th><th className="px-6 py-4 text-left">Referans</th><th className="px-6 py-4 text-left">Mutabakat</th></tr></thead>
               <tbody>
                 {payments.length === 0 ? (
                   <tr><td colSpan={5} className="px-6 py-10 text-center text-gray-500">Ödeme bulunamadı.</td></tr>
@@ -740,7 +740,11 @@ export default function Accounting() {
                     <td className="px-6 py-4 text-white">{fmt(p.amount)}</td>
                     <td className="px-6 py-4">{p.paymentMethod ?? '-'}</td>
                     <td className="px-6 py-4 font-mono text-xs">{p.reference ?? '-'}</td>
-                    <td className="px-6 py-4"><StatusBadge s={p.status} /></td>
+                    <td className="px-6 py-4">
+                      <span className={`px-2 py-0.5 rounded-full text-xs ${p.isReconciled ? 'bg-green-900 text-green-300' : 'bg-gray-700 text-gray-300'}`}>
+                        {p.isReconciled ? 'Mutabık' : 'Beklemede'}
+                      </span>
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -765,7 +769,7 @@ export default function Accounting() {
                 ) : contacts.map(c => (
                   <tr key={c.id} className="border-t border-[#2a2a2a] hover:bg-[#1a1a1a]">
                     <td className="px-6 py-4 text-white">{c.name}</td>
-                    <td className="px-6 py-4">{c.contactType === 'individual' ? 'Bireysel' : 'Kurumsal'}</td>
+                    <td className="px-6 py-4">{{ customer: 'Müşteri', vendor: 'Tedarikçi', both: 'İkisi' }[c.contactType] ?? c.contactType}</td>
                     <td className="px-6 py-4">{c.email ?? '-'}</td>
                     <td className="px-6 py-4">{c.phone ?? '-'}</td>
                     <td className="px-6 py-4">{fmt(c.balance ?? 0)}</td>

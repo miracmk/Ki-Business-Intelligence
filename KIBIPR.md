@@ -7,11 +7,16 @@ Her oturumda bu dosyayı oku, değişiklikleri buraya yansıt.
 
 ## 1. Proje Kimliği
 
-**Adı:** Ki Business Intelligence (Ki BI)
+**Adı:** KiBI (Ki Business Intelligence) — AI-Native All-in-One Business Platform
 **Domain:** https://bi.kibusiness.co
 **Sahibi:** mirac@kibusiness.co (admin)
-**Amaç:** CRM/ERP/Muhasebe entegrasyonlu, AI destekli çok kiracılı (multi-tenant) iş zekası platformu.
-Şirketler (entity) CRM, ERP ve Muhasebe sistemlerini bağlar, KIBI AI ile verilerini sorgular.
+**Konumlandırma:** Zoho / Salesforce / SAP / Odoo'ya karşı, çok kiracılı (multi-tenant) bir SaaS:
+- **Base Platform** (her tenant'ta dahil, ek ücret yok): CRM + ERP + Muhasebe & Faturalama — tek tenant-izole şemada, birbirine bağlı.
+- **Premium Upsell:** KiBI AI — CRM/ERP/Muhasebe verisini Qdrant/RAG ile okuyan karar-destek asistanı. Base, KiBI AI tamamen kapalıyken de %100 çalışır.
+- **Native Add-on Modüller** (ayrı ücretlendirilir, tek tık aktivasyon): Customer Service Management, Fulfillment Service Management, E-Commerce Management, Marketing Management, Event Management, Personnel Management.
+- **Dış Bağlantılar (Universal Connector Wizard):** eski/harici sistemlerden (CRM/ERP/Muhasebe yazılımları) veri **içe aktarmak** için — Base native tablolara import mekanizması olarak konumlanır, davranışı değişmedi.
+
+Detaylı ürün mimarisi: bkz. **§14 KiBI Ürün Mimarisi — Base + Premium + Addon**.
 
 ---
 
@@ -233,6 +238,46 @@ scope varchar, role varchar, primary_model varchar, fallback_models jsonb
 ```
 `scope='platform'` → 5dk in-memory cache
 
+### entity_module_entitlements (YFZ 34 — Premium AI + Add-on entitlement framework)
+```sql
+id uuid PK, entity_id uuid FK→kibi_entities.id (cascade),
+module_key entity_entitlement_module_key enum, status entity_entitlement_status enum,
+price_usd numeric(10,2) DEFAULT 0, billing_type varchar DEFAULT 'monthly',
+trial_ends_at, enabled_at, cancelled_at, metadata jsonb,
+created_at, updated_at
+UNIQUE(entity_id, module_key)
+```
+- `module_key`: `ai_premium`, `addon_customer_service`, `addon_fulfillment`, `addon_ecommerce`, `addon_marketing`, `addon_event`, `addon_personnel_management`
+- `status`: `trial`, `active`, `suspended`, `cancelled`
+- `entity_id` → `kibi_entities.id` (NOT `tenants.id`) — billing/plan konvansiyonuyla tutarlı (`kibiWallets`, `entityMetrics` aynı deseni kullanır)
+- `billEntityMonthly()` (`src/engine/billing/billing.ts`) bu tablodaki `status='active'` satırların `price_usd` toplamını aylık temel ücrete ekler
+- `/api/v1/ai/chat` ve `/api/v1/ai/entity-chat`, `ai_premium` entitlement'ı aktif değilse 402 döner (admin/supervisor bypass hariç)
+- Add-on'ların 6'sı şu an **stub registry** (`ADDON_MODULE_KEYS`, `src/api/routes/entitlements.ts`) — gerçek modül kodu yok, sadece aktivasyon iskeleti
+
+### Base Şema — Entity-İçi (entity_{slug}) CRM/ERP/Muhasebe FK Grafiği
+Her tenant'ın kendi `entity_{slug}` Postgres şeması vardır (`db/entity-schema-template.sql`, uygulayan `src/lib/entity-provisioner.ts`). Bu zaten birbirine bağlı bir "Base" şemadır:
+
+```
+CRM:  crm_contacts ←FK— crm_deals.contact_id          crm_companies ←FK— crm_deals.company_id
+      crm_contacts ←FK— crm_companies.id (company_id)  crm_activities → contact_id/company_id/deal_id
+
+ERP:  erp_products ←FK— erp_stock_movements.product_id, erp_order_items.product_id
+      erp_suppliers ←FK— erp_orders.supplier_id
+      erp_orders ←FK(cascade)— erp_order_items.order_id
+      erp_staff ←FK(self)— erp_staff.manager_id ; erp_staff ←FK— erp_staff_attendance / erp_payroll
+
+MUHASEBE: acc_contacts ←FK— acc_invoices.contact_id / acc_payments.contact_id / acc_expenses.contact_id
+          acc_invoices ←FK(cascade)— acc_invoice_lines.invoice_id
+          acc_bank_accounts ←FK— acc_bank_transactions.bank_account_id
+
+ÇAPRAZ MODÜL (bilinçli soft-link, FK DEĞİL — kayıt silinse bile muhasebe yaşar):
+  acc_contacts.crm_contact_id / crm_company_id → crm_contacts / crm_companies
+  acc_invoices.order_id → erp_orders
+  acc_invoice_lines.product_id → erp_products
+```
+
+**Önemli:** Muhasebe native CRUD (`src/api/routes/accounting.ts` + `frontend/src/pages/Accounting.tsx`) bugün hâlâ **public-schema** `acc_*` tablolarını hedefliyor (yukarıdaki entity-içi `acc_*` setinden ayrı, izole) — bu, YFZ 34 Faz 2'de entity-schema'ya konsolide edilecek (bkz. §12 bilinen sorunlar). CRM/ERP'nin entity-içi tabloları bugün sadece external connector ETL veya AI-agent doğal-dil yazma (`entity-db-engine.ts`) ile doluyor — native REST/UI CRUD yok (YFZ 34 Faz 3-4'te eklenecek).
+
 ---
 
 ## 7. Rol & Yetki Sistemi
@@ -431,8 +476,47 @@ Free tier'da zaman zaman 503. Gateway'de 3'lü fallback zinciri var.
 | `frontend/src/pages/PlatformSettings.tsx` | Admin connection manager |
 | `docker-compose.yml` | Stack tanımı |
 | `.env` | Secrets (ASLA DEĞİŞTİRME) |
+| `src/api/routes/entitlements.ts` | Premium AI + Add-on entitlement aktivasyon API'si (YFZ 34) |
+| `src/lib/entity-provisioner.ts` | Entity şema provisioning + `queryEntitySchema()` (native CRUD'un DB erişim katmanı) |
+| `db/entity-schema-template.sql` | Base şema DDL (CRM/ERP/Muhasebe, entity-içi) |
 
 ---
+
+## 14. KiBI Ürün Mimarisi — Base + Premium + Addon
+
+### 14.1 Pozisyonlama
+KiBI, Zoho / Salesforce / SAP / Odoo gibi rakiplere karşı konumlanır: onların hantal, parçalı yapısına karşı, **Base** paketinde en kritik iş bileşenlerini sunan, çekirdeğinde AI olan ve sektörel ihtiyaçları native add-on'larla çözen çok-kiracılı bir SaaS.
+
+### 14.2 Base Platform (her tenant'ta dahil, ücretsiz)
+- **CRM:** Müşteri bilgileri, Fırsatlar (Deals), Lead yönetimi, Pipeline, Görevler — entity-içi `crm_contacts/crm_companies/crm_deals/crm_activities`.
+- **ERP:** Stok/Envanter, üretim planlama, al-sat, maliyet muhasebesi — entity-içi `erp_products/erp_stock_movements/erp_warehouses/erp_suppliers/erp_orders/erp_order_items` (+ `erp_staff/erp_staff_attendance/erp_payroll`, bkz. §14.4 Personnel Management notu).
+- **Muhasebe & Faturalama:** Finansal tablolar, vergi, cari hesap, fatura kesme, tahsilat — entity-içi `acc_contacts/acc_invoices/acc_invoice_lines/acc_payments/acc_expenses/acc_bank_accounts/acc_bank_transactions/acc_chart_of_accounts`.
+- Bu üçü **tek tenant-izole şemada** (`entity_{slug}`), birbirine bağlı tablolar olarak tasarlanmıştır (bkz. §6 FK grafiği). Base, **KiBI AI tamamen kapalıyken de %100 çalışmalıdır** — bu yüzden native REST+UI CRUD (AI-agent'a bağımlı olmadan) gereklidir (YFZ 34 Faz 2-4).
+
+### 14.3 Premium Upsell — KiBI AI
+- Veritabanındaki CRM/ERP/Muhasebe verisini Qdrant + RAG ile okuyan, karar destek sunan native AI asistanı.
+- Entitlement: `entity_module_entitlements.module_key = 'ai_premium'`.
+- Gate noktaları: `POST /api/v1/ai/chat`, `POST /api/v1/ai/entity-chat` — entitlement `active`/`trial` değilse 402 (admin/supervisor bypass hariç). Frontend: `Layout.tsx` nav'ında KIBI AI / Entity AI linkleri entitlement yoksa gizlenir (kozmetik, asıl sınır backend 402'dir).
+
+### 14.4 Native Add-on Modüller (entitlement iskeleti — modül kodu henüz yok)
+Firmaların sektörlerine göre tek tıkla aktive edebileceği, ayrı ücretlendirilen 6 modül:
+1. **Customer Service Management** — Ticket/Support, SLA takibi, müşteri portalı (`addon_customer_service`)
+2. **Fulfillment Service Management** — Kurye, sevkiyat, depo çıkış, teslimat (`addon_fulfillment`)
+3. **E-Commerce Management** — Amazon/eBay/Walmart/Trendyol/Hepsiburada entegrasyonu (`addon_ecommerce`)
+4. **Marketing Management** — E-posta pazarlama, sosyal medya takvimi, AI içerik üretimi (`addon_marketing`)
+5. **Event Management** — Etkinlik, biletleme, organizasyon takvimi, mekan yönetimi (`addon_event`)
+6. **Personnel Management** — Personel/bordro/devam takibi (`addon_personnel_management`) — şema zaten Base ERP DDL'inde hazır (`erp_staff/erp_staff_attendance/erp_payroll`), sadece native CRUD+UI eksik; bu yüzden ERP native CRUD fazı (Faz 4) bu tabloları **bilinçli olarak hariç tutar**.
+
+Şu an sadece `entity_module_entitlements` tablosu + `ADDON_MODULE_KEYS` stub registry + aktivasyon API'si var (YFZ 34 Faz 1). Gerçek modül inşası YFZ 34 Faz 5a-5f (ayrı, çok-fazlı efor).
+
+### 14.5 Universal Connector Wizard — Pozisyon Değişikliği (kod değişmedi)
+Eski/harici sistemlerden (eski muhasebe yazılımı, başka bir CRM/ERP) veri almak için mevcut Universal Connector Wizard (`crmConnections`, `entity-etl.ts`, `UniversalConnectorWizard.tsx`) korunur — davranışı **değişmedi**. Artık kavramsal olarak "tek veri kaynağı" değil, Base native tablolara **import mekanizması** olarak konumlanır.
+
+---
+
+## Geliştirme Geçmişi (YFZ 1-33)
+
+> Aşağıdaki bölüm, KiBI'nin önceki adı "Ki Business Intelligence" altında YFZ 1'den YFZ 33'e kadar yapılan tüm geliştirmelerin değişmeden korunan kaydıdır. Yeni mimari için bkz. yukarıdaki §14; bu fazlar üzerine inşa edilen yeni çalışma için bkz. en alttaki "YFZ 34+ — KiBI Repositioning".
 
 ## Yeni Fazlar (23 Mayıs 2026 — Sprint 2)
 
@@ -1260,4 +1344,116 @@ YFZ 19-21 ✓ → YFZ 22 → YFZ 23 → YFZ 27 → YFZ 28
 
 ---
 
-*Son güncelleme: YFZ 31-32 tamamlandı. Universal Connector kaynak rol sistemi + mirror ETL + model ping altyapısı (YFZ 31); 5 katmanlı fiyatlandırma + aylık faturalama + Ki Wallet entegrasyonu + şirket profili/kanal kimlikleri (YFZ 32). 18 Haziran 2026.*
+## YFZ 33 — Entity KB + KIBI AI KB: Dosya Yükleme, Chunking, Hash-Bazlı Incremental Indexleme ✅ Tamamlandı (18 Haziran 2026)
+
+**Tetikleyici:** n8n'deki "Qdrant Sales Agent Vector Store Update" workflow'u (id: `oxA9s5pa3lPxSJfT`) incelendi — Google Drive izleyici + format-bazlı extraction (PDF/XLSX/DOCX/HTML) + chunking + metadata injection ile Qdrant'a yazıyor. Bu workflow'un **mantığı** (Drive tetikleyicisi değil) Entity KB ve KIBI AI KB'ye taşınacak: dosya yükleme → format extraction → chunking → hash-bazlı incremental embed.
+
+### Terminoloji
+
+| Kavram | Kapsam | Karşılığı |
+|---|---|---|
+| **Entity DB / Entity KB** | Tenant-izole (her firma kendi verisi) | `tenants`, `knowledgeEntries` → yeni `kb_documents`/`kb_chunks` (scope=`entity`), Qdrant `entity_{tenantId}` |
+| **KIBI AI DB / KIBI AI KB** | Platform-geneli, tenant'tan bağımsız; dashboard ve iletişim kanallarıyla konuşulabilen KIBI AI'nin kendi bilgisi | `platformVectorDocs` → yeni `kb_documents`/`kb_chunks` (scope=`kibi`), Qdrant `kibi_ai_kb` |
+
+### Tespit Edilen Mevcut Durum (geliştirmeye başlamadan önce doğrulanan bulgular)
+
+- **Çift Qdrant instance karışıklığı:** `ki_qdrant` (KIBI API'nin bağlandığı, `QDRANT_URL=http://ki_qdrant:6333`) **tamamen boş** (0 koleksiyon). n8n'in yazdığı ayrı `qdrant` container'ı (n8n_n8n-net, api-key korumalı) ise 8 koleksiyon ve gerçek üretim verisi içeriyor (`ki_product_knowledge` 514 nokta/384-dim, `ki_sales_methodology` 693 nokta/384-dim, `ki_crm_serviceinfo` 20 nokta/1024-dim, `ki_legal_uk`, `ki_legal_us`, `ki_glossary`, `documents`). **Bu veri migrate edilmeyecek** — kullanıcı dosyaların orijinalleri elinde olduğu için sıfırdan yeniden yüklenecek.
+- **KIBI AI Danışman pipeline bug'ı:** `kibi-agent.ts:122`'deki `generateConsultingRecommendation()` KB'yi `'ki_platform_knowledge'` koleksiyonunda arıyor, ama yazma tarafı (`admin.ts` → `PLATFORM_QDRANT_COLLECTION = env.QDRANT_COLLECTION`) `'ki_knowledge_base'`'a yazıyor. **İsimler tutmadığı için Danışman şu an hiçbir KB sonucu bulamıyor.** Bu işin parçası olarak tek isimde (`kibi_ai_kb`) birleştirilecek.
+- **Embedding modeli:** Mevcut sistem `BAAI/bge-m3` (1024-dim, HuggingFace Inference, `qdrant.ts`) kullanıyor. n8n workflow'u `google/embeddinggemma-300m` (384-dim) kullanıyor — boyutlar uyumsuz. **Karar: `bge-m3`'te kalınıyor**, re-embed gerektirmeyen yol seçildi; n8n'in chunking/metadata mantığı bizim modelimize bağlanacak. (`qdrant.ts:69`'daki "same as n8n used" yorumu artık güncel değil, n8n model değiştirdi — düzeltilecek.)
+- **Chunking hiç implement edilmemiş:** `indexer.ts` → `indexKnowledge()` stub, `{indexed:0}` döndürüyor. Mevcut "Vektör Tabanı" panelleri (Entity: `Settings.tsx`, KIBI: `PlatformSettings.tsx`) sadece elle metin yapıştırma destekliyor — 1 doküman = 1 chunk = 1 vektör, dosya yükleme yok.
+- **Dosya altyapısı zaten mevcut, yeniden kullanılacak:** `@fastify/multipart` kurulu, `file_storage` tablosu + `files.ts` route'u (`storage/{tenantId}/{timestamp}-{filename}` local disk convention) — KB dosya yüklemesi bu pattern'i takip edecek.
+- **Qdrant point ID kısıtı:** Qdrant point ID'si yalnızca `u64` veya `UUID` kabul ediyor — ham SHA256 hex string geçersiz. Bu yüzden point id `uuid5(documentId + ':' + chunkHash)` ile deterministik üretilecek (idempotent re-upload + content-hash dedup için).
+
+### Dosya Yükleme Akışı
+
+1. Kullanıcı Settings → "Vektör Tabanı" panelinden dosya seçer + **Kategori** dropdown'undan seçim yapar
+2. Dosya adı normalize edilir: `{entity-slug}-{category}.{ext}` (örn. `abc-ltd-companyinfo.pdf`)
+3. Aynı entity+kategori+dosya adıyla tekrar yükleme → **versiyon güncellemesi** (eski içerikle hash diff, sadece değişen chunk'lar re-embed edilir)
+4. Farklı dosya adı, aynı kategori → kategoride ayrı bir doküman olarak coexist eder (örn. "Soru-Cevap" kategorisinde birden çok bağımsız not/dosya bir arada durabilir)
+
+### Kategori Taksonomisi
+
+**Entity KB** (operasyonel/şirket verisi):
+`company_info` (Şirket Bilgisi) · `pricing` (Fiyatlandırma) · `product_info` (Ürün/Hizmet) · `faq` (Soru-Cevap) · `customer_feedback` (Müşteri Geri Bildirimi) · `support_issue` (Destek Sorun) · `support_solution` (Destek Çözüm) · `policy` (Politika/Prosedür) · `other`
+
+**KIBI AI KB** (KIBI AI müşterilerine **ve** Ki Business Ecosystem müşterilerine cevap verebilmesi için 3 grup):
+
+| Grup | Kategori (key) | Varsayılan Audience |
+|---|---|---|
+| Platform (KIBI AI'nin kendisi) | `platform_features`, `platform_pricing`, `platform_faq`, `onboarding` | `kibi_customer` |
+| Ecosystem (Ki Business grubunun diğer ürün/hizmetleri) | `ecosystem_overview`, `ecosystem_services` | `ecosystem_customer` |
+| | `ecosystem_policies` | `both` |
+| Genel Danışmanlık (her iki tipe de uygulanır) | `industry_insight`, `consulting_methodology`, `sales_methodology`, `legal_compliance`, `glossary`, `other` | `both` |
+
+`category` varchar olarak kalıyor (DB enum yok — codebase convention'ı, yeni kategori eklemek migration gerektirmez). **Audience** ayrımı için yeni kolon eklenmiyor — mevcut `tags` (jsonb) alanı kullanılıyor (`kibi_customer` / `ecosystem_customer` / `both`, varsayılan `both`). Faz 2'de `kibi-agent.ts`'deki Danışman arama adımına audience filtresi eklenecek (sorulan kişinin tipine göre payload filtreleme).
+
+### Postgres Şeması (tek tablo seti, `scope` ayrımıyla — kod tekrarını önlemek için)
+
+```
+kb_documents
+  id, scope ('entity'|'kibi'), entity_id (null for kibi),
+  category, title, original_file_name, normalized_file_name,
+  file_storage_id (-> file_storage.id, nullable — manuel not ise null),
+  source_type ('file'|'manual'), status ('processing'|'active'|'failed'|'archived'),
+  uploaded_by, created_at, updated_at
+
+kb_chunks
+  id, document_id (-> kb_documents.id, cascade),
+  chunk_index, chunk_hash (sha256, normalize sonrası), chunk_text,
+  qdrant_point_id (uuid5(documentId+':'+chunkHash)), active, created_at
+```
+
+### Qdrant Tarafı
+
+- **Entity KB:** mevcut convention korunuyor — her tenant'ın kendi koleksiyonu `entity_{tenantId}`, payload'a `category`, `document_id`, `chunk_hash`, `file_name` eklenir.
+- **KIBI AI KB:** tek koleksiyon `kibi_ai_kb` (eski `ki_knowledge_base`/`ki_platform_knowledge` karışıklığı bununla çözülüyor), payload `category` + `tags` (audience) içerir.
+
+### Incremental Update Mantığı (n8n'in chunking mantığından esinlenilen, hash-diff ile)
+
+1. Yeni içerik normalize edilir (trim, lowercase, unicode normalize, fazla whitespace temizleme)
+2. Her chunk için SHA256 hash hesaplanır
+3. Aynı `document_id`'nin mevcut aktif chunk hash'leriyle karşılaştırılır:
+   - Hash zaten varsa → embed atlanır (idempotent)
+   - Yeni hash → embed edilir + Qdrant'a upsert edilir
+   - Eski hash artık mevcut değilse → Qdrant'tan silinir + Postgres'te `active=false` işaretlenir
+
+### Geliştirme Adımları
+
+**Faz 1 — Şema + altyapı** ✅
+- [x] `kb_documents` / `kb_chunks` migration'ı (`db/migrations/0015_kb_documents.sql`, uygulandı)
+- [x] Normalize → SHA256 hash → `uuid5(point id)` yardımcı fonksiyonları (`src/engine/knowledge/chunking.ts`)
+- [x] PDF/DOCX/XLSX/CSV/HTML extraction kütüphaneleri (`pdf-parse`, `mammoth`, `exceljs`, `papaparse`; `xlsx` paketi yamasız CVE'ler nedeniyle `exceljs` ile değiştirildi) (`src/engine/knowledge/file-extractor.ts`)
+
+**Faz 2 — Ortak indexleme motoru** ✅
+- [x] `indexer.ts`'deki stub gerçek chunking + hash-diff + incremental upsert/delete mantığıyla dolduruldu
+- [x] KIBI AI KB collection isim birleştirme (`KIBI_AI_KB_COLLECTION = 'kibi_ai_kb'`) — Danışman pipeline'ındaki arama bug'ı düzeldi
+- [x] `kibi-agent.ts` Danışman arama adımına audience (`tags`: `kibi_customer`/`ecosystem_customer`/`both`) filtresi eklendi
+
+**Faz 3 — Upload UI + API** ✅
+- [x] Entity Settings (`frontend/src/pages/Settings.tsx`): dosya yükleme + kategori dropdown (mevcut manuel not formuna ek, "Vektör Tabanı" panelinde)
+- [x] Platform Settings (`frontend/src/pages/PlatformSettings.tsx`, `PlatformVectorPanel`): dosya yükleme + kategori dropdown (3 grup) + audience seçimi
+- [x] Backend: `POST /tenants/kb-documents` (`src/api/routes/tenant.ts`) ve `POST /admin/kb-documents` (`src/api/routes/admin.ts`) — multipart upload → extraction → chunk → hash-diff → embed → upsert zinciri; `GET`/`DELETE` eşlenikleri de eklendi
+- Not: platform-scope (`scope='kibi'`) yüklemelerde sahip tenant olmadığından `file_storage` tablosuna satır yazılmıyor (FK `tenant_id NOT NULL`) — dosya `storage/_platform/` altında arşivleniyor, `kb_documents.fileStorageId` null kalıyor
+
+**Faz 4 — Approval queue entegrasyonu** ✅
+- [x] `kb_approval_queue` onay akışı yeni indexleme motoruna bağlandı — `PUT /entity-ai/kb-queue/:id/approve` artık `problem_summary`+`solution_text`'i `kb_documents` (`category='support_solution'`, `sourceType='conversation'`) olarak kaydedip `indexDocument()` ile gerçek chunk+embed+upsert yapıyor
+- [x] `entity-ai.ts` kb-queue route'larındaki SQL injection düzeltildi — raw string interpolation yerine Drizzle `sql` tagged template (parametreli sorgu) kullanılıyor
+
+**Not (Faz 5 — iptal):** n8n'in eski Qdrant'ındaki üretim verisi migrate edilmeyecek; orijinal dosyalar kullanıcıda mevcut, sıfırdan yeniden yüklenecek.
+
+---
+
+*Son güncelleme: YFZ 33 tamamlandı — Entity KB + KIBI AI KB dosya yükleme, format extraction (PDF/DOCX/XLSX/CSV/HTML/TXT), chunking, SHA256 hash-bazlı incremental indexleme, Entity+Platform Settings upload UI, kb_approval_queue gerçek indexleme entegrasyonu + SQL injection düzeltmesi. 18 Haziran 2026.*
+
+---
+
+## YFZ 34+ — KiBI Repositioning (Base + Premium AI + Native Add-on'lar)
+
+> "Ki Business Intelligence" connector/AI platformu, "KiBI" — Base (CRM+ERP+Muhasebe) + Premium upsell (KiBI AI) + Native Add-on (6 modül) markasına dönüşüyor. Mimari detay: §14. Bu bölüm, repositioning'in fazlarını YFZ 33'ün devamı olarak kaydeder.
+
+### YFZ 34.0 — KIBIPR.md Yeniden Yapılanma ✅ (2026-06-25)
+- [x] §1 (Proje Kimliği) Base+Premium+Addon konumlandırmasına göre yeniden yazıldı
+- [x] §6 (Veritabanı Şeması) — entity-içi CRM/ERP/Muhasebe FK grafiği belgelendi + yeni `entity_module_entitlements` tablosu eklendi
+- [x] Yeni §14 "KiBI Ürün Mimarisi" bölümü eklendi (Base / Premium AI / 6 Add-on / Connector Wizard pozisyonu)
+- [x] YFZ 1-33 içeriği silinmeden "Geliştirme Geçmişi (YFZ 1-33)" başlığı altına taşındı
+- [x] Plan: `/root/.claude/plans/proje-vi-zyonu-ve-mi-mari-ancient-shell.md` — Faz 0-4 detaylı, Faz 5a-5f (6 add-on) ayrı ayrı detaylandırıldı

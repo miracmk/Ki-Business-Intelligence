@@ -78,6 +78,7 @@ export default function Layout() {
   const [crmLoaded,    setCrmLoaded]    = useState(false)
   const [notifications, setNotifications] = useState<any[]>([])
   const [notifOpen,    setNotifOpen]    = useState(false)
+  const [aiPremiumActive, setAiPremiumActive] = useState(true) // YFZ 34: optimistic default until /entitlements resolves
   const notifRef = useRef<HTMLDivElement>(null)
 
   const [dark, setDark] = useState(() => {
@@ -108,6 +109,17 @@ export default function Layout() {
     load()
     const iv = setInterval(load, 30000)
     return () => clearInterval(iv)
+  }, [user])
+
+  // YFZ 34: KiBI AI / Entity AI nav görünürlüğü — Premium AI entitlement (kozmetik;
+  // gerçek erişim sınırı backend'in 402 gate'idir, bu sadece nav'ı temizler)
+  useEffect(() => {
+    if (!user) return
+    api.get('/entitlements').then(r => {
+      const rows = r.data.entitlements ?? []
+      const ai = rows.find((e: any) => e.moduleKey === 'ai_premium')
+      setAiPremiumActive(!!ai && (ai.status === 'active' || ai.status === 'trial'))
+    }).catch(() => setAiPremiumActive(true)) // fail-open on nav; backend 402 still enforces
   }, [user])
 
   // close notif dropdown on outside click
@@ -175,7 +187,7 @@ export default function Layout() {
 
   const sidebar = (
     <aside
-      className={`fixed md:static inset-y-0 left-0 z-30 w-60 flex flex-col transition-transform duration-300 md:translate-x-0 ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}`}
+      className={`fixed md:sticky inset-y-0 md:inset-y-auto left-0 md:top-0 z-30 w-60 h-screen flex flex-col transition-transform duration-300 md:translate-x-0 ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}`}
       style={{
         background: 'var(--surface)',
         backdropFilter: 'blur(28px) saturate(1.8)',
@@ -260,7 +272,9 @@ export default function Layout() {
           <FolderOpen size={17} /><span className="text-sm font-medium">Dosyalar</span>
         </Link>
 
-        {/* AI section separator */}
+        {/* AI section separator — YFZ 34: KiBI AI is a Premium upsell, nav hides if not entitled */}
+        {(isAdminOrSupervisor || aiPremiumActive) && (
+        <>
         <div className="pt-2 pb-1 px-3">
           <span className="text-[10px] uppercase tracking-widest font-semibold" style={{ color: 'var(--text-3)' }}>Yapay Zeka</span>
         </div>
@@ -280,6 +294,8 @@ export default function Layout() {
           onMouseEnter={hoverIn} onMouseLeave={e => hoverOut(e, activeLink('/app/entity-ai'))}>
           <Bot size={17} /><span className="text-sm font-medium">Entity AI</span>
         </Link>
+        </>
+        )}
 
         {/* Support */}
         <Link to="/app/support"
@@ -393,7 +409,7 @@ export default function Layout() {
   )
 
   return (
-    <div className="min-h-screen flex bg-transparent">
+    <div className="h-screen flex bg-transparent overflow-hidden">
       {/* Mobile overlay */}
       {sidebarOpen && (
         <div className="fixed inset-0 z-20 bg-black/50 md:hidden" onClick={() => setSidebarOpen(false)} />
@@ -402,7 +418,7 @@ export default function Layout() {
       {sidebar}
 
       {/* Main */}
-      <main className="flex-1 overflow-auto flex flex-col min-w-0">
+      <main className="flex-1 h-screen overflow-y-auto flex flex-col min-w-0">
         {/* Mobile top bar */}
         <div className="flex md:hidden items-center gap-3 px-4 py-3 sticky top-0 z-10"
           style={{ background: 'var(--surface)', borderBottom: '1px solid var(--border)' }}>

@@ -30,6 +30,7 @@ import { notificationRoutes } from './api/routes/notifications.js'
 import { walletRoutes }       from './api/routes/wallet.js'
 import { entityAiRoutes }     from './api/routes/entity-ai.js'
 import { dashboardRoutes }    from './api/routes/dashboard.js'
+import { entitlementsRoutes } from './api/routes/entitlements.js'
 import { webhookRoutes }      from './api/webhooks/index.js'
 
 const FRONTEND_DIST = process.env['FRONTEND_DIST'] ?? '/app/frontend/dist'
@@ -108,6 +109,7 @@ await app.register(async (api) => {
   await api.register(entityAiRoutes,      { prefix: '/entity-ai' })
   await api.register(channelRoutes,       { prefix: '/channels' })
   await api.register(dashboardRoutes,     { prefix: '/dashboard' })
+  await api.register(entitlementsRoutes,  { prefix: '/entitlements' })
 }, { prefix: '/api/v1' })
 
 await app.register(webhookRoutes, { prefix: '/webhooks' })

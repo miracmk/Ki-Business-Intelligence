@@ -1457,3 +1457,14 @@ kb_chunks
 - [x] Yeni §14 "KiBI Ürün Mimarisi" bölümü eklendi (Base / Premium AI / 6 Add-on / Connector Wizard pozisyonu)
 - [x] YFZ 1-33 içeriği silinmeden "Geliştirme Geçmişi (YFZ 1-33)" başlığı altına taşındı
 - [x] Plan: `/root/.claude/plans/proje-vi-zyonu-ve-mi-mari-ancient-shell.md` — Faz 0-4 detaylı, Faz 5a-5f (6 add-on) ayrı ayrı detaylandırıldı
+
+### YFZ 34.1 — Entitlement Framework (Premium AI + Add-on iskeleti) ✅ (2026-06-25)
+- [x] `db/schema.ts`: `entityModuleEntitlements` tablosu + `entity_entitlement_module_key` (7 değer: `ai_premium` + 6 add-on) ve `entity_entitlement_status` (trial/active/suspended/cancelled) enumları. `entityId → kibiEntities.id` (billing konvansiyonuyla tutarlı).
+- [x] `db/migrations/0016_entity_module_entitlements.sql`: CREATE TYPE×2, CREATE TABLE, 2 index, + canlı tek tenant (`entity_ki_business`) için `ai_premium`/`active` backfill INSERT — uygulandı, doğrulandı (1 satır).
+- [x] `src/lib/entitlements.ts` (yeni): `hasActiveEntitlement()`, `listEntitlements()`, `activateEntitlement()`, `deactivateEntitlement()`, `sumActiveEntitlementCharges()`, `ADDON_MODULE_KEYS` stub registry — entitlements route'u, AI gate'i ve billing'in paylaştığı tek kaynak.
+- [x] `src/api/routes/entitlements.ts` (yeni): `GET /api/v1/entitlements`, `POST /:moduleKey/activate`, `POST /:moduleKey/deactivate` (entity_main/admin yetkili) — `server.ts`'e `/api/v1/entitlements` prefix'iyle kayıtlı.
+- [x] `src/engine/billing/billing.ts` → `billEntityMonthly()`: aktif entitlement `price_usd` toplamı artık aylık temel ücrete (veya free planda tek başına) eklenip tek `chargeEntity()` çağrısıyla tahsil ediliyor.
+- [x] `src/api/routes/ai.ts`: `POST /ai/chat` (satır ~219'dan sonra) ve `POST /ai/entity-chat` (entity çözümlemesinden sonra) için `ai_premium` entitlement 402 gate'i — admin/supervisor bypass korunarak.
+- [x] `frontend/src/components/Layout.tsx`: `/entitlements` çekiliyor, `ai_premium` aktif/trial değilse "Yapay Zeka" nav bölümü (KIBI AI + Entity AI) admin/supervisor olmayan kullanıcılar için gizleniyor (kozmetik — asıl sınır backend 402).
+- [x] Doğrulama: `tsc --noEmit` temiz, frontend `npm run build` başarılı, `docker compose restart ki_api` → `🚀 Ki Platform running`, `/health` ok, `GET /api/v1/entitlements` auth'suz → 401 (route kayıtlı), entitlement durumu `suspended`→`active` arası değiştirilerek `hasActiveEntitlement()` doğru sonuç verdiği canlı DB'de test edildi.
+- Kapsam dışı (bilinçli): muhasebe public→entity-schema konsolidasyonu (Faz 2), native CRM/ERP CRUD (Faz 3-4), 6 add-on'un gerçek inşası (Faz 5a-5f) — plan dosyasında detaylı, sıradaki adımlar.

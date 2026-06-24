@@ -15,6 +15,7 @@ import {
 } from '../../../db/schema.js'
 import { eq, and, lte, sql } from 'drizzle-orm'
 import { env } from '../../../config/env.js'
+import { sumActiveEntitlementCharges } from '../../lib/entitlements.js'
 
 // ── Ki Wallet helpers (duplicated here to avoid circular dep) ─────────────
 
@@ -116,8 +117,25 @@ export async function billEntityMonthly(entityId: string): Promise<{
     where: (t, { eq }) => eq(t.id, entityId),
   })
   if (!entity) return { ok: false, skipped: true, reason: 'entity_not_found' }
+
+  // YFZ 34: Premium AI / add-on entitlements are priced independently of plan_name —
+  // sum them here so they ride the same monthly Ki Wallet debit as the base plan charge.
+  const entitlementUsd = await sumActiveEntitlementCharges(entityId).catch(() => 0)
+
   if (!entity.planName || entity.planName === 'free') {
-    // Free plan: reset counters, advance next_billing_at, no charge
+    // Free plan: no base/overage charge, but active entitlements (e.g. a paid add-on) still bill.
+    let chargedOk = true
+    if (entitlementUsd > 0) {
+      const result = await chargeEntity(
+        entityId, entitlementUsd,
+        `Aylık modül ücreti (${new Date().toLocaleDateString('tr-TR', { month: 'long', year: 'numeric' })})`,
+        'monthly_plan',
+      )
+      chargedOk = result.ok
+      if (result.insufficientFunds) {
+        return { ok: false, skipped: false, reason: 'insufficient_funds', chargedUsd: entitlementUsd }
+      }
+    }
     await db.update(kibiEntities).set({
       messagesUsedThisMonth: 0,
       billingCycleStart:     new Date(),
@@ -125,7 +143,7 @@ export async function billEntityMonthly(entityId: string): Promise<{
       updatedAt:             new Date(),
     }).where(eq(kibiEntities.id, entityId))
     await resetMemberMessageCounters(entityId)
-    return { ok: true, skipped: false, chargedUsd: 0 }
+    return { ok: chargedOk, skipped: false, chargedUsd: entitlementUsd }
   }
 
   const pkg = await getEntityPackage(entity.planName)
@@ -148,6 +166,9 @@ export async function billEntityMonthly(entityId: string): Promise<{
   if (extraSubs > 0) {
     totalUsd += extraSubs * extraSubPrice
   }
+
+  // Active Premium AI / add-on entitlements
+  totalUsd += entitlementUsd
 
   let chargedOk = true
   if (totalUsd > 0) {

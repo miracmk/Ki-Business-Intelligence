@@ -12,6 +12,7 @@ import { eq, and, sql } from 'drizzle-orm'
 import { getEntitySchema, queryEntitySchema, getEntityDataSummary } from '../../lib/entity-provisioner.js'
 import { env } from '../../../config/env.js'
 import { chargeMessageOverage, getEntityPackage } from '../../engine/billing/billing.js'
+import { hasActiveEntitlement } from '../../lib/entitlements.js'
 
 async function resolveEntityId(userId: string, tenantId: string | null): Promise<string> {
   const isUUID = (s: string | null | undefined) =>
@@ -217,6 +218,11 @@ export const aiRoutes: FastifyPluginAsync = async (app) => {
       !!s && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)
 
     const entityId = await resolveEntityId(user.sub, user.tenantId).catch(() => null)
+
+    // YFZ 34: KiBI AI is a Premium upsell — Base must work with it fully off.
+    if (!isAdmin && entityId && !(await hasActiveEntitlement(entityId, 'ai_premium'))) {
+      return reply.status(402).send({ error: 'KIBI AI premium bir özelliktir. Lütfen planınızı yükseltin.' })
+    }
 
     if (!sid || !isUUIDCheck(sid)) {
       if (entityId) {
@@ -473,11 +479,12 @@ export const aiRoutes: FastifyPluginAsync = async (app) => {
   // ── POST /api/v1/ai/entity-chat ──────────────────────────────────────────
   // Entity AI: answers questions about the entity's own data (CRM, ERP, Accounting)
   app.post('/entity-chat', { onRequest: [app.authenticate] }, async (req, reply) => {
-    const user = req.user as { sub: string; tenantId: string | null }
+    const user = req.user as { sub: string; tenantId: string | null; role?: string }
     const body = z.object({ message: z.string().min(1), sessionId: z.string().optional() }).safeParse(req.body)
     if (!body.success) return reply.status(400).send({ error: body.error.flatten() })
 
     const { message } = body.data
+    const isAdmin = user.role === 'admin' || user.role === 'supervisor'
 
     // Guard: requires a valid UUID tenantId
     const isUUID = (s: string | null | undefined) =>
@@ -496,6 +503,11 @@ export const aiRoutes: FastifyPluginAsync = async (app) => {
         where: (t, { eq }) => eq(t.entityId, user.tenantId!),
         columns: { id: true, entityDbSchema: true, isProvisioned: true, companyName: true },
       })
+
+      // YFZ 34: KiBI AI (Entity AI dahil) Premium upsell — Base AI'sız %100 çalışmalı.
+      if (entity && !isAdmin && !(await hasActiveEntitlement(entity.id, 'ai_premium'))) {
+        return reply.status(402).send({ error: 'Entity AI premium bir özelliktir. Lütfen planınızı yükseltin.' })
+      }
 
       if (!entity?.isProvisioned || !entity.entityDbSchema) {
         return reply.send({

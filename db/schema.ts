@@ -260,6 +260,43 @@ export const kibiInternalUsers = pgTable('kibi_internal_users', {
   createdAt:    timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 })
 
+// YFZ 34: Premium AI + native Add-on entitlement framework (KiBI Base+Premium+Addon repositioning)
+export const entityEntitlementModuleKeyEnum = pgEnum('entity_entitlement_module_key', [
+  'ai_premium',
+  'addon_customer_service',
+  'addon_fulfillment',
+  'addon_ecommerce',
+  'addon_marketing',
+  'addon_event',
+  'addon_personnel_management',
+])
+
+export const entityEntitlementStatusEnum = pgEnum('entity_entitlement_status', [
+  'trial', 'active', 'suspended', 'cancelled',
+])
+
+export const entityModuleEntitlements = pgTable('entity_module_entitlements', {
+  id:          uuid('id').primaryKey().defaultRandom(),
+  entityId:    uuid('entity_id').notNull().references(() => kibiEntities.id, { onDelete: 'cascade' }),
+  moduleKey:   entityEntitlementModuleKeyEnum('module_key').notNull(),
+  status:      entityEntitlementStatusEnum('status').notNull().default('active'),
+  priceUsd:    numeric('price_usd', { precision: 10, scale: 2 }).notNull().default('0'),
+  billingType: varchar('billing_type', { length: 20 }).notNull().default('monthly'), // monthly | usage | one_time
+  trialEndsAt: timestamp('trial_ends_at', { withTimezone: true }),
+  enabledAt:   timestamp('enabled_at', { withTimezone: true }).notNull().defaultNow(),
+  cancelledAt: timestamp('cancelled_at', { withTimezone: true }),
+  metadata:    jsonb('metadata').$type<Record<string, unknown>>().default({}),
+  createdAt:   timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt:   timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({
+  entityModuleIdx: uniqueIndex('entity_module_entitlements_entity_module_idx').on(t.entityId, t.moduleKey),
+  entityStatusIdx: index('entity_module_entitlements_entity_status_idx').on(t.entityId, t.status),
+}))
+
+export const entityModuleEntitlementsRelations = relations(entityModuleEntitlements, ({ one }) => ({
+  entity: one(kibiEntities, { fields: [entityModuleEntitlements.entityId], references: [kibiEntities.id] }),
+}))
+
 export const kibiModelRoleEnum = pgEnum('kibi_model_role', [
   'conversation', 'db_search', 'qdrant_search', 'redis_search',
   'intent', 'support_intent', 'support_refine', 'support_resolver', 'support_answering',
@@ -1097,6 +1134,41 @@ export const knowledgeEntries = pgTable('knowledge_entries', {
   createdAt:  timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 }, (t) => ({
   tenantIdx: index('knowledge_entries_tenant_idx').on(t.tenantId),
+}))
+
+// YFZ 33: Entity KB + KIBI AI KB — document → chunks model, shared by both scopes.
+// scope='entity' → entityId required (tenants.id); scope='kibi' → entityId null (platform-wide KB).
+export const kbDocuments = pgTable('kb_documents', {
+  id:                  uuid('id').primaryKey().defaultRandom(),
+  scope:               varchar('scope', { length: 10 }).notNull(),  // 'entity' | 'kibi'
+  entityId:            uuid('entity_id').references(() => tenants.id, { onDelete: 'cascade' }),
+  category:            varchar('category', { length: 50 }).notNull(),
+  title:               varchar('title', { length: 500 }).notNull(),
+  originalFileName:    varchar('original_file_name', { length: 255 }),
+  normalizedFileName:  varchar('normalized_file_name', { length: 255 }),
+  fileStorageId:       uuid('file_storage_id').references(() => fileStorage.id, { onDelete: 'set null' }),
+  sourceType:          varchar('source_type', { length: 20 }).notNull().default('manual'), // 'file' | 'manual'
+  tags:                jsonb('tags').$type<string[]>().default([]), // audience: kibi_customer | ecosystem_customer | both
+  status:              varchar('status', { length: 20 }).notNull().default('processing'), // processing|active|failed|archived
+  uploadedBy:          uuid('uploaded_by').references(() => users.id, { onDelete: 'set null' }),
+  createdAt:           timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt:           timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({
+  scopeEntityCategoryIdx: index('kb_documents_scope_entity_category_idx').on(t.scope, t.entityId, t.category),
+}))
+
+export const kbChunks = pgTable('kb_chunks', {
+  id:             uuid('id').primaryKey().defaultRandom(),
+  documentId:     uuid('document_id').notNull().references(() => kbDocuments.id, { onDelete: 'cascade' }),
+  chunkIndex:     integer('chunk_index').notNull(),
+  chunkHash:      varchar('chunk_hash', { length: 64 }).notNull(),
+  chunkText:      text('chunk_text').notNull(),
+  qdrantPointId:  uuid('qdrant_point_id').notNull(),
+  active:         boolean('active').notNull().default(true),
+  createdAt:      timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({
+  documentIdx:     index('kb_chunks_document_idx').on(t.documentId),
+  documentHashIdx: uniqueIndex('kb_chunks_document_hash_idx').on(t.documentId, t.chunkHash),
 }))
 
 // ─── Relations ────────────────────────────────────────────────────────────────

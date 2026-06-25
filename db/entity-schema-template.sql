@@ -933,3 +933,61 @@ INSERT INTO ":schema".acc_chart_of_accounts (code, name, account_type, level) VA
   ('760', 'Pazarlama Satış Dağıtım Giderleri', 'expense', 3),
   ('770', 'Genel Yönetim Giderleri', 'expense', 3),
   ('780', 'Finansman Giderleri', 'expense', 3);
+
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- CUSTOMER SERVICE MANAGEMENT MODULE (Native Add-on — addon_customer_service)
+-- YFZ 34 Faz 5a. Tables live in Base DDL (no extra provisioning cost); native
+-- CRUD/UI access is gated behind the entitlement, not the schema itself.
+-- ═══════════════════════════════════════════════════════════════════════════════
+
+CREATE TABLE ":schema".support_sla_policies (
+  id                    UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  name                  VARCHAR(255) NOT NULL,
+  priority              VARCHAR(20)  NOT NULL, -- low,medium,high,urgent
+  first_response_hours  NUMERIC(6,2) NOT NULL DEFAULT 24,
+  resolution_hours      NUMERIC(6,2) NOT NULL DEFAULT 72,
+  is_active             BOOLEAN      DEFAULT TRUE,
+  created_at            TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE ":schema".support_tickets (
+  id                      UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  ticket_number           VARCHAR(50) NOT NULL,
+  contact_id              UUID        REFERENCES ":schema".crm_contacts(id) ON DELETE SET NULL,
+
+  subject                 VARCHAR(500) NOT NULL,
+  description             TEXT,
+  category                VARCHAR(100),
+
+  status                  VARCHAR(30)  DEFAULT 'open', -- open,in_progress,waiting_customer,resolved,closed
+  priority                VARCHAR(20)  DEFAULT 'medium', -- low,medium,high,urgent
+
+  assigned_to_user_id     UUID,
+  sla_policy_id           UUID        REFERENCES ":schema".support_sla_policies(id) ON DELETE SET NULL,
+
+  first_response_due_at   TIMESTAMPTZ,
+  resolution_due_at       TIMESTAMPTZ,
+  first_responded_at      TIMESTAMPTZ,
+  resolved_at             TIMESTAMPTZ,
+  closed_at               TIMESTAMPTZ,
+
+  tags                    JSONB       DEFAULT '[]',
+
+  created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at              TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE UNIQUE INDEX support_tickets_number_idx  ON ":schema".support_tickets (ticket_number);
+CREATE INDEX        support_tickets_status_idx  ON ":schema".support_tickets (status);
+CREATE INDEX        support_tickets_contact_idx ON ":schema".support_tickets (contact_id);
+
+CREATE TABLE ":schema".support_ticket_messages (
+  id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  ticket_id       UUID        NOT NULL REFERENCES ":schema".support_tickets(id) ON DELETE CASCADE,
+  sender_type     VARCHAR(20) NOT NULL, -- customer,agent
+  sender_user_id  UUID,
+  content         TEXT        NOT NULL,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX support_ticket_messages_ticket_idx ON ":schema".support_ticket_messages (ticket_id, created_at);

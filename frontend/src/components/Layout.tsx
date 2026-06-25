@@ -5,7 +5,7 @@ import {
   LayoutDashboard, FolderOpen, LifeBuoy, Settings, LogOut,
   Sun, Moon, Menu, X, ChevronDown, ChevronRight,
   MessageSquare, Bot, Settings2, BarChart3, Database,
-  Bell, CheckCheck, Wallet, Users, Boxes,
+  Bell, CheckCheck, Wallet, Users, Boxes, Headset,
 } from 'lucide-react'
 import api from '../lib/api'
 
@@ -279,6 +279,19 @@ export default function Layout() {
             </div>
           )}
         </div>
+
+        {/* Add-on Modüller — YFZ 34 Faz 5: native paid add-on'lar, her zaman nav'da görünür
+            (entitlement yoksa sayfa içinde "Etkinleştir" CTA'sı gösterilir, nav'da gizlenmez —
+            add-on'ların keşfedilebilir/satılabilir olması gerekiyor, AI'nin aksine) */}
+        <div className="pt-2 pb-1 px-3">
+          <span className="text-[10px] uppercase tracking-widest font-semibold" style={{ color: 'var(--text-3)' }}>Add-on Modüller</span>
+        </div>
+        <Link to="/app/customer-service"
+          className="flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all duration-200"
+          style={linkStyle(activeLink('/app/customer-service'))}
+          onMouseEnter={hoverIn} onMouseLeave={e => hoverOut(e, activeLink('/app/customer-service'))}>
+          <Headset size={17} /><span className="text-sm font-medium">Müşteri Hizmetleri</span>
+        </Link>
 
         {/* Files */}
         <Link to="/app/files"

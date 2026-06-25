@@ -9,6 +9,7 @@ import Dashboard from './pages/Dashboard'
 import Modules from './pages/Modules'
 import Crm from './pages/Crm'
 import Erp from './pages/Erp'
+import CustomerService from './pages/CustomerService'
 import Accounting from './pages/Accounting'
 import Files from './pages/Files'
 import AiChat from './pages/AiChat'
@@ -46,6 +47,7 @@ function AppShell() {
           <Route path="dashboard"  element={<Dashboard />} />
           <Route path="crm-native" element={<Crm />} />
           <Route path="erp-native" element={<Erp />} />
+          <Route path="customer-service" element={<CustomerService />} />
           <Route path="crm"        element={<Modules />} />
           <Route path="modules"    element={<Navigate to="/app/crm" replace />} />
           <Route path="accounting" element={<Accounting />} />

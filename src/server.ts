@@ -21,6 +21,7 @@ import { startBillingScheduler } from './engine/billing/billing.js'
 import { crmRoutes }        from './api/routes/crm.js'
 import { crmNativeRoutes }  from './api/routes/crm-native.js'
 import { erpNativeRoutes }  from './api/routes/erp-native.js'
+import { customerServiceRoutes } from './api/routes/customer-service.js'
 import { aiRoutes }         from './api/routes/ai.js'
 import { tenantRoutes, channelRoutes } from './api/routes/tenant.js'
 import { accountingRoutes } from './api/routes/accounting.js'
@@ -102,6 +103,7 @@ await app.register(async (api) => {
   await api.register(crmRoutes,        { prefix: '/crm' })
   await api.register(crmNativeRoutes,  { prefix: '/crm-native' })
   await api.register(erpNativeRoutes,  { prefix: '/erp-native' })
+  await api.register(customerServiceRoutes, { prefix: '/customer-service' })
   await api.register(aiRoutes,         { prefix: '/ai' })
   await api.register(accountingRoutes, { prefix: '/accounting' })
   await api.register(supportRoutes,    { prefix: '/support' })

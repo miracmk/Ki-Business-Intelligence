@@ -87,6 +87,38 @@ export async function provisionEntity(kibiEntityId: string, slug: string): Promi
 }
 
 /**
+ * Apply a DDL increment (CREATE TABLE IF NOT EXISTS ... using the same ":schema"
+ * placeholder convention as TEMPLATE_SQL) to every already-provisioned entity.
+ *
+ * entity-schema-template.sql only runs in full once, at provisioning time — adding
+ * new CREATE TABLE blocks to it covers future tenants, but existing tenants need
+ * this to pick up new tables (e.g. a new native add-on's schema, YFZ 34 Faz 5+).
+ * Always pair a call to this with the same block appended to the template file.
+ */
+export async function applySchemaIncrement(sqlTemplate: string): Promise<string[]> {
+  const entities = await db
+    .select({ schema: kibiEntities.entityDbSchema })
+    .from(kibiEntities)
+    .where(eq(kibiEntities.isProvisioned, true))
+
+  const pool = new Pool({ connectionString: env.DATABASE_URL, max: 1 })
+  const client = await pool.connect()
+  const applied: string[] = []
+  try {
+    for (const e of entities) {
+      if (!e.schema) continue
+      const sql = sqlTemplate.replaceAll('":schema"', `"${e.schema}"`)
+      await client.query(sql)
+      applied.push(e.schema)
+    }
+  } finally {
+    client.release()
+    await pool.end()
+  }
+  return applied
+}
+
+/**
  * Execute a raw SQL query within an entity's schema.
  * Use this for Entity AI tool calls that read entity data.
  */

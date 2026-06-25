@@ -1494,3 +1494,13 @@ kb_chunks
 - [x] `Layout.tsx`: nav'a yeni üst-seviye "CRM" linki eklendi (→ `/app/crm-native`); eski "CRM" açılır menüsü "CRM Bağlantıları" olarak yeniden etiketlendi (route/davranış aynı, sadece nav metni — iki ayrı "CRM" etiketinin karışmasını önlemek için).
 - [x] Doğrulama: `tsc --noEmit` temiz, frontend build temiz, `docker compose restart ki_api` → sağlıklı, `/health` ok, `GET /api/v1/crm-native/contacts` auth'suz → 401 (route kayıtlı, 404 değil).
 - Not: Faz 2'de (muhasebe) yapılan canlı yazma testi production veri kirliliği riski nedeniyle bu fazda tekrarlanmadı (izin sistemi production JWT secret'ı kullanarak sahte token üretmeyi reddetti) — kod yolu accounting.ts ile birebir aynı desen, statik doğrulama (tsc/build/health/401) yeterli kabul edildi; kullanıcı UI üzerinden gerçek girişle test edebilir.
+
+### YFZ 34.4 — Native ERP CRUD (Base) ✅ (2026-06-25)
+- [x] `src/api/routes/erp-native.ts` (yeni dosya): products/suppliers/orders/warehouses CRUD, entity-schema `erp_*` tablolarına `queryEntitySchema()` ile — `accounting.ts`/`crm-native.ts` ile aynı `COLUMN_MAP`+`buildInsert`/`buildUpdate`/`selectCols` deseni.
+  - **Bilinçli olarak hariç:** `erp_staff`/`erp_staff_attendance`/`erp_payroll` — bu tablolar Base ERP DDL'inde zaten var ama native CRUD'u Faz 5f'te (Personnel Management add-on) `addon_personnel_management` entitlement'ı arkasında açılacak (§14.4).
+  - Products: soft delete (`deleted_at`), düşük-stok filtresi (`available_quantity <= reorder_point`) query param olarak (`?lowStock=1`).
+  - Orders: `order_number` sunucuda üretilir (`PO-`/`SO-` öneki); `status` `cancelled`/`delivered`/`received`'a geçince ilgili timestamp otomatik set edilir; satır kalemleri (`erp_order_items`) bu fazda kapsam dışı — Faz 2'deki invoice_lines kararıyla tutarlı.
+  - `server.ts`'e `/api/v1/erp-native` prefix'iyle kayıtlı.
+- [x] `frontend/src/pages/Erp.tsx` (yeni sayfa): 3 sekme (Ürünler/Tedarikçiler/Siparişler) + düşük stok uyarı banner'ı, liste+modal CRUD.
+- [x] `App.tsx`: yeni `/app/erp-native` route'u. `Layout.tsx`: nav'a yeni "ERP" linki eklendi (CRM linkinin altında).
+- [x] Doğrulama: `tsc --noEmit` temiz, frontend build temiz (bir unused-interface hatası düzeltildi), `docker compose restart ki_api` → sağlıklı, `/health` ok, `GET /api/v1/erp-native/products` auth'suz → 401.

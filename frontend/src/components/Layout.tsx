@@ -5,7 +5,7 @@ import {
   LayoutDashboard, FolderOpen, LifeBuoy, Settings, LogOut,
   Sun, Moon, Menu, X, ChevronDown, ChevronRight,
   MessageSquare, Bot, Settings2, BarChart3, Database,
-  Bell, CheckCheck, Wallet, Users,
+  Bell, CheckCheck, Wallet, Users, Boxes,
 } from 'lucide-react'
 import api from '../lib/api'
 
@@ -228,6 +228,14 @@ export default function Layout() {
           style={linkStyle(activeLink('/app/crm-native'))}
           onMouseEnter={hoverIn} onMouseLeave={e => hoverOut(e, activeLink('/app/crm-native'))}>
           <Users size={17} /><span className="text-sm font-medium">CRM</span>
+        </Link>
+
+        {/* ERP (native) — YFZ 34 Faz 4: ürün/tedarikçi/sipariş Base CRUD */}
+        <Link to="/app/erp-native"
+          className="flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all duration-200"
+          style={linkStyle(activeLink('/app/erp-native'))}
+          onMouseEnter={hoverIn} onMouseLeave={e => hoverOut(e, activeLink('/app/erp-native'))}>
+          <Boxes size={17} /><span className="text-sm font-medium">ERP</span>
         </Link>
 
         {/* CRM Bağlantıları expandable (eski "CRM" — harici connector senkron/izleme, route değişmedi) */}

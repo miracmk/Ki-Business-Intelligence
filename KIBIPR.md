@@ -1482,3 +1482,15 @@ kb_chunks
 - [x] `db/migrations/0017_drop_public_acc_tables.sql`: 5 tabloyu FK sırasına göre (`acc_invoice_lines→acc_payments→acc_invoices→acc_expenses→acc_contacts`) DROP eder — uygulandı, doğrulandı.
 - [x] Doğrulama: canlı veri kontrolü (her iki tarafta da 0 satır, taşıma riski yok), `tsc --noEmit` temiz, frontend `npm run build` başarılı, `docker compose restart ki_api` → sağlıklı, **gerçek bir `POST /accounting/contacts` çağrısı** ile entity-schema'ya (`entity_ki_business.acc_contacts`) doğru yazıldığı + public şemanın boş kaldığı doğrulandı, test kaydı sonra silindi.
 - Not: Daha fazla canlı endpoint testi (invoice/payment/report) production JWT secret'ı çıkarıp sahte token üretmeyi gerektirdiği için izin sistemi tarafından durduruldu — kullanıcı UI üzerinden manuel doğrulayabilir.
+
+### YFZ 34.3 — Native CRM CRUD (Base) ✅ (2026-06-25)
+- [x] `src/api/routes/crm-native.ts` (yeni dosya, `crm.ts`'ten tamamen ayrı — connector OAuth/sync mantığına dokunulmadı): contacts/companies/deals/activities için tam CRUD, entity-schema `crm_*` tablolarına `queryEntitySchema()` ile parametreli SQL.
+  - `COLUMN_MAP` + `buildInsert()`/`buildUpdate()`/`selectCols()` deseni `accounting.ts`'ten (Faz 2) tekrar kullanıldı.
+  - Contacts/companies/deals: soft delete (`deleted_at = NOW()`, GDPR-uyumlu tasarım korunuyor); activities: hard delete (kolon yok).
+  - Deal stage `won`/`lost`'a geçince `closed_at` otomatik set edilir; activity `completed` olunca `completed_at` otomatik set edilir.
+  - `server.ts`'e `/api/v1/crm-native` prefix'iyle kayıtlı.
+- [x] `frontend/src/pages/Crm.tsx` (yeni sayfa): 4 sekme (Kişiler/Firmalar/Fırsatlar/Aktiviteler), her biri liste+modal CRUD — `Accounting.tsx` deseniyle tutarlı.
+- [x] `App.tsx`: yeni `/app/crm-native` route'u. **Karar (kullanıcı onaylı):** mevcut `/app/crm` (connector senkron/izleme, `Modules.tsx`) route'u ve davranışı **değişmedi** — sıfır regresyon riski.
+- [x] `Layout.tsx`: nav'a yeni üst-seviye "CRM" linki eklendi (→ `/app/crm-native`); eski "CRM" açılır menüsü "CRM Bağlantıları" olarak yeniden etiketlendi (route/davranış aynı, sadece nav metni — iki ayrı "CRM" etiketinin karışmasını önlemek için).
+- [x] Doğrulama: `tsc --noEmit` temiz, frontend build temiz, `docker compose restart ki_api` → sağlıklı, `/health` ok, `GET /api/v1/crm-native/contacts` auth'suz → 401 (route kayıtlı, 404 değil).
+- Not: Faz 2'de (muhasebe) yapılan canlı yazma testi production veri kirliliği riski nedeniyle bu fazda tekrarlanmadı (izin sistemi production JWT secret'ı kullanarak sahte token üretmeyi reddetti) — kod yolu accounting.ts ile birebir aynı desen, statik doğrulama (tsc/build/health/401) yeterli kabul edildi; kullanıcı UI üzerinden gerçek girişle test edebilir.

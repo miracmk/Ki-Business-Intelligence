@@ -5,7 +5,7 @@ import {
   LayoutDashboard, FolderOpen, LifeBuoy, Settings, LogOut,
   Sun, Moon, Menu, X, ChevronDown, ChevronRight,
   MessageSquare, Bot, Settings2, BarChart3, Database,
-  Bell, CheckCheck, Wallet,
+  Bell, CheckCheck, Wallet, Users,
 } from 'lucide-react'
 import api from '../lib/api'
 
@@ -222,7 +222,15 @@ export default function Layout() {
           <LayoutDashboard size={17} /><span className="text-sm font-medium">Dashboard</span>
         </Link>
 
-        {/* CRM expandable */}
+        {/* CRM (native) — YFZ 34 Faz 3: Base CRUD, ayrı sayfa/route, connector ekranından bağımsız */}
+        <Link to="/app/crm-native"
+          className="flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all duration-200"
+          style={linkStyle(activeLink('/app/crm-native'))}
+          onMouseEnter={hoverIn} onMouseLeave={e => hoverOut(e, activeLink('/app/crm-native'))}>
+          <Users size={17} /><span className="text-sm font-medium">CRM</span>
+        </Link>
+
+        {/* CRM Bağlantıları expandable (eski "CRM" — harici connector senkron/izleme, route değişmedi) */}
         <div>
           <button
             onClick={() => setCrmOpen(o => !o)}
@@ -230,7 +238,7 @@ export default function Layout() {
             style={linkStyle(activeLink('/app/crm'))}
             onMouseEnter={hoverIn} onMouseLeave={e => hoverOut(e, activeLink('/app/crm'))}>
             <Database size={17} />
-            <span className="text-sm font-medium flex-1 text-left">CRM</span>
+            <span className="text-sm font-medium flex-1 text-left">CRM Bağlantıları</span>
             {crmOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
           </button>
           {crmOpen && (

@@ -7,6 +7,7 @@ import Login from './pages/Login'
 import TwoFactor from './pages/TwoFactor'
 import Dashboard from './pages/Dashboard'
 import Modules from './pages/Modules'
+import Crm from './pages/Crm'
 import Accounting from './pages/Accounting'
 import Files from './pages/Files'
 import AiChat from './pages/AiChat'
@@ -42,6 +43,7 @@ function AppShell() {
         <Route path="/app" element={<PrivateRoute><Layout /></PrivateRoute>}>
           <Route index element={<Navigate to="/app/dashboard" replace />} />
           <Route path="dashboard"  element={<Dashboard />} />
+          <Route path="crm-native" element={<Crm />} />
           <Route path="crm"        element={<Modules />} />
           <Route path="modules"    element={<Navigate to="/app/crm" replace />} />
           <Route path="accounting" element={<Accounting />} />

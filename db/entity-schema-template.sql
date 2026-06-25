@@ -1035,3 +1035,48 @@ CREATE TABLE ":schema".erp_warehouse_picks (
 );
 
 CREATE INDEX erp_warehouse_picks_shipment_idx ON ":schema".erp_warehouse_picks (shipment_id);
+
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- E-COMMERCE MANAGEMENT MODULE (Native Add-on — addon_ecommerce)
+-- YFZ 34 Faz 5c. Schema lives in Base DDL; CRUD/UI gated by entitlement.
+-- Real marketplace API sync (Amazon/Trendyol/Hepsiburada/eBay/Walmart) is a future
+-- extension point — this phase ships connection/listing/order management with a
+-- simulated connection test (same precedent as accounting.ts payment-integrations).
+-- ═══════════════════════════════════════════════════════════════════════════════
+
+CREATE TABLE ":schema".erp_marketplace_connections (
+  id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  provider        VARCHAR(50) NOT NULL, -- amazon,ebay,walmart,trendyol,hepsiburada
+  name            VARCHAR(255) NOT NULL,
+  credentials     TEXT,        -- AES-256-GCM encrypted JSON
+  is_active       BOOLEAN      DEFAULT TRUE,
+  last_sync_at    TIMESTAMPTZ,
+  created_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE ":schema".erp_marketplace_listings (
+  id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  connection_id   UUID        NOT NULL REFERENCES ":schema".erp_marketplace_connections(id) ON DELETE CASCADE,
+  product_id      UUID        REFERENCES ":schema".erp_products(id) ON DELETE SET NULL,
+  marketplace_sku VARCHAR(255),
+  price_override  NUMERIC(15,2),
+  stock_override  NUMERIC(15,3),
+  is_active       BOOLEAN      DEFAULT TRUE,
+  last_synced_at  TIMESTAMPTZ,
+  created_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX erp_marketplace_listings_connection_idx ON ":schema".erp_marketplace_listings (connection_id);
+CREATE INDEX erp_marketplace_listings_product_idx    ON ":schema".erp_marketplace_listings (product_id);
+
+CREATE TABLE ":schema".erp_marketplace_orders (
+  id                  UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  connection_id       UUID        NOT NULL REFERENCES ":schema".erp_marketplace_connections(id) ON DELETE CASCADE,
+  order_id            UUID        REFERENCES ":schema".erp_orders(id) ON DELETE SET NULL, -- normalized into Base ERP orders
+  external_order_id   VARCHAR(255) NOT NULL,
+  external_status     VARCHAR(100),
+  raw_data            JSONB,
+  imported_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE UNIQUE INDEX erp_marketplace_orders_external_idx ON ":schema".erp_marketplace_orders (connection_id, external_order_id);

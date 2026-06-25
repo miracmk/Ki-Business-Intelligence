@@ -1527,3 +1527,13 @@ kb_chunks
 - [x] **Frontend:** `frontend/src/pages/Fulfillment.tsx` (yeni) — entitlement kilitli/aktif iki mod (`CustomerService.tsx` ile aynı desen), sevkiyat tablosu + "İlerlet" butonu (picking→packed→shipped→out_for_delivery→delivered durum zincirini tek tıkla ilerletir).
   - `App.tsx`: `/app/fulfillment` route'u. `Layout.tsx`: "Add-on Modüller" bölümüne "Sevkiyat" linki eklendi.
 - [x] Doğrulama: `tsc --noEmit` temiz, frontend build temiz, `docker compose restart ki_api` → sağlıklı, `/health` ok, `GET /api/v1/fulfillment-native/shipments` auth'suz → 401.
+
+### YFZ 34.7 — E-Commerce Management Add-on (Faz 5c) ✅ (2026-06-25)
+- [x] **Kapsam kararı (şeffafça not edildi):** Plan'da bu add-on "diğer 5'inden büyük" olarak işaretlenmişti. Gerçek Amazon/eBay/Walmart/Trendyol/Hepsiburada API entegrasyonları (OAuth, stok/fiyat push, sipariş pull) **gerçek satıcı API kimlik bilgileri/sandbox olmadan inşa edilemez/test edilemez** — bu yüzden bu fazda bağlantı/ilan/sipariş veri modeli + native CRUD + **simüle edilmiş** bağlantı testi (mevcut `accounting.ts` payment-integrations test endpoint'iyle aynı, zaten kodda var olan bir desen) teslim edildi. Gerçek pazaryeri adaptörleri için `MarketplaceAdapter` arayüzü (`ecommerce-native.ts`) bir gelecek-uzantı noktası olarak tanımlandı, gerçek implementasyon yok.
+- [x] **Schema:** `erp_marketplace_connections` / `erp_marketplace_listings` / `erp_marketplace_orders` Base entity DDL'ine eklendi + `db/migrations/0020_ecommerce_tables.sql` ile geri uygulandı (aynı DO-block deseni). Doğrulandı: `entity_ki_business`'ta 3 yeni tablo.
+  - `erp_marketplace_orders.order_id → erp_orders` — pazaryeri siparişi geldiğinde otomatik olarak Base ERP'nin gerçek `erp_orders` tablosuna normalize edilir (`order_type='sale'`, `source_type='marketplace'`), Faz 4/5b'nin üzerine inşa edilir.
+- [x] **Backend:** `src/api/routes/ecommerce-native.ts` (yeni) — `addon_ecommerce` entitlement gate. Bağlantı CRUD (credentials `encryptJson`), ilan CRUD (ürün↔pazaryeri SKU eşleştirme), sipariş "import" endpoint'i (manuel — gerçek pull olmadan, harici sipariş verisini ERP'ye normalize eder).
+  - `server.ts`'e `/api/v1/ecommerce-native` prefix'iyle kayıtlı.
+- [x] **Frontend:** `frontend/src/pages/Ecommerce.tsx` (yeni) — 3 sekme (Bağlantılar/İlanlar/Siparişler), kilitli/aktif iki mod, bağlantı formunda gerçek API testi olmadığını açıkça belirten not.
+  - `App.tsx`: `/app/ecommerce` route'u. `Layout.tsx`: "Add-on Modüller" bölümüne "E-Ticaret" linki eklendi.
+- [x] Doğrulama: `tsc --noEmit` temiz, frontend build temiz, `docker compose restart ki_api` → sağlıklı, `/health` ok, `GET /api/v1/ecommerce-native/connections` auth'suz → 401.

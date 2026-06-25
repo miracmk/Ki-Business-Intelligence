@@ -26,6 +26,7 @@ import { fulfillmentNativeRoutes } from './api/routes/fulfillment-native.js'
 import { ecommerceNativeRoutes } from './api/routes/ecommerce-native.js'
 import { marketingNativeRoutes } from './api/routes/marketing-native.js'
 import { eventNativeRoutes } from './api/routes/event-native.js'
+import { personnelNativeRoutes } from './api/routes/personnel-native.js'
 import { aiRoutes }         from './api/routes/ai.js'
 import { tenantRoutes, channelRoutes } from './api/routes/tenant.js'
 import { accountingRoutes } from './api/routes/accounting.js'
@@ -112,6 +113,7 @@ await app.register(async (api) => {
   await api.register(ecommerceNativeRoutes, { prefix: '/ecommerce-native' })
   await api.register(marketingNativeRoutes, { prefix: '/marketing-native' })
   await api.register(eventNativeRoutes, { prefix: '/event-native' })
+  await api.register(personnelNativeRoutes, { prefix: '/personnel-native' })
   await api.register(aiRoutes,         { prefix: '/ai' })
   await api.register(accountingRoutes, { prefix: '/accounting' })
   await api.register(supportRoutes,    { prefix: '/support' })

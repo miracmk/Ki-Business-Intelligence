@@ -1557,3 +1557,36 @@ kb_chunks
 - [x] **Frontend:** `frontend/src/pages/Events.tsx` (yeni) — kilitli/aktif iki mod, etkinlik kartları → detay görünümü (bilet tipleri + katılımcı kaydı + check-in akışı tek sayfada).
   - `App.tsx`: `/app/events` route'u. `Layout.tsx`: "Add-on Modüller" bölümüne "Etkinlikler" linki eklendi.
 - [x] Doğrulama: `tsc --noEmit` temiz, frontend build temiz, `docker compose restart ki_api` → sağlıklı, `/health` ok, `GET /api/v1/event-native/events` auth'suz → 401.
+
+### YFZ 34.10 — Personnel Management Add-on (Faz 5f) ✅ TAMAMLANDI — 6/6 Add-on (2026-06-25)
+- [x] **Schema:** Gerek yok — `erp_staff` / `erp_staff_attendance` / `erp_payroll` Base ERP DDL'inde **zaten vardı** (Faz 4'te kasıtlı olarak native CRUD kapsamı dışında bırakılmıştı, bkz. §6/§14.2/§14.4). `entity_ki_business`'ta var olduğu doğrulandı, migration gerekmedi.
+- [x] **Backend:** `src/api/routes/personnel-native.ts` (yeni) — `addon_personnel_management` entitlement gate.
+  - Personel CRUD (soft-terminate: `status='terminated'` + `termination_date`).
+  - Devam kaydı: `ON CONFLICT (staff_id, date) DO UPDATE` ile gün başına upsert (tablodaki mevcut `UNIQUE(staff_id, date)` kısıtıyla uyumlu).
+  - Bordro: SGK işçi payı (%14) ve işsizlik sigortası (%1) **otomatik hesaplanır** (tablo yorumlarında belirtilen Türkiye oranlarıyla), brüt/net maaş sunucu tarafında toplanır; onay akışı (`draft→approved`).
+  - `server.ts`'e `/api/v1/personnel-native` prefix'iyle kayıtlı.
+- [x] **Frontend:** `frontend/src/pages/Personnel.tsx` (yeni) — 2 sekme (Personel/Bordro), kilitli/aktif iki mod, bordro formunda otomatik SGK/işsizlik hesaplama notu.
+  - `App.tsx`: `/app/personnel` route'u. `Layout.tsx`: "Add-on Modüller" bölümüne "Personel" linki eklendi (artık 6/6 add-on nav'da).
+- [x] Doğrulama: `tsc --noEmit` temiz, frontend build temiz, `docker compose restart ki_api` → sağlıklı, `/health` ok, `GET /api/v1/personnel-native/staff` auth'suz → 401.
+
+---
+
+## YFZ 34 — Özet: KiBI Repositioning Tamamlandı (Faz 0-5f, 2026-06-25)
+
+Plandaki **tüm fazlar** (`/root/.claude/plans/proje-vi-zyonu-ve-mi-mari-ancient-shell.md`) uygulandı:
+- **Faz 0:** KIBIPR.md yeniden yapılanma
+- **Faz 1:** Entitlement framework (Premium AI + 6 add-on iskeleti)
+- **Faz 2:** Muhasebe public→entity-schema konsolidasyonu
+- **Faz 3:** Native CRM CRUD (Base)
+- **Faz 4:** Native ERP CRUD (Base, Personnel hariç)
+- **Faz 5a-5f:** 6 native add-on — Customer Service, Fulfillment, E-Commerce, Marketing, Event, Personnel Management
+
+**Yeni entitlement-gated add-on route'ları:** `/api/v1/{customer-service,fulfillment-native,ecommerce-native,marketing-native,event-native,personnel-native}` — her biri `entity_module_entitlements` tablosunda kendi `module_key`'i ile kapılı, `addHook('preHandler')` deseniyle dosya genelinde tek noktadan kontrol ediliyor.
+
+**Kapsam dışı bırakılan / gelecek işler (şeffafça belgelendi):**
+- E-Commerce: gerçek Amazon/eBay/Walmart/Trendyol/Hepsiburada API senkronu (sandbox/kimlik bilgisi olmadan inşa edilemez) — `MarketplaceAdapter` arayüzü gelecek uzantı noktası.
+- Customer Service: `support_portal_sessions` (müşteri self-service portal, ayrı auth modeli).
+- entity-schema-template.sql'deki **önceden var olan** index isimlendirme hatası (`":schema"_table_idx` geçersiz SQL) — yeni eklenen tablolarda önek kullanılmadı, ama dosyadaki eski crm/erp/acc satırları düzeltilmedi (kapsam dışı, ayrı bir hardening fazı gerektirir).
+- Add-on'lar için gerçek fiyatlandırma/ödeme UI'ı — şu an "Etkinleştir" butonu $0 ile aktive ediyor, `kibiPricingPackages`/Ki Wallet'a bağlı gerçek SKU/checkout akışı gelecek bir faz.
+
+**Git geçmişi:** YFZ 34.0 (`3b96af1`) → YFZ 34.10 (bu commit) — 13 commit, hepsi push edildi.

@@ -5,7 +5,7 @@ import {
   LayoutDashboard, FolderOpen, LifeBuoy, Settings, LogOut,
   Sun, Moon, Menu, X, ChevronDown, ChevronRight,
   MessageSquare, Bot, Settings2, BarChart3, Database,
-  Bell, CheckCheck, Wallet, Users, Boxes, Headset, Truck, ShoppingCart, Megaphone, CalendarDays,
+  Bell, CheckCheck, Wallet, Users, Boxes, Headset, Truck, ShoppingCart, Megaphone, CalendarDays, IdCard,
 } from 'lucide-react'
 import api from '../lib/api'
 
@@ -315,6 +315,12 @@ export default function Layout() {
           style={linkStyle(activeLink('/app/events'))}
           onMouseEnter={hoverIn} onMouseLeave={e => hoverOut(e, activeLink('/app/events'))}>
           <CalendarDays size={17} /><span className="text-sm font-medium">Etkinlikler</span>
+        </Link>
+        <Link to="/app/personnel"
+          className="flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all duration-200"
+          style={linkStyle(activeLink('/app/personnel'))}
+          onMouseEnter={hoverIn} onMouseLeave={e => hoverOut(e, activeLink('/app/personnel'))}>
+          <IdCard size={17} /><span className="text-sm font-medium">Personel</span>
         </Link>
 
         {/* Files */}

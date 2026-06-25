@@ -1537,3 +1537,13 @@ kb_chunks
 - [x] **Frontend:** `frontend/src/pages/Ecommerce.tsx` (yeni) — 3 sekme (Bağlantılar/İlanlar/Siparişler), kilitli/aktif iki mod, bağlantı formunda gerçek API testi olmadığını açıkça belirten not.
   - `App.tsx`: `/app/ecommerce` route'u. `Layout.tsx`: "Add-on Modüller" bölümüne "E-Ticaret" linki eklendi.
 - [x] Doğrulama: `tsc --noEmit` temiz, frontend build temiz, `docker compose restart ki_api` → sağlıklı, `/health` ok, `GET /api/v1/ecommerce-native/connections` auth'suz → 401.
+
+### YFZ 34.8 — Marketing Management Add-on (Faz 5d) ✅ (2026-06-25)
+- [x] **Schema:** `crm_email_campaigns` / `crm_social_posts` Base entity DDL'ine eklendi + `db/migrations/0021_marketing_tables.sql` ile geri uygulandı (aynı DO-block deseni). Doğrulandı: `entity_ki_business`'ta 2 yeni tablo.
+- [x] **Backend:** `src/api/routes/marketing-native.ts` (yeni) — `addon_marketing` entitlement gate.
+  - E-posta kampanyaları: taslak oluştur, segment seç (`crm_contacts.contact_type`'a göre), **gönder** — yeni bir e-posta altyapısı icat edilmedi, mevcut `tenants.settings.channels.email` SMTP konfigürasyonu (`channels.ts`'teki `/channels/:key/test` ile aynı `nodemailer.createTransport` deseni) yeniden kullanıldı.
+  - Sosyal medya gönderileri: manuel taslak CRUD + **AI içerik üretimi** (`POST /social-posts/generate`) — bu endpoint **çapraz entitlement kontrolü** yapıyor: `addon_marketing` (dosya geneli preHandler) YETMEZ, ayrıca `ai_premium` de aktif olmalı (plan §Faz 5d'de öngörülen "Marketing addon aktif ama AI premium değilse içerik üretimi manuel kalır" davranışı). `aiComplete()` + `getModelForRole('master_conversation','entity',...)` ile üretiliyor.
+  - `server.ts`'e `/api/v1/marketing-native` prefix'iyle kayıtlı.
+- [x] **Frontend:** `frontend/src/pages/Marketing.tsx` (yeni) — 2 sekme (E-posta Kampanyaları/Sosyal Medya Takvimi), kilitli/aktif iki mod, "AI ile İçerik Üret" butonu (Premium AI gerektiğini UI'da belirtiyor, 402 durumunda kullanıcıya açıklayıcı hata gösteriyor).
+  - `App.tsx`: `/app/marketing` route'u. `Layout.tsx`: "Add-on Modüller" bölümüne "Marketing" linki eklendi.
+- [x] Doğrulama: `tsc --noEmit` temiz, frontend build temiz, `docker compose restart ki_api` → sağlıklı, `/health` ok, `GET /api/v1/marketing-native/campaigns` auth'suz → 401.

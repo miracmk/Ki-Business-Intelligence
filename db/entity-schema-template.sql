@@ -1080,3 +1080,42 @@ CREATE TABLE ":schema".erp_marketplace_orders (
 );
 
 CREATE UNIQUE INDEX erp_marketplace_orders_external_idx ON ":schema".erp_marketplace_orders (connection_id, external_order_id);
+
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- MARKETING MANAGEMENT MODULE (Native Add-on — addon_marketing)
+-- YFZ 34 Faz 5d. Schema lives in Base DDL; CRUD/UI gated by entitlement.
+-- Email sending reuses the existing tenant SMTP channel config (tenants.settings.
+-- channels.email) — no new email infra. AI content generation cross-depends on
+-- the ai_premium entitlement (Premium upsell), checked separately in the route.
+-- ═══════════════════════════════════════════════════════════════════════════════
+
+CREATE TABLE ":schema".crm_email_campaigns (
+  id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  name            VARCHAR(255) NOT NULL,
+  subject         VARCHAR(500) NOT NULL,
+  body            TEXT,
+  segment         VARCHAR(50)  DEFAULT 'all', -- all,lead,contact,customer,partner,vendor
+  status          VARCHAR(30)  DEFAULT 'draft', -- draft,scheduled,sending,sent,failed
+  scheduled_at    TIMESTAMPTZ,
+  sent_at         TIMESTAMPTZ,
+  recipient_count INTEGER      DEFAULT 0,
+  sent_count      INTEGER      DEFAULT 0,
+  failed_count    INTEGER      DEFAULT 0,
+  created_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+  updated_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX crm_email_campaigns_status_idx ON ":schema".crm_email_campaigns (status);
+
+CREATE TABLE ":schema".crm_social_posts (
+  id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  platform        VARCHAR(50) NOT NULL, -- instagram,facebook,twitter,linkedin,tiktok
+  content         TEXT,
+  ai_generated    BOOLEAN     DEFAULT FALSE,
+  status          VARCHAR(30) DEFAULT 'draft', -- draft,scheduled,published
+  scheduled_at    TIMESTAMPTZ,
+  published_at    TIMESTAMPTZ,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX crm_social_posts_status_idx ON ":schema".crm_social_posts (status);

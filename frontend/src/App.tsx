@@ -12,6 +12,7 @@ import Erp from './pages/Erp'
 import CustomerService from './pages/CustomerService'
 import Fulfillment from './pages/Fulfillment'
 import Ecommerce from './pages/Ecommerce'
+import Marketing from './pages/Marketing'
 import Accounting from './pages/Accounting'
 import Files from './pages/Files'
 import AiChat from './pages/AiChat'
@@ -52,6 +53,7 @@ function AppShell() {
           <Route path="customer-service" element={<CustomerService />} />
           <Route path="fulfillment" element={<Fulfillment />} />
           <Route path="ecommerce" element={<Ecommerce />} />
+          <Route path="marketing" element={<Marketing />} />
           <Route path="crm"        element={<Modules />} />
           <Route path="modules"    element={<Navigate to="/app/crm" replace />} />
           <Route path="accounting" element={<Accounting />} />

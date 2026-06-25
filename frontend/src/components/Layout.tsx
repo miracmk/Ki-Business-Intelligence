@@ -5,7 +5,7 @@ import {
   LayoutDashboard, FolderOpen, LifeBuoy, Settings, LogOut,
   Sun, Moon, Menu, X, ChevronDown, ChevronRight,
   MessageSquare, Bot, Settings2, BarChart3, Database,
-  Bell, CheckCheck, Wallet, Users, Boxes, Headset, Truck, ShoppingCart,
+  Bell, CheckCheck, Wallet, Users, Boxes, Headset, Truck, ShoppingCart, Megaphone,
 } from 'lucide-react'
 import api from '../lib/api'
 
@@ -303,6 +303,12 @@ export default function Layout() {
           style={linkStyle(activeLink('/app/ecommerce'))}
           onMouseEnter={hoverIn} onMouseLeave={e => hoverOut(e, activeLink('/app/ecommerce'))}>
           <ShoppingCart size={17} /><span className="text-sm font-medium">E-Ticaret</span>
+        </Link>
+        <Link to="/app/marketing"
+          className="flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all duration-200"
+          style={linkStyle(activeLink('/app/marketing'))}
+          onMouseEnter={hoverIn} onMouseLeave={e => hoverOut(e, activeLink('/app/marketing'))}>
+          <Megaphone size={17} /><span className="text-sm font-medium">Marketing</span>
         </Link>
 
         {/* Files */}

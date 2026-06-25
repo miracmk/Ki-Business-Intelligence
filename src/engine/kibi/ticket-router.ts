@@ -99,17 +99,23 @@ async function sendViaEmail(to: string, subject: string, body: string, smtpCfg: 
 
 // ── Route reply back to external customer ─────────────────────────────────────
 
-export async function routeReplyToExternal(ticketId: string, replyText: string): Promise<void> {
+export interface RouteReplyResult {
+  delivered: boolean
+  channel?:  SupportChannel
+  reason?:   'not_external' | 'entity_not_found' | 'channel_not_configured'
+}
+
+export async function routeReplyToExternal(ticketId: string, replyText: string): Promise<RouteReplyResult> {
   const ticket = await db.query.kibiSupportTickets.findFirst({
     where: (t, { eq }) => eq(t.id, ticketId),
   })
-  if (!ticket?.externalContactId || !ticket?.contactChannel) return
+  if (!ticket?.externalContactId || !ticket?.contactChannel) return { delivered: false, reason: 'not_external' }
 
   const entity = await db.query.kibiEntities.findFirst({
     where: (t, { eq }) => eq(t.id, ticket.entityId),
     columns: { entityId: true },
   })
-  if (!entity) return
+  if (!entity) return { delivered: false, reason: 'entity_not_found' }
 
   const ch = await getEntityChannelConfig(entity.entityId)
   const channel  = ticket.contactChannel as SupportChannel
@@ -123,8 +129,10 @@ export async function routeReplyToExternal(ticketId: string, replyText: string):
     await sendViaInstagram(contactId, replyText, ch.instagram.access_token)
   } else if (channel === 'email' && ch.email) {
     await sendViaEmail(contactId, `Re: [${ticket.ticketNumber}] ${ticket.subject ?? ''}`, replyText, ch.email)
+  } else {
+    return { delivered: false, channel, reason: 'channel_not_configured' }
   }
-  // else: channel not configured → reply only stays in KIBI
+  return { delivered: true, channel }
 }
 
 // ── Assign ticket via weighted round-robin ─────────────────────────────────────

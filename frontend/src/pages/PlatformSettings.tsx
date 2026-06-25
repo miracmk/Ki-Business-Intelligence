@@ -4,7 +4,7 @@ import {
   Database, MessageSquare, BarChart3, Brain,
   Eye, EyeOff, Save, Trash2, RefreshCw, CheckCircle, AlertCircle,
   Server, Wifi, HardDrive, Zap, Plus, X,
-  BookOpen, AlertTriangle,
+  BookOpen, AlertTriangle, Upload, FileText, XCircle,
 } from 'lucide-react'
 import api from '../lib/api'
 import { useAuth } from '../store/auth'
@@ -227,6 +227,30 @@ const TABS = [
   { id: 'logs',       label: 'AI Günlükleri', icon: BarChart3    },
 ]
 
+// ─── KIBI AI KB category taxonomy (YFZ 33) — 3 groups, default audience per category ──
+
+const KIBI_AI_KB_CATEGORIES: { key: string; label: string; group: string; defaultAudience: string }[] = [
+  { key: 'platform_features',     label: 'Platform Özellikleri',         group: 'Platform (KIBI AI)',  defaultAudience: 'kibi_customer' },
+  { key: 'platform_pricing',      label: 'Platform Fiyatlandırma',       group: 'Platform (KIBI AI)',  defaultAudience: 'kibi_customer' },
+  { key: 'platform_faq',          label: 'Platform Soru-Cevap',          group: 'Platform (KIBI AI)',  defaultAudience: 'kibi_customer' },
+  { key: 'onboarding',            label: 'Onboarding',                   group: 'Platform (KIBI AI)',  defaultAudience: 'kibi_customer' },
+  { key: 'ecosystem_overview',    label: 'Ecosystem Genel Bakış',        group: 'Ki Business Ecosystem', defaultAudience: 'ecosystem_customer' },
+  { key: 'ecosystem_services',    label: 'Ecosystem Hizmetleri',         group: 'Ki Business Ecosystem', defaultAudience: 'ecosystem_customer' },
+  { key: 'ecosystem_policies',    label: 'Ecosystem Politikaları',       group: 'Ki Business Ecosystem', defaultAudience: 'both' },
+  { key: 'industry_insight',      label: 'Sektörel İçgörü',              group: 'Genel Danışmanlık',    defaultAudience: 'both' },
+  { key: 'consulting_methodology', label: 'Danışmanlık Metodolojisi',    group: 'Genel Danışmanlık',    defaultAudience: 'both' },
+  { key: 'sales_methodology',     label: 'Satış Metodolojisi',           group: 'Genel Danışmanlık',    defaultAudience: 'both' },
+  { key: 'legal_compliance',      label: 'Hukuk/Uyumluluk',              group: 'Genel Danışmanlık',    defaultAudience: 'both' },
+  { key: 'glossary',              label: 'Sözlük',                       group: 'Genel Danışmanlık',    defaultAudience: 'both' },
+  { key: 'other',                  label: 'Diğer',                        group: 'Genel Danışmanlık',    defaultAudience: 'both' },
+]
+
+const AUDIENCE_LABELS: Record<string, string> = {
+  kibi_customer:      'KIBI AI Müşterisi',
+  ecosystem_customer: 'Ecosystem Müşterisi',
+  both:                'Her İkisi',
+}
+
 // ─── AI Models Tab (two sub-tabs) ─────────────────────────────────────────────
 // ─── PlatformVectorPanel ──────────────────────────────────────────────────────
 function PlatformVectorPanel({ isAdmin, showToast }: { isAdmin: boolean; showToast: (msg: string, ok?: boolean) => void }) {
@@ -238,6 +262,54 @@ function PlatformVectorPanel({ isAdmin, showToast }: { isAdmin: boolean; showToa
   const [newContent,  setNewContent]  = useState('')
   const [newTags,     setNewTags]     = useState('')
   const [saving,      setSaving]      = useState(false)
+
+  const [kbDocs,        setKbDocs]        = useState<any[]>([])
+  const [loadingKbDocs, setLoadingKbDocs] = useState(false)
+  const [kbCategory,    setKbCategory]    = useState(KIBI_AI_KB_CATEGORIES[0].key)
+  const [kbAudience,    setKbAudience]    = useState(KIBI_AI_KB_CATEGORIES[0].defaultAudience)
+  const [kbFile,        setKbFile]        = useState<File | null>(null)
+  const [uploadingKb,   setUploadingKb]   = useState(false)
+
+  const loadKbDocs = useCallback(async () => {
+    setLoadingKbDocs(true)
+    try {
+      const res = await api.get('/admin/kb-documents')
+      setKbDocs(res.data.docs ?? [])
+    } catch { /* ignore */ } finally {
+      setLoadingKbDocs(false)
+    }
+  }, [])
+
+  useEffect(() => { loadKbDocs() }, [loadKbDocs])
+
+  const uploadKbDoc = async () => {
+    if (!kbFile) return
+    setUploadingKb(true)
+    try {
+      const formData = new FormData()
+      formData.append('category', kbCategory)
+      formData.append('tags', JSON.stringify([kbAudience]))
+      formData.append('file', kbFile)
+      const res = await api.post('/admin/kb-documents', formData)
+      showToast(`Doküman indexlendi — ${res.data.added ?? 0} yeni, ${res.data.unchanged ?? 0} değişmeyen, ${res.data.removed ?? 0} kaldırılan chunk`)
+      setKbFile(null)
+      await loadKbDocs()
+    } catch (e: any) {
+      showToast(e.response?.data?.error || 'Doküman yüklenemedi', false)
+    } finally {
+      setUploadingKb(false)
+    }
+  }
+
+  const deleteKbDoc = async (id: string) => {
+    try {
+      await api.delete(`/admin/kb-documents/${id}`)
+      showToast('Doküman silindi')
+      await loadKbDocs()
+    } catch (e: any) {
+      showToast(e.response?.data?.error || 'Silinemedi', false)
+    }
+  }
 
   const loadDocs = useCallback(async () => {
     setLoading(true)
@@ -399,6 +471,100 @@ function PlatformVectorPanel({ isAdmin, showToast }: { isAdmin: boolean; showToa
               ))}
             </div>
       }
+
+      {/* ── File upload (chunked + hash-diff indexed) ── */}
+      {isAdmin && (
+        <div className="mt-5 pt-5" style={{ borderTop: '1px solid var(--border)' }}>
+          <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+            <div>
+              <h4 className="text-sm font-semibold" style={{ color: 'var(--text-1)' }}>Dosya Yükle</h4>
+              <p className="text-xs mt-0.5" style={{ color: 'var(--text-3)' }}>PDF, DOCX, XLSX, CSV, HTML, TXT — kategori + hedef kitle seçip yükleyin</p>
+            </div>
+            <button onClick={loadKbDocs} disabled={loadingKbDocs}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs"
+              style={{ background: 'var(--surface-modal-2)', border: '1px solid var(--border)', color: 'var(--text-2)' }}>
+              <RefreshCw size={12} className={loadingKbDocs ? 'animate-spin' : ''} /> Yenile
+            </button>
+          </div>
+
+          <div className="flex items-center gap-2 mb-4 flex-wrap">
+            <select value={kbCategory}
+              onChange={e => {
+                const cat = e.target.value
+                setKbCategory(cat)
+                setKbAudience(KIBI_AI_KB_CATEGORIES.find(c => c.key === cat)?.defaultAudience ?? 'both')
+              }}
+              className="px-3 py-2 rounded-lg text-sm outline-none"
+              style={{ background: 'var(--surface-modal-2)', border: '1px solid var(--border)', color: 'var(--text-1)' }}>
+              {['Platform (KIBI AI)', 'Ki Business Ecosystem', 'Genel Danışmanlık'].map(group => (
+                <optgroup key={group} label={group}>
+                  {KIBI_AI_KB_CATEGORIES.filter(c => c.group === group).map(c => (
+                    <option key={c.key} value={c.key}>{c.label}</option>
+                  ))}
+                </optgroup>
+              ))}
+            </select>
+            <select value={kbAudience} onChange={e => setKbAudience(e.target.value)}
+              className="px-3 py-2 rounded-lg text-sm outline-none"
+              style={{ background: 'var(--surface-modal-2)', border: '1px solid var(--border)', color: 'var(--text-1)' }}>
+              {Object.entries(AUDIENCE_LABELS).map(([key, label]) => <option key={key} value={key}>{label}</option>)}
+            </select>
+            <label className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm cursor-pointer"
+              style={{ background: 'var(--surface-modal-2)', border: '1px solid var(--border)', color: 'var(--text-2)' }}>
+              <FileText size={14} />
+              {kbFile ? kbFile.name : 'Dosya seç...'}
+              <input type="file" className="hidden" accept=".pdf,.docx,.xlsx,.xls,.csv,.html,.htm,.txt,.md"
+                onChange={e => setKbFile(e.target.files?.[0] ?? null)} />
+            </label>
+            <button onClick={uploadKbDoc} disabled={!kbFile || uploadingKb}
+              className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs text-white disabled:opacity-50"
+              style={{ background: 'linear-gradient(135deg, var(--accent), var(--forest))' }}>
+              <Upload size={12} /> {uploadingKb ? 'Yükleniyor...' : 'Yükle & Indexle'}
+            </button>
+          </div>
+
+          {loadingKbDocs
+            ? <div className="text-center py-4 text-sm" style={{ color: 'var(--text-3)' }}>Yükleniyor...</div>
+            : kbDocs.length === 0
+              ? <p className="text-xs text-center py-4 opacity-70" style={{ color: 'var(--text-3)' }}>Henüz dosya yüklenmedi</p>
+              : <div className="space-y-2">
+                  {kbDocs.map((doc: any) => (
+                    <div key={doc.id} className="flex items-center justify-between gap-3 p-3 rounded-xl"
+                      style={{ background: 'var(--surface-modal-2)', border: '1px solid var(--border)' }}>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="text-sm font-medium truncate" style={{ color: 'var(--text-1)' }}>{doc.originalFileName ?? doc.title}</span>
+                          <span className="text-[10px] px-1.5 py-0.5 rounded-full" style={{ background: 'rgba(99,102,241,0.10)', color: '#818cf8' }}>
+                            {KIBI_AI_KB_CATEGORIES.find(c => c.key === doc.category)?.label ?? doc.category}
+                          </span>
+                          {doc.tags?.map((tag: string) => (
+                            <span key={tag} className="text-[10px] px-1.5 py-0.5 rounded-full" style={{ background: 'rgba(168,85,247,0.10)', color: '#a855f7' }}>
+                              {AUDIENCE_LABELS[tag] ?? tag}
+                            </span>
+                          ))}
+                          {doc.status === 'active'
+                            ? <span className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-full" style={{ background: 'rgba(38,166,154,0.12)', color: 'var(--accent)' }}>
+                                <CheckCircle size={9} /> İndexlendi
+                              </span>
+                            : doc.status === 'failed'
+                              ? <span className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-full" style={{ background: 'rgba(239,68,68,0.10)', color: '#f87171' }}>
+                                  <XCircle size={9} /> Hata
+                                </span>
+                              : <span className="text-[10px] px-1.5 py-0.5 rounded-full" style={{ background: 'rgba(251,191,36,0.10)', color: '#fbbf24' }}>İşleniyor</span>
+                          }
+                        </div>
+                      </div>
+                      <button onClick={() => deleteKbDoc(doc.id)}
+                        className="p-1.5 rounded-lg flex-shrink-0"
+                        style={{ background: 'rgba(239,68,68,0.08)', color: '#f87171', border: '1px solid rgba(239,68,68,0.15)' }}>
+                        <Trash2 size={13} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+          }
+        </div>
+      )}
 
       {/* KB Arama Testi */}
       <KbSearchTest />

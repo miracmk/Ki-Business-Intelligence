@@ -1,6 +1,6 @@
 import type { FastifyPluginAsync } from 'fastify'
 import { db } from '../../lib/db.js'
-import { aiConfigs, emailConfigs, tenantMemberships, tenants, users, platformConfigs, kibiModelConfigs, knowledgeEntries, kibiEntities, kibiEntityUsers, kibiPricingPackages } from '../../../db/schema.js'
+import { aiConfigs, emailConfigs, tenantMemberships, tenants, users, platformConfigs, kibiModelConfigs, knowledgeEntries, kibiEntities, kibiEntityUsers, kibiPricingPackages, kbDocuments, fileStorage } from '../../../db/schema.js'
 import { encryptJson, decryptJson, encrypt, decrypt } from '../../lib/crypto.js'
 import { eq, and, count as sqlCount } from 'drizzle-orm'
 import { getPlanUsage, getAllPlanDefs } from '../../lib/plan-limits.js'
@@ -13,9 +13,24 @@ import { invalidateProviderKeyCache } from '../../engine/ai/gateway.js'
 import { redis } from '../../lib/redis.js'
 import { qdrant, embedConfigured } from '../../lib/qdrant.js'
 import { chargeAndAddSubUser, getEntityPackage } from '../../engine/billing/billing.js'
+import { indexDocument, deleteDocumentFromIndex } from '../../engine/knowledge/indexer.js'
+import { detectFileType, extractText } from '../../engine/knowledge/file-extractor.js'
+import { normalizedFileName } from '../../engine/knowledge/chunking.js'
+import { createWriteStream, mkdirSync, existsSync } from 'fs'
+import { join } from 'path'
+import { pipeline } from 'stream/promises'
+import { Readable } from 'stream'
 
 const isUUID = (s: string | null | undefined): s is string =>
   !!s && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)
+
+const PLAN_TO_MODEL_SCOPE: Record<string, string> = {
+  free:          'entity_free',
+  basic:         'entity_basic',
+  premium:       'entity_premium',
+  enterprise:    'entity_enterprise',
+  custom_models: 'entity_custom_models',
+}
 
 // Entity Main her zaman; entity_supervisor sadece kibiEntityUsers.permissions.manageCompanyProfile=true ise
 // Şirket Profili / Ekip yönetimi yapabilir. Platform admin/supervisor destek amaçlı her zaman yetkili.
@@ -794,22 +809,47 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
     return reply.send({ providers: results })
   })
 
-  // GET /api/v1/tenants/ai-providers/roles — entity's role→model overrides
+  // GET /api/v1/tenants/ai-providers/roles — entity's role→model assignments.
+  // For Custom Models plan: the entity's own overrides (editable).
+  // For Free/Basic/Premium/Enterprise: the platform's configured models for that
+  // plan tier (read-only — entity can see which models it's actually using).
   app.get('/ai-providers/roles', { onRequest: [app.authenticate] }, async (req, reply) => {
     const user = req.user as { sub: string; tenantId: string }
     if (!isUUID(user.tenantId)) return reply.send({ roles: [] })
 
-    const aiConfig = await db.query.aiConfigs.findFirst({
-      where: (t, { eq }) => eq(t.tenantId, user.tenantId),
+    const entity = await db.query.kibiEntities.findFirst({
+      where:   (t, { eq }) => eq(t.entityId, user.tenantId),
+      columns: { planName: true },
     })
-    const overrides = (aiConfig?.settings as any)?.modelOverrides as Record<string, any> | undefined ?? {}
+    const planName   = entity?.planName ?? 'free'
+    const modelScope = PLAN_TO_MODEL_SCOPE[planName] ?? 'entity_free'
 
-    const roles = Object.entries(overrides).map(([modelRole, override]) => {
-      const primary   = typeof override === 'string' ? override : override?.primary ?? ''
-      const fallbacks = Array.isArray(override) ? override : (override?.fallbacks ?? [])
-      return { modelRole, primaryModel: primary, fallback1: fallbacks[0], fallback2: fallbacks[1] }
-    })
-    return reply.send({ roles })
+    const roleMap = new Map<string, { modelRole: string; primaryModel: string; fallback1?: string; fallback2?: string }>()
+
+    const platformRows = await db.select().from(kibiModelConfigs).where(eq(kibiModelConfigs.scope, modelScope))
+    for (const row of platformRows) {
+      if (!row.isActive) continue
+      roleMap.set(row.modelRole, {
+        modelRole:    row.modelRole,
+        primaryModel: row.primaryModel ?? '',
+        fallback1:    row.fallback1 ?? undefined,
+        fallback2:    row.fallback2 ?? undefined,
+      })
+    }
+
+    if (planName === 'custom_models') {
+      const aiConfig = await db.query.aiConfigs.findFirst({
+        where: (t, { eq }) => eq(t.tenantId, user.tenantId),
+      })
+      const overrides = (aiConfig?.settings as any)?.modelOverrides as Record<string, any> | undefined ?? {}
+      for (const [modelRole, override] of Object.entries(overrides)) {
+        const primary   = typeof override === 'string' ? override : override?.primary ?? ''
+        const fallbacks = Array.isArray(override) ? override : (override?.fallbacks ?? [])
+        if (primary) roleMap.set(modelRole, { modelRole, primaryModel: primary, fallback1: fallbacks[0], fallback2: fallbacks[1] })
+      }
+    }
+
+    return reply.send({ roles: Array.from(roleMap.values()) })
   })
 
   // PUT /api/v1/tenants/ai-providers/roles — save entity's role→model overrides
@@ -1041,6 +1081,123 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
       await qdrant.delete(`entity_${user.tenantId}`, { wait: true, points: [id] })
         .catch(() => qdrant.delete(env.QDRANT_COLLECTION, { wait: true, points: [id] }))
     } catch {}
+
+    return reply.send({ ok: true })
+  })
+
+  // ── Entity KB: file-upload documents (YFZ 33) ────────────────────────────────
+  // Separate from the manual-paste /vector-docs above — chunked, hash-diffed, file-backed.
+
+  // GET /api/v1/tenants/kb-documents
+  app.get('/kb-documents', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = req.user as { tenantId: string }
+    if (!isUUID(user.tenantId)) return reply.status(400).send({ error: 'Geçersiz tenant' })
+
+    const docs = await db.select().from(kbDocuments)
+      .where(and(eq(kbDocuments.scope, 'entity'), eq(kbDocuments.entityId, user.tenantId)))
+      .orderBy(kbDocuments.createdAt)
+
+    return reply.send({ docs })
+  })
+
+  // POST /api/v1/tenants/kb-documents — multipart file upload, category-routed, hash-diff incremental indexing
+  app.post('/kb-documents', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = req.user as { sub: string; tenantId: string; role: string }
+    if (!isUUID(user.tenantId)) return reply.status(400).send({ error: 'Geçersiz tenant' })
+    if (!['entity_main', 'entity_supervisor', 'admin'].includes(user.role)) {
+      return reply.status(403).send({ error: 'Yetkisiz' })
+    }
+
+    const data = await req.file()
+    if (!data) return reply.status(400).send({ error: 'Dosya bulunamadı' })
+    const category = String((data.fields as any)?.category?.value ?? '').trim()
+    if (!category) return reply.status(400).send({ error: 'Kategori zorunlu' })
+
+    const ext = data.filename.split('.').pop() ?? ''
+    const fileType = detectFileType(data.filename, data.mimetype)
+    if (!fileType) return reply.status(400).send({ error: `Desteklenmeyen dosya türü: .${ext}` })
+
+    const tenant = await db.query.tenants.findFirst({ where: (t, { eq }) => eq(t.id, user.tenantId) })
+    if (!tenant) return reply.status(404).send({ error: 'Entity bulunamadı' })
+
+    const buffer = await data.toBuffer()
+    const normName = normalizedFileName(tenant.slug, category, ext)
+
+    // Re-upload of the same entity+category+filename → version update (reuse documentId, hash-diff)
+    const existingDoc = await db.query.kbDocuments.findFirst({
+      where: (t, { and, eq }) => and(eq(t.scope, 'entity'), eq(t.entityId, user.tenantId), eq(t.normalizedFileName, normName)),
+    })
+
+    const uploadDir = join(process.cwd(), 'storage', user.tenantId)
+    if (!existsSync(uploadDir)) mkdirSync(uploadDir, { recursive: true })
+    const storedFilename = `${Date.now()}-${normName}`
+    const filepath = join(uploadDir, storedFilename)
+    await pipeline(Readable.from(buffer), createWriteStream(filepath))
+
+    const [file] = await db.insert(fileStorage).values({
+      tenantId:     user.tenantId,
+      filename:     storedFilename,
+      originalName: data.filename,
+      mimeType:     data.mimetype,
+      sizeBytes:    buffer.length,
+      storageType:  'local',
+      storagePath:  filepath,
+    }).returning()
+
+    let documentId: string
+    if (existingDoc) {
+      documentId = existingDoc.id
+      await db.update(kbDocuments).set({
+        originalFileName: data.filename,
+        fileStorageId:    file!.id,
+        status:           'processing',
+        updatedAt:        new Date(),
+      }).where(eq(kbDocuments.id, documentId))
+    } else {
+      const [doc] = await db.insert(kbDocuments).values({
+        scope:              'entity',
+        entityId:           user.tenantId,
+        category,
+        title:              data.filename,
+        originalFileName:   data.filename,
+        normalizedFileName: normName,
+        fileStorageId:      file!.id,
+        sourceType:         'file',
+        uploadedBy:         user.sub,
+        status:             'processing',
+      }).returning()
+      documentId = doc!.id
+    }
+
+    try {
+      const text = await extractText(buffer, fileType)
+      const result = await indexDocument({ documentId, scope: 'entity', entityId: user.tenantId, category, text, fileName: normName })
+      return reply.status(201).send({ documentId, normalizedFileName: normName, ...result })
+    } catch (e: any) {
+      await db.update(kbDocuments).set({ status: 'failed' }).where(eq(kbDocuments.id, documentId))
+      return reply.status(500).send({ error: `İndexleme hatası: ${e.message}` })
+    }
+  })
+
+  // DELETE /api/v1/tenants/kb-documents/:id
+  app.delete('/kb-documents/:id', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = req.user as { tenantId: string; role: string }
+    if (!isUUID(user.tenantId)) return reply.status(400).send({ error: 'Geçersiz tenant' })
+    if (!['entity_main', 'entity_supervisor', 'admin'].includes(user.role)) {
+      return reply.status(403).send({ error: 'Yetkisiz' })
+    }
+
+    const { id } = req.params as { id: string }
+    const existing = await db.query.kbDocuments.findFirst({
+      where: (t, { and, eq }) => and(eq(t.id, id), eq(t.scope, 'entity'), eq(t.entityId, user.tenantId)),
+    })
+    if (!existing) return reply.status(404).send({ error: 'Bulunamadı' })
+
+    await deleteDocumentFromIndex(id, 'entity', user.tenantId)
+    await db.delete(kbDocuments).where(eq(kbDocuments.id, id))
+    if (existing.fileStorageId) {
+      await db.delete(fileStorage).where(eq(fileStorage.id, existing.fileStorageId)).catch(() => {})
+    }
 
     return reply.send({ ok: true })
   })

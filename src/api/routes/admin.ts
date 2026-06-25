@@ -2,8 +2,10 @@ import type { FastifyPluginAsync } from 'fastify'
 import { z } from 'zod'
 import { db } from '../../lib/db.js'
 import { sql, eq, and, desc, asc } from 'drizzle-orm'
-import { tenants, kibiEntities, kibiTokenUsage, kibiSupportTickets, kibiSupportMessages, kibiModelConfigs, kibiInternalUsers, users, platformMetrics, crmConnections, platformConfigs, platformVectorDocs, aiPipelineLogs, kibiWallets } from '../../../db/schema.js'
+import { tenants, kibiEntities, kibiTokenUsage, kibiSupportTickets, kibiSupportMessages, kibiModelConfigs, kibiInternalUsers, users, platformMetrics, crmConnections, platformConfigs, platformVectorDocs, aiPipelineLogs, kibiWallets, kbDocuments, kbChunks } from '../../../db/schema.js'
 import { learnFromTicket } from '../../engine/kibi/support-pipeline.js'
+import { searchKnowledge } from '../../engine/kibi/qdrant-search.js'
+import { routeReplyToExternal } from '../../engine/kibi/ticket-router.js'
 import { encrypt, decrypt } from '../../lib/crypto.js'
 import { invalidateModelCache, seedDefaultModelConfigs } from '../../engine/ai/model-config.js'
 import { PROVIDERS, getConfigKey, pingProviderModel } from '../../engine/ai/providers.js'
@@ -11,6 +13,13 @@ import { invalidateProviderKeyCache, aiComplete, CONVERSATION_MODELS } from '../
 import { redis } from '../../lib/redis.js'
 import { qdrant, embedConfigured, invalidateEmbeddingModelCache, vectorSearch } from '../../lib/qdrant.js'
 import { env } from '../../../config/env.js'
+import { KIBI_AI_KB_COLLECTION, indexDocument, deleteDocumentFromIndex } from '../../engine/knowledge/indexer.js'
+import { detectFileType, extractText } from '../../engine/knowledge/file-extractor.js'
+import { normalizedFileName } from '../../engine/knowledge/chunking.js'
+import { createWriteStream, mkdirSync, existsSync } from 'fs'
+import { join } from 'path'
+import { pipeline } from 'stream/promises'
+import { Readable } from 'stream'
 
 export const adminRoutes: FastifyPluginAsync = async (app) => {
   app.addHook('preHandler', async (req, reply) => {
@@ -337,6 +346,16 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
       .map(m => `${m.senderType === 'customer' ? 'Müşteri' : 'Destek'}: ${m.content ?? ''}`)
       .join('\n')
 
+    const kb = await searchKnowledge({
+      query: `${ticket.subject ?? ''} ${(ticket as any).resolutionSummary ?? ''}`.trim() || ticket.subject || '',
+      collection: 'ki_support_kb',
+      limit: 3,
+    }).catch(() => ({ results: [], summary: 'KB araması başarısız.' }))
+
+    const kbBlock = kb.results.length
+      ? `\n\nBenzer geçmiş çözümler (KB):\n${kb.results.map((r, i) => `[${i + 1}] ${r.content}`).join('\n')}`
+      : ''
+
     const prompt = `Sen KIBI platformunun destek yöneticisisin. Aşağıdaki destek ticket'ı için profesyonel, nazik ve çözüm odaklı bir Türkçe yanıt taslağı hazırla.
 
 Entity: ${entity?.companyName ?? 'Bilinmiyor'}
@@ -344,16 +363,104 @@ Ticket Konusu: ${ticket.subject}
 Kategori: ${(ticket as any).categoryL1 ?? 'Genel'}
 
 Sohbet Geçmişi:
-${history || '(Henüz mesaj yok)'}
+${history || '(Henüz mesaj yok)'}${kbBlock}
 
-Sadece yanıt metnini yaz, başka açıklama ekleme.`
+Eğer KB'deki çözümlerden biri uygunsa referans al, ama sadece yanıt metnini yaz, başka açıklama ekleme.`
 
     try {
       const result = await aiComplete(CONVERSATION_MODELS[0], [{ role: 'user', content: prompt }])
-      return reply.send({ draft: result.content })
+      return reply.send({ draft: result.content, kbReferences: kb.results })
     } catch (e: any) {
       return reply.status(500).send({ error: 'AI taslak oluşturulamadı: ' + e.message })
     }
+  })
+
+  // GET /admin/support/tickets/:id/messages — cross-entity message thread
+  app.get('/support/tickets/:id/messages', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    const ticket = await db.query.kibiSupportTickets.findFirst({ where: (t, { eq }) => eq(t.id, id) })
+    if (!ticket) return reply.status(404).send({ error: 'Ticket bulunamadı' })
+    const messages = await db.query.kibiSupportMessages.findMany({
+      where: (t, { eq }) => eq(t.ticketId, id),
+      orderBy: (t, { asc }) => [asc(t.createdAt)],
+    })
+    return reply.send({ messages })
+  })
+
+  // POST /admin/support/tickets/:id/messages — admin/supervisor send reply, cross-entity
+  app.post('/support/tickets/:id/messages', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    const ticket = await db.query.kibiSupportTickets.findFirst({ where: (t, { eq }) => eq(t.id, id) })
+    if (!ticket) return reply.status(404).send({ error: 'Ticket bulunamadı' })
+
+    const { content, senderType = 'agent' } = req.body as { content?: string; senderType?: string }
+    if (!content) return reply.status(400).send({ error: 'content gerekli' })
+
+    const [msg] = await db.insert(kibiSupportMessages).values({
+      ticketId: id,
+      senderType: senderType as any,
+      content,
+      channel: 'web',
+    }).returning()
+
+    const ticketPatch: Record<string, any> = {}
+    if (senderType === 'agent') {
+      if (ticket.status === 'open' || ticket.status === 'kibi_processing' || ticket.status === 'escalated') {
+        ticketPatch.status = 'in_progress'
+      }
+      if (!ticket.firstResponseAt) ticketPatch.firstResponseAt = new Date()
+    }
+    if (Object.keys(ticketPatch).length > 0) {
+      await db.update(kibiSupportTickets).set(ticketPatch).where(eq(kibiSupportTickets.id, id))
+    }
+
+    let delivery: { delivered: boolean; channel?: string; reason?: string } = { delivered: false, reason: 'not_external' }
+    if (senderType === 'agent' && (ticket as any).externalContactId) {
+      delivery = await routeReplyToExternal(id, content).catch((e) => {
+        console.error('[Admin] outbound route failed:', e)
+        return { delivered: false, reason: 'send_error' }
+      })
+    }
+
+    return reply.status(201).send({ message: msg, delivery })
+  })
+
+  // GET /admin/support/tickets/:id/customer — entity profile + contact info for popup
+  app.get('/support/tickets/:id/customer', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    const ticket = await db.query.kibiSupportTickets.findFirst({ where: (t, { eq }) => eq(t.id, id) })
+    if (!ticket) return reply.status(404).send({ error: 'Ticket bulunamadı' })
+
+    const [entity, contactUser] = await Promise.all([
+      db.query.kibiEntities.findFirst({ where: (t, { eq }) => eq(t.id, ticket.entityId) }),
+      ticket.userId ? db.query.users.findFirst({ where: (t, { eq }) => eq(t.id, ticket.userId as string) }) : null,
+    ])
+
+    return reply.send({
+      entity: entity ? {
+        companyName: entity.companyName,
+        industry: entity.industry,
+        sector: entity.sector,
+        country: entity.country,
+        website: entity.website,
+        employeeCount: entity.employeeCount,
+        companySize: entity.companySize,
+        planName: entity.planName,
+        mood: entity.mood,
+        opportunityScore: entity.opportunityScore,
+        lastContactAt: entity.lastContactAt,
+        lastContactChannel: entity.lastContactChannel,
+        taxNumber: entity.taxNumber,
+        taxOffice: entity.taxOffice,
+        addressLine1: entity.addressLine1,
+        city: entity.city,
+        state: entity.state,
+        postalCode: entity.postalCode,
+      } : null,
+      contactUser: contactUser ? { email: contactUser.email, phone: contactUser.phone, name: contactUser.name } : null,
+      contactChannel: ticket.contactChannel,
+      externalContactId: ticket.externalContactId,
+    })
   })
 
   // GET /admin/plans — plan definitions from DB (kibi_pricing_packages)
@@ -630,8 +737,11 @@ Sadece yanıt metnini yaz, başka açıklama ekleme.`
   })
 
   // ─── Platform Vector Docs (KIBI AI Knowledge Base) ──────────────────────────
+  // YFZ 33: unified with the KIBI AI KB file-upload pipeline's collection — this used to
+  // point at env.QDRANT_COLLECTION while the consulting pipeline searched 'ki_platform_knowledge',
+  // a write/read mismatch that meant the Danışman never found any KB hits.
 
-  const PLATFORM_QDRANT_COLLECTION = env.QDRANT_COLLECTION
+  const PLATFORM_QDRANT_COLLECTION = KIBI_AI_KB_COLLECTION
 
   // GET /api/v1/admin/platform-vector-docs
   app.get('/platform-vector-docs', { onRequest: [app.authenticate] }, async (req, reply) => {
@@ -771,16 +881,114 @@ Sadece yanıt metnini yaz, başka açıklama ekleme.`
     return reply.send({ ok: true, indexed, total: docs.length })
   })
 
-  // POST /admin/kb-search — KB arama testi (ki_platform_knowledge koleksiyonu)
+  // POST /admin/kb-search — KB arama testi (kibi_ai_kb koleksiyonu)
   app.post('/kb-search', async (req, reply) => {
     const { query, limit } = req.body as { query?: string; limit?: number }
     if (!query?.trim()) return reply.status(400).send({ error: 'Sorgu gerekli' })
     try {
-      const results = await vectorSearch('ki_platform_knowledge', query.trim(), Math.min(limit ?? 5, 20))
+      const results = await vectorSearch(KIBI_AI_KB_COLLECTION, query.trim(), Math.min(limit ?? 5, 20))
       return reply.send({ results, total: results.length })
     } catch (e: any) {
       return reply.status(500).send({ error: e.message })
     }
+  })
+
+  // ── KIBI AI KB: file-upload documents (YFZ 33) ───────────────────────────────
+  // Separate from the manual-paste /platform-vector-docs above — chunked, hash-diffed, file-backed.
+  // scope='kibi', entityId=null — platform-wide, not tenant-isolated.
+
+  // GET /admin/kb-documents
+  app.get('/kb-documents', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = req.user as { role: string }
+    if (!['admin', 'supervisor'].includes(user.role)) return reply.status(403).send({ error: 'Yetkisiz' })
+
+    const docs = await db.select().from(kbDocuments)
+      .where(eq(kbDocuments.scope, 'kibi'))
+      .orderBy(kbDocuments.createdAt)
+
+    return reply.send({ docs })
+  })
+
+  // POST /admin/kb-documents — multipart file upload, category + audience tags
+  app.post('/kb-documents', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = req.user as { sub: string; role: string }
+    if (!['admin'].includes(user.role)) return reply.status(403).send({ error: 'Yetkisiz' })
+
+    const data = await req.file()
+    if (!data) return reply.status(400).send({ error: 'Dosya bulunamadı' })
+    const category = String((data.fields as any)?.category?.value ?? '').trim()
+    if (!category) return reply.status(400).send({ error: 'Kategori zorunlu' })
+    const tagsRaw = (data.fields as any)?.tags?.value
+    let tags: string[] = ['both']
+    try { tags = tagsRaw ? JSON.parse(tagsRaw) : ['both'] } catch { /* keep default */ }
+
+    const ext = data.filename.split('.').pop() ?? ''
+    const fileType = detectFileType(data.filename, data.mimetype)
+    if (!fileType) return reply.status(400).send({ error: `Desteklenmeyen dosya türü: .${ext}` })
+
+    const buffer = await data.toBuffer()
+    const normName = normalizedFileName('kibi-ai', category, ext)
+
+    const existingDoc = await db.query.kbDocuments.findFirst({
+      where: (t, { and, eq }) => and(eq(t.scope, 'kibi'), eq(t.normalizedFileName, normName)),
+    })
+
+    // Platform-scope uploads have no owning tenant, so they're archived to disk only —
+    // fileStorage.tenantId is NOT NULL with an FK to tenants, which doesn't fit here.
+    const uploadDir = join(process.cwd(), 'storage', '_platform')
+    if (!existsSync(uploadDir)) mkdirSync(uploadDir, { recursive: true })
+    const storedFilename = `${Date.now()}-${normName}`
+    const filepath = join(uploadDir, storedFilename)
+    await pipeline(Readable.from(buffer), createWriteStream(filepath))
+
+    let documentId: string
+    if (existingDoc) {
+      documentId = existingDoc.id
+      await db.update(kbDocuments).set({
+        originalFileName: data.filename,
+        tags,
+        status:           'processing',
+        updatedAt:        new Date(),
+      }).where(eq(kbDocuments.id, documentId))
+    } else {
+      const [doc] = await db.insert(kbDocuments).values({
+        scope:              'kibi',
+        entityId:           null,
+        category,
+        title:              data.filename,
+        originalFileName:   data.filename,
+        normalizedFileName: normName,
+        sourceType:         'file',
+        tags,
+        uploadedBy:         user.sub,
+        status:             'processing',
+      }).returning()
+      documentId = doc!.id
+    }
+
+    try {
+      const text = await extractText(buffer, fileType)
+      const result = await indexDocument({ documentId, scope: 'kibi', entityId: null, category, text, fileName: normName, tags })
+      return reply.status(201).send({ documentId, normalizedFileName: normName, ...result })
+    } catch (e: any) {
+      await db.update(kbDocuments).set({ status: 'failed' }).where(eq(kbDocuments.id, documentId))
+      return reply.status(500).send({ error: `İndexleme hatası: ${e.message}` })
+    }
+  })
+
+  // DELETE /admin/kb-documents/:id
+  app.delete('/kb-documents/:id', { onRequest: [app.authenticate] }, async (req, reply) => {
+    const user = req.user as { role: string }
+    if (!['admin'].includes(user.role)) return reply.status(403).send({ error: 'Yetkisiz' })
+
+    const { id } = req.params as { id: string }
+    const existing = await db.query.kbDocuments.findFirst({ where: (t, { and, eq }) => and(eq(t.id, id), eq(t.scope, 'kibi')) })
+    if (!existing) return reply.status(404).send({ error: 'Bulunamadı' })
+
+    await deleteDocumentFromIndex(id, 'kibi', null)
+    await db.delete(kbDocuments).where(eq(kbDocuments.id, id))
+
+    return reply.send({ ok: true })
   })
 
   // GET /admin/kb-signals — KB sinyal istatistikleri

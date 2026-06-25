@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Navigate } from 'react-router-dom'
-import { BarChart3, Sparkles, ShieldCheck, Users, RefreshCw, Mail, Phone, Pencil, X, Bot } from 'lucide-react'
+import { BarChart3, Sparkles, ShieldCheck, Users, RefreshCw, Mail, Phone, Pencil, X, Bot, Send, Info } from 'lucide-react'
 import api from '../lib/api'
 import { useAuth } from '../store/auth'
 
@@ -86,6 +86,17 @@ export default function Admin() {
   // AI draft state
   const [aiDraft, setAiDraft] = useState('')
   const [aiDraftLoading, setAiDraftLoading] = useState(false)
+  const [kbReferences, setKbReferences] = useState<any[]>([])
+
+  // Reply / send state
+  const [replyText, setReplyText] = useState('')
+  const [replySending, setReplySending] = useState(false)
+  const [replyStatus, setReplyStatus] = useState<{ type: 'ok' | 'warn' | 'error'; text: string } | null>(null)
+
+  // Customer info popup
+  const [showCustomerInfo, setShowCustomerInfo] = useState(false)
+  const [customerInfo, setCustomerInfo] = useState<any>(null)
+  const [customerInfoLoading, setCustomerInfoLoading] = useState(false)
 
   const loadEntities = () =>
     api.get('/admin/entities?limit=50').then(res => setEntities(res.data.entities ?? [])).catch(console.error)
@@ -145,8 +156,13 @@ export default function Admin() {
   const loadTicket = async (ticket: any) => {
     setTicketDetail(ticket)
     setAiDraft('')
+    setKbReferences([])
+    setReplyText('')
+    setReplyStatus(null)
+    setShowCustomerInfo(false)
+    setCustomerInfo(null)
     try {
-      const { data } = await api.get(`/support/tickets/${ticket.id}/messages`)
+      const { data } = await api.get(`/admin/support/tickets/${ticket.id}/messages`)
       setTicketDetail({ ...ticket, messages: data.messages ?? [] })
     } catch (error) {
       console.error(error)
@@ -157,13 +173,55 @@ export default function Admin() {
     if (!ticketDetail) return
     setAiDraftLoading(true)
     setAiDraft('')
+    setKbReferences([])
     try {
       const { data } = await api.post(`/admin/support/tickets/${ticketDetail.id}/ai-draft`)
       setAiDraft(data.draft ?? '')
+      setKbReferences(data.kbReferences ?? [])
     } catch (e: any) {
       setAiDraft('Taslak oluşturulamadı: ' + (e.response?.data?.error ?? e.message))
     } finally {
       setAiDraftLoading(false)
+    }
+  }
+
+  const sendReply = async (text: string) => {
+    if (!ticketDetail || !text.trim()) return
+    setReplySending(true)
+    setReplyStatus(null)
+    try {
+      const { data } = await api.post(`/admin/support/tickets/${ticketDetail.id}/messages`, { content: text, senderType: 'agent' })
+      setTicketDetail((prev: any) => ({ ...prev, messages: [...(prev.messages ?? []), data.message] }))
+      setReplyText('')
+      setAiDraft('')
+      if (data.delivery?.delivered) {
+        setReplyStatus({ type: 'ok', text: `Yanıt müşteriye iletildi (${data.delivery.channel}).` })
+      } else if (data.delivery?.reason === 'not_external') {
+        setReplyStatus({ type: 'ok', text: 'Yanıt kaydedildi.' })
+      } else if (data.delivery?.reason === 'channel_not_configured') {
+        setReplyStatus({ type: 'warn', text: 'Yanıt kaydedildi ancak kanal bilgileri eksik olduğu için müşteriye iletilemedi.' })
+      } else {
+        setReplyStatus({ type: 'warn', text: 'Yanıt kaydedildi ancak müşteriye iletilirken sorun oluştu.' })
+      }
+    } catch (e: any) {
+      setReplyStatus({ type: 'error', text: 'Gönderilemedi: ' + (e.response?.data?.error ?? e.message) })
+    } finally {
+      setReplySending(false)
+    }
+  }
+
+  const openCustomerInfo = async () => {
+    if (!ticketDetail) return
+    setShowCustomerInfo(true)
+    if (customerInfo?.ticketId === ticketDetail.id) return
+    setCustomerInfoLoading(true)
+    try {
+      const { data } = await api.get(`/admin/support/tickets/${ticketDetail.id}/customer`)
+      setCustomerInfo({ ...data, ticketId: ticketDetail.id })
+    } catch (e) {
+      console.error(e)
+    } finally {
+      setCustomerInfoLoading(false)
     }
   }
 
@@ -404,14 +462,22 @@ export default function Admin() {
                     <h3 className="text-xl font-semibold text-white">{ticketDetail.subject}</h3>
                     <p className="text-sm text-gray-400">{ticketDetail.service_category} · {ticketDetail.status}</p>
                   </div>
-                  <button
-                    onClick={generateAiDraft}
-                    disabled={aiDraftLoading}
-                    className="flex items-center gap-2 px-4 py-2 rounded-xl bg-gradient-to-r from-[#6366f1] to-[#4f46e5] hover:opacity-90 disabled:opacity-50 text-white text-sm whitespace-nowrap"
-                  >
-                    <Bot size={15} />
-                    {aiDraftLoading ? 'Oluşturuluyor...' : 'KIBI AI Taslak'}
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={openCustomerInfo}
+                      className="flex items-center gap-2 px-4 py-2 rounded-xl bg-[#2a2a2a] hover:bg-[#3a3a3a] text-gray-300 text-sm whitespace-nowrap"
+                    >
+                      <Info size={15} /> Müşteri Bilgisi
+                    </button>
+                    <button
+                      onClick={generateAiDraft}
+                      disabled={aiDraftLoading}
+                      className="flex items-center gap-2 px-4 py-2 rounded-xl bg-gradient-to-r from-[#6366f1] to-[#4f46e5] hover:opacity-90 disabled:opacity-50 text-white text-sm whitespace-nowrap"
+                    >
+                      <Bot size={15} />
+                      {aiDraftLoading ? 'Oluşturuluyor...' : 'KIBI AI Taslak'}
+                    </button>
+                  </div>
                 </div>
 
                 <div className="grid gap-3 sm:grid-cols-2">
@@ -426,12 +492,15 @@ export default function Admin() {
                 </div>
 
                 <div className="space-y-3 max-h-[280px] overflow-y-auto">
-                  {ticketDetail.messages?.map((message: any) => (
-                    <div key={message.id} className={`p-4 rounded-3xl border ${message.sender_type === 'customer' ? 'border-[#2a2a2a] bg-[#0a0a0a]' : 'border-[#1e3a2a] bg-[#0a1a0f]'}`}>
-                      <p className="text-xs text-gray-500 mb-1">{message.sender_type === 'customer' ? 'Müşteri' : 'Destek'}</p>
-                      <p className="text-white text-sm">{message.content}</p>
-                    </div>
-                  ))}
+                  {ticketDetail.messages?.map((message: any) => {
+                    const senderType = message.senderType ?? message.sender_type
+                    return (
+                      <div key={message.id} className={`p-4 rounded-3xl border ${senderType === 'customer' ? 'border-[#2a2a2a] bg-[#0a0a0a]' : 'border-[#1e3a2a] bg-[#0a1a0f]'}`}>
+                        <p className="text-xs text-gray-500 mb-1">{senderType === 'customer' ? 'Müşteri' : senderType === 'system' ? 'Sistem' : senderType === 'kibi' ? 'KIBI AI' : 'Destek'}</p>
+                        <p className="text-white text-sm">{message.content}</p>
+                      </div>
+                    )
+                  })}
                   {(!ticketDetail.messages || ticketDetail.messages.length === 0) && (
                     <p className="text-gray-500 text-sm">Henüz mesaj yok.</p>
                   )}
@@ -443,6 +512,14 @@ export default function Admin() {
                       <Bot size={14} className="text-[#6366f1]" />
                       <p className="text-xs font-medium text-[#6366f1]">KIBI AI Yanıt Taslağı</p>
                     </div>
+                    {kbReferences.length > 0 && (
+                      <div className="space-y-1 p-3 rounded-2xl bg-[#0a0a0a] border border-[#2a2a2a]">
+                        <p className="text-xs text-gray-500">KB Referansları:</p>
+                        {kbReferences.map((ref: any, i: number) => (
+                          <p key={i} className="text-xs text-gray-400 truncate">[{i + 1}] {ref.content}</p>
+                        ))}
+                      </div>
+                    )}
                     <textarea
                       value={aiDraft}
                       onChange={(e) => setAiDraft(e.target.value)}
@@ -456,10 +533,103 @@ export default function Admin() {
                       >
                         Kopyala
                       </button>
+                      <button
+                        onClick={() => sendReply(aiDraft)}
+                        disabled={replySending}
+                        className="flex items-center gap-2 px-4 py-2 rounded-xl bg-[#10b981] hover:bg-[#0d9668] disabled:opacity-50 text-white text-xs"
+                      >
+                        <Send size={13} /> {replySending ? 'Gönderiliyor...' : 'Gönder'}
+                      </button>
                     </div>
                   </div>
                 )}
+
+                <div className="space-y-2 pt-2 border-t border-[#2a2a2a]">
+                  <p className="text-xs font-medium text-gray-400">Manuel Yanıt</p>
+                  <textarea
+                    value={replyText}
+                    onChange={(e) => setReplyText(e.target.value)}
+                    rows={4}
+                    placeholder="Müşteriye yanıt yazın..."
+                    className="w-full px-4 py-3 rounded-2xl bg-[#0a0a0a] border border-[#2a2a2a] text-white text-sm resize-none focus:outline-none focus:border-[#6366f1]"
+                  />
+                  <div className="flex justify-end">
+                    <button
+                      onClick={() => sendReply(replyText)}
+                      disabled={replySending || !replyText.trim()}
+                      className="flex items-center gap-2 px-4 py-2 rounded-xl bg-[#6366f1] hover:bg-[#4f46e5] disabled:opacity-50 text-white text-sm"
+                    >
+                      <Send size={14} /> {replySending ? 'Gönderiliyor...' : 'Gönder'}
+                    </button>
+                  </div>
+                  {replyStatus && (
+                    <p className={`text-xs ${replyStatus.type === 'ok' ? 'text-emerald-400' : replyStatus.type === 'warn' ? 'text-amber-400' : 'text-red-400'}`}>
+                      {replyStatus.text}
+                    </p>
+                  )}
+                </div>
               </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ── Customer Info Popup ─────────────────────────────────────────── */}
+      {showCustomerInfo && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={() => setShowCustomerInfo(false)}>
+          <div className="w-full max-w-md bg-[#111111] border border-[#2a2a2a] rounded-3xl p-6 space-y-4" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between">
+              <h2 className="text-xl font-semibold text-white">Müşteri Bilgisi</h2>
+              <button onClick={() => setShowCustomerInfo(false)} className="p-2 rounded-xl hover:bg-[#2a2a2a] text-gray-400"><X size={18} /></button>
+            </div>
+
+            {customerInfoLoading ? (
+              <p className="text-gray-500">Yükleniyor...</p>
+            ) : !customerInfo ? (
+              <p className="text-gray-500">Bilgi bulunamadı.</p>
+            ) : (
+              <div className="space-y-4">
+                {customerInfo.entity && (
+                  <div className="space-y-1">
+                    <p className="text-xs text-gray-500">Şirket</p>
+                    <p className="text-white font-medium">{customerInfo.entity.companyName ?? '-'}</p>
+                    <p className="text-xs text-gray-500">{customerInfo.entity.industry ?? '-'} · {customerInfo.entity.sector ?? '-'} · {customerInfo.entity.country ?? '-'}</p>
+                    {customerInfo.entity.website && <p className="text-xs text-[#6366f1]">{customerInfo.entity.website}</p>}
+                    <div className="flex items-center gap-2 pt-1">
+                      <PlanBadge plan={customerInfo.entity.planName} />
+                      {customerInfo.entity.mood && <span className="px-2 py-1 rounded-lg text-xs bg-[#2a2a2a] text-gray-300">{customerInfo.entity.mood}</span>}
+                    </div>
+                  </div>
+                )}
+
+                <div className="space-y-1 pt-2 border-t border-[#2a2a2a]">
+                  <p className="text-xs text-gray-500">İletişim Kanalı</p>
+                  <p className="text-white text-sm">{customerInfo.contactChannel ?? '-'} {customerInfo.externalContactId ? `· ${customerInfo.externalContactId}` : ''}</p>
+                </div>
+
+                {customerInfo.contactUser && (
+                  <div className="space-y-1 pt-2 border-t border-[#2a2a2a]">
+                    <p className="text-xs text-gray-500">Kayıtlı Kullanıcı</p>
+                    {customerInfo.contactUser.name && <p className="text-white text-sm">{customerInfo.contactUser.name}</p>}
+                    {customerInfo.contactUser.email && <p className="text-gray-400 text-xs flex items-center gap-1"><Mail size={12} /> {customerInfo.contactUser.email}</p>}
+                    {customerInfo.contactUser.phone && <p className="text-gray-400 text-xs flex items-center gap-1"><Phone size={12} /> {customerInfo.contactUser.phone}</p>}
+                  </div>
+                )}
+
+                {customerInfo.entity?.taxNumber && (
+                  <div className="space-y-1 pt-2 border-t border-[#2a2a2a]">
+                    <p className="text-xs text-gray-500">Vergi Bilgisi</p>
+                    <p className="text-gray-400 text-xs">{customerInfo.entity.taxOffice ?? '-'} · {customerInfo.entity.taxNumber}</p>
+                  </div>
+                )}
+
+                {(customerInfo.entity?.city || customerInfo.entity?.addressLine1) && (
+                  <div className="space-y-1 pt-2 border-t border-[#2a2a2a]">
+                    <p className="text-xs text-gray-500">Adres</p>
+                    <p className="text-gray-400 text-xs">{[customerInfo.entity.addressLine1, customerInfo.entity.city, customerInfo.entity.state, customerInfo.entity.postalCode].filter(Boolean).join(', ') || '-'}</p>
+                  </div>
+                )}
+              </div>
             )}
           </div>
         </div>
@@ -504,7 +674,7 @@ export default function Admin() {
                 onClick={() => setEditIsActive(!editIsActive)}
                 className={`relative w-12 h-6 rounded-full transition-colors ${editIsActive ? 'bg-[#6366f1]' : 'bg-[#3a3a3a]'}`}
               >
-                <span className={`absolute top-1 w-4 h-4 rounded-full bg-white transition-transform ${editIsActive ? 'translate-x-7' : 'translate-x-1'}`} />
+                <span className={`absolute top-1 left-1 w-4 h-4 rounded-full bg-white transition-transform ${editIsActive ? 'translate-x-6' : 'translate-x-0'}`} />
               </button>
             </div>
 

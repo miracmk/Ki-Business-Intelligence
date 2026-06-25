@@ -12,6 +12,7 @@ import { aiComplete, type Message }  from './gateway.js'
 import { getModelForRole }            from './model-config.js'
 import { logPipelineStep }            from './pipeline-logger.js'
 import { vectorSearch }               from '../../lib/qdrant.js'
+import { KIBI_AI_KB_COLLECTION }      from '../knowledge/indexer.js'
 import type {
   KibiPipelineContext, KibiIntentResult,
   ConsultingIntentResult, ConsultingRecommendationResult,
@@ -116,10 +117,13 @@ async function generateConsultingRecommendation(
 ): Promise<ConsultingRecommendationResult> {
   const start = Date.now()
 
-  // Search platform KB
+  // Search KIBI AI KB — audience filter: registered entity (tenantId set) → kibi_customer content,
+  // anonymous/ecosystem visitor → ecosystem_customer content; 'both'-tagged docs always match.
   let kbContext = ''
   try {
-    const hits = await vectorSearch('ki_platform_knowledge', intent.kb_keywords.join(' '), 5)
+    const audienceTag = ctx.tenantId ? 'kibi_customer' : 'ecosystem_customer'
+    const filter = { should: [{ key: 'tags', match: { value: 'both' } }, { key: 'tags', match: { value: audienceTag } }] }
+    const hits = await vectorSearch(KIBI_AI_KB_COLLECTION, intent.kb_keywords.join(' '), 5, filter)
     if (hits?.length) {
       kbContext = hits.map((h: any) => h.payload?.content || h.payload?.text || '').filter(Boolean).join('\n---\n')
     }

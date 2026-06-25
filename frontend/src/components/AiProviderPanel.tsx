@@ -22,6 +22,7 @@ export const PROVIDER_META: Record<string, { name: string; color: string; abbr: 
   cloudflare:  { name: 'Cloudflare',   color: '#f6821f', abbr: 'CF' },
   alibaba:     { name: 'Alibaba (QWen)',color: '#ff6a00', abbr: 'AL' },
   huggingface: { name: 'Hugging Face', color: '#ffd21e', abbr: 'HF' },
+  edenai:      { name: 'Eden AI',      color: '#7c5cfc', abbr: 'ED' },
 }
 export function providerName(id: string) { return PROVIDER_META[id]?.name ?? id.charAt(0).toUpperCase() + id.slice(1) }
 export function ProviderBadge({ id, size = 20 }: { id: string; size?: number }) {
@@ -265,13 +266,14 @@ export const SCOPE_COLORS: Record<AiScope, string> = {
 }
 
 export function AiProviderPanel({
-  scope, baseEndpoint, modelsPath, isAdmin, disabled, roleLabels, showToast,
+  scope, baseEndpoint, modelsPath, isAdmin, disabled, hideConfigSections, roleLabels, showToast,
 }: {
   scope:        AiScope
   baseEndpoint: string
   modelsPath?:  string
   isAdmin:      boolean
   disabled?:    boolean
+  hideConfigSections?: boolean
   roleLabels?:  Record<string, string>
   showToast:    (msg: string, ok?: boolean) => void
 }) {
@@ -438,6 +440,7 @@ export function AiProviderPanel({
       )}
 
       {/* ── Provider API Keys ── */}
+      {!hideConfigSections && (
       <div className="rounded-2xl p-5" style={{ background: 'var(--surface)', backdropFilter: 'blur(20px)', border: '1px solid var(--border)', boxShadow: 'var(--shadow)' }}>
         <div className="flex items-center gap-3 mb-4">
           <div className="w-8 h-8 rounded-xl flex items-center justify-center" style={{ background: 'linear-gradient(135deg, var(--accent), var(--forest))' }}>
@@ -512,8 +515,10 @@ export function AiProviderPanel({
           ))}
         </div>
       </div>
+      )}
 
       {/* ── Model Pool ── */}
+      {!hideConfigSections && (
       <div className="rounded-2xl p-5" style={{ background: 'var(--surface)', backdropFilter: 'blur(20px)', border: '1px solid var(--border)', boxShadow: 'var(--shadow)' }}>
         <div className="flex items-center justify-between gap-3 mb-4 flex-wrap">
           <div className="flex items-center gap-3">
@@ -554,6 +559,7 @@ export function AiProviderPanel({
           )
         }
       </div>
+      )}
 
       {/* ── Role Assignments ── */}
       <div className="rounded-2xl p-5" style={{ background: 'var(--surface)', backdropFilter: 'blur(20px)', border: '1px solid var(--border)', boxShadow: 'var(--shadow)' }}>

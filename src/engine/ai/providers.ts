@@ -169,6 +169,16 @@ export const PROVIDERS: ProviderDef[] = [
     authHeader: 'bearer',
     supportsEmbeddings: true,
   },
+  {
+    id: 'edenai',
+    name: 'Eden AI',
+    baseUrl: 'https://api.edenai.run/v3',
+    docsUrl: 'https://app.edenai.run/dashboard/iam/api-keys',
+    freeModels: false,
+    modelsPath: '/models',
+    authHeader: 'bearer',
+    supportsEmbeddings: false,
+  },
 ]
 
 export const PROVIDER_MAP = new Map(PROVIDERS.map(p => [p.id, p]))

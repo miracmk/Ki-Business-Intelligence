@@ -4,6 +4,7 @@ import {
   Plus, Trash2, Copy, QrCode, RefreshCw,
   AlertTriangle, CheckCircle, XCircle, X, Camera, Save,
   Mail, Phone, MapPin, Building2, ExternalLink, UserPlus, Wand2, Zap, History,
+  Upload, FileText,
 } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import api from '../lib/api'
@@ -12,6 +13,20 @@ import { SearchableSelect } from '../components/SearchableSelect'
 import { PhoneInput } from '../components/PhoneInput'
 import { COUNTRIES, TR_PROVINCES, getTaxLabel } from '../lib/geoData'
 import { AiProviderPanel, ENTITY_MODEL_ROLE_LABELS } from '../components/AiProviderPanel'
+
+// ─── Entity KB category taxonomy (YFZ 33) ──────────────────────────────────────
+
+const ENTITY_KB_CATEGORIES = [
+  { key: 'company_info',      label: 'Şirket Bilgisi' },
+  { key: 'pricing',           label: 'Fiyatlandırma' },
+  { key: 'product_info',      label: 'Ürün/Hizmet' },
+  { key: 'faq',                label: 'Soru-Cevap' },
+  { key: 'customer_feedback', label: 'Müşteri Geri Bildirimi' },
+  { key: 'support_issue',     label: 'Destek Sorun' },
+  { key: 'support_solution',  label: 'Destek Çözüm' },
+  { key: 'policy',             label: 'Politika/Prosedür' },
+  { key: 'other',              label: 'Diğer' },
+]
 
 // ─── Channel schemas (based on official API docs) ─────────────────────────────
 
@@ -110,12 +125,6 @@ const CHANNEL_SCHEMAS: Record<string, ChannelSchema> = {
 }
 
 // ─── Static data ──────────────────────────────────────────────────────────────
-
-interface OpenRouterModel {
-  id: string
-  name: string
-  contextLength: number
-}
 
 const CRM_GROUPS = [
   {
@@ -789,26 +798,6 @@ export default function Settings() {
   const [inviting,    setInviting]      = useState(false)
   const [inviteMsg,   setInviteMsg]     = useState('')
 
-  // AI config — tri-model architecture (analysis / vector / conversation)
-  const [aiConfig, setAiConfig] = useState({
-    provider: 'openrouter',
-    apiKey: '',
-    analysisModel: 'nvidia/llama-3.1-nemotron-70b-instruct:free',
-    analysisF1: 'google/gemini-2.0-flash-exp:free',
-    analysisF2: 'meta-llama/llama-3.3-70b-instruct:free',
-    vectorModel: 'nvidia/llama-3.1-nemotron-70b-instruct:free',
-    vectorF1: 'google/gemini-2.0-flash-exp:free',
-    vectorF2: 'meta-llama/llama-3.3-70b-instruct:free',
-    conversationModel: 'meta-llama/llama-3.3-70b-instruct:free',
-    conversationFallback: 'google/gemini-2.0-flash-exp:free',
-    conversationF2: '',
-  })
-  const [openRouterModels, setOpenRouterModels] = useState<OpenRouterModel[]>([])
-  const [loadingModels, setLoadingModels] = useState(false)
-
-  // New multi-provider state
-  const [aiModelGroups, setAiModelGroups] = useState<any[]>([])
-
   // Vector docs
   const [vectorDocs,        setVectorDocs]        = useState<any[]>([])
   const [loadingVectorDocs, setLoadingVectorDocs] = useState(false)
@@ -816,6 +805,13 @@ export default function Settings() {
   const [newDocTitle,       setNewDocTitle]       = useState('')
   const [newDocContent,     setNewDocContent]     = useState('')
   const [savingDoc,         setSavingDoc]         = useState(false)
+
+  // KB documents (file upload, chunked + hash-diff indexed)
+  const [kbDocs,        setKbDocs]        = useState<any[]>([])
+  const [loadingKbDocs, setLoadingKbDocs] = useState(false)
+  const [kbCategory,    setKbCategory]    = useState('company_info')
+  const [kbFile,        setKbFile]        = useState<File | null>(null)
+  const [uploadingKb,   setUploadingKb]   = useState(false)
 
   const [showCrmModal, setShowCrmModal] = useState(false)
   const [showCrmWizard, setShowCrmWizard] = useState(false)
@@ -950,56 +946,6 @@ export default function Settings() {
     setChannelConfigs(results)
   }
 
-  const loadAiConfig = async () => {
-    try {
-      const res = await api.get('/ai/config')
-      const c = res.data.config
-      setAiConfig(prev => ({
-        ...prev,
-        provider: c.provider ?? 'openrouter',
-        analysisModel: c.analysisModel ?? prev.analysisModel,
-        analysisF1: c.analysisFallbacks?.[0] ?? prev.analysisF1,
-        analysisF2: c.analysisFallbacks?.[1] ?? prev.analysisF2,
-        vectorModel: c.vectorModel ?? prev.vectorModel,
-        vectorF1: c.vectorFallbacks?.[0] ?? prev.vectorF1,
-        vectorF2: c.vectorFallbacks?.[1] ?? prev.vectorF2,
-        conversationModel: c.conversationModel ?? prev.conversationModel,
-        conversationFallback: c.conversationFallback ?? prev.conversationFallback,
-        conversationF2: c.conversationF2 ?? prev.conversationF2,
-      }))
-    } catch { /* keep defaults */ }
-  }
-
-  const loadOpenRouterModels = async () => {
-    try {
-      setLoadingModels(true)
-      const res = await api.get('/ai/openrouter-models')
-      setOpenRouterModels(res.data.models ?? [])
-    } catch { /* keep empty */ } finally {
-      setLoadingModels(false)
-    }
-  }
-
-  const refreshModels = async () => {
-    try {
-      setLoadingModels(true)
-      await api.post('/ai/openrouter-models/refresh')
-      const res = await api.get('/ai/openrouter-models')
-      setOpenRouterModels(res.data.models ?? [])
-    } catch (e: any) {
-      setError(e.response?.data?.error || 'Modeller yenilenemedi')
-    } finally {
-      setLoadingModels(false)
-    }
-  }
-
-  const loadAiProviders = async () => {
-    try {
-      const res = await api.get('/tenants/ai-providers/all-models')
-      setAiModelGroups(res.data.providers ?? [])
-    } catch { /* ignore */ }
-  }
-
   const loadVectorDocs = async () => {
     setLoadingVectorDocs(true)
     try {
@@ -1037,6 +983,44 @@ export default function Settings() {
     }
   }
 
+  const loadKbDocuments = async () => {
+    setLoadingKbDocs(true)
+    try {
+      const res = await api.get('/tenants/kb-documents')
+      setKbDocs(res.data.docs ?? [])
+    } catch { /* ignore */ } finally {
+      setLoadingKbDocs(false)
+    }
+  }
+
+  const uploadKbDocument = async () => {
+    if (!kbFile) return
+    setUploadingKb(true)
+    try {
+      const formData = new FormData()
+      formData.append('category', kbCategory)
+      formData.append('file', kbFile)
+      const res = await api.post('/tenants/kb-documents', formData)
+      showSuccess(`Doküman indexlendi — ${res.data.added ?? 0} yeni, ${res.data.unchanged ?? 0} değişmeyen, ${res.data.removed ?? 0} kaldırılan chunk`)
+      setKbFile(null)
+      await loadKbDocuments()
+    } catch (e: any) {
+      setError(e.response?.data?.error || 'Doküman yüklenemedi')
+    } finally {
+      setUploadingKb(false)
+    }
+  }
+
+  const deleteKbDocument = async (id: string) => {
+    try {
+      await api.delete(`/tenants/kb-documents/${id}`)
+      showSuccess('Doküman silindi')
+      await loadKbDocuments()
+    } catch (e: any) {
+      setError(e.response?.data?.error || 'Silinemedi')
+    }
+  }
+
   useEffect(() => {
     loadData()
     // Handle OAuth callback redirect
@@ -1057,10 +1041,8 @@ export default function Settings() {
 
   useEffect(() => {
     if (activeTab === 'ai') {
-      loadAiConfig()
-      loadOpenRouterModels()
-      loadAiProviders()
       loadVectorDocs()
+      loadKbDocuments()
       if (!planUsage) {
         api.get('/tenants/plan').then(r => setPlanUsage(r.data)).catch(() => {})
       }
@@ -1356,25 +1338,6 @@ export default function Settings() {
       showSuccess('Kanal konfigürasyonu silindi.')
     } catch (e: any) {
       setError(e.response?.data?.error || 'Silinemedi')
-    }
-  }
-
-  const saveAiConfig = async () => {
-    try {
-      await api.put('/tenants/ai-config', {
-        provider: aiConfig.provider,
-        ...(aiConfig.apiKey ? { apiKey: aiConfig.apiKey } : {}),
-        analysisModel: aiConfig.analysisModel,
-        analysisFallbacks: [aiConfig.analysisF1, aiConfig.analysisF2].filter(Boolean),
-        vectorModel: aiConfig.vectorModel,
-        vectorFallbacks: [aiConfig.vectorF1, aiConfig.vectorF2].filter(Boolean),
-        conversationModel: aiConfig.conversationModel,
-        conversationFallback: aiConfig.conversationFallback,
-        conversationF2: aiConfig.conversationF2 || undefined,
-      })
-      showSuccess('AI ayarları kaydedildi.')
-    } catch (e: any) {
-      setError(e.response?.data?.error || 'Kaydedilemedi')
     }
   }
 
@@ -2063,69 +2026,9 @@ export default function Settings() {
             roleLabels={ENTITY_MODEL_ROLE_LABELS}
             isAdmin={canManageCompanyProfile}
             disabled={!!planUsage && planUsage.planName !== 'custom_models'}
+            hideConfigSections={!!planUsage && planUsage.planName !== 'custom_models'}
             showToast={(msg, ok = true) => ok ? showSuccess(msg) : setError(msg)}
           />
-
-          {/* ── Model assignments (existing tri-model) ── */}
-          <div className="rounded-2xl p-5" style={{ background: 'var(--surface-modal)', border: '1px solid var(--border)' }}>
-            <div className="flex items-center justify-between mb-5 flex-wrap gap-2">
-              <h3 className="font-bold" style={{ color: 'var(--text-1)' }}>Model Ataması</h3>
-              <button onClick={refreshModels} disabled={loadingModels}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs"
-                style={{ background: 'var(--surface-modal-2)', border: '1px solid var(--border)', color: 'var(--text-2)' }}>
-                <RefreshCw size={12} className={loadingModels ? 'animate-spin' : ''} /> Modelleri Yenile
-              </button>
-            </div>
-
-            <datalist id="ai-models-list">
-              <option value="kibi_free::default" label="KIBI Ücretsiz Altyapısı" />
-              {aiModelGroups.flatMap((g: any) => g.models ?? []).map((m: any) => (
-                <option key={m.id} value={m.id} label={m.name ?? m.id} />
-              ))}
-              {openRouterModels.map(m => <option key={m.id} value={m.id} label={m.name} />)}
-            </datalist>
-
-            <fieldset disabled={!!planUsage && planUsage.planName !== 'custom_models'} className="grid grid-cols-1 lg:grid-cols-3 gap-5">
-              {[
-                { key: 'analysisModel', f1: 'analysisF1', f2: 'analysisF2', label: 'DB Analiz', desc: 'SQL · Yapısal sorgulama', color: 'var(--accent)' },
-                { key: 'vectorModel',   f1: 'vectorF1',   f2: 'vectorF2',   label: 'Vektör Analiz', desc: 'Qdrant · Semantik arama', color: '#a855f7' },
-                { key: 'conversationModel', f1: 'conversationFallback', f2: 'conversationF2', label: 'Konuşma', desc: 'Müşteri yanıtları', color: '#22c55e' },
-              ].map(col => (
-                <div key={col.key} className="space-y-3">
-                  <div className="flex items-center gap-2 pb-2" style={{ borderBottom: `2px solid ${col.color}30` }}>
-                    <div className="w-2 h-2 rounded-full" style={{ background: col.color }} />
-                    <span className="font-medium text-sm" style={{ color: 'var(--text-1)' }}>{col.label}</span>
-                  </div>
-                  <span className="text-xs block -mt-1" style={{ color: 'var(--text-3)' }}>{col.desc}</span>
-                  {[
-                    { field: col.key,  label: 'Birincil' },
-                    { field: col.f1,   label: 'Yedek 1'  },
-                    { field: col.f2,   label: 'Yedek 2'  },
-                  ].map(({ field, label: fLabel }) => (
-                    <div key={field}>
-                      <label className="text-xs block mb-1" style={{ color: 'var(--text-3)' }}>{fLabel}</label>
-                      <input list="ai-models-list"
-                        value={(aiConfig as any)[field] ?? ''}
-                        onChange={e => setAiConfig(p => ({ ...p, [field]: e.target.value }))}
-                        placeholder="provider::model veya model-id"
-                        className="w-full px-3 py-2 rounded-lg text-xs outline-none font-mono"
-                        style={{ background: 'var(--surface-modal-2)', color: 'var(--text-1)', border: '1px solid var(--border)' }} />
-                    </div>
-                  ))}
-                </div>
-              ))}
-            </fieldset>
-
-            {(!planUsage || planUsage.planName === 'custom_models') && (
-              <div className="flex justify-end mt-5">
-                <button onClick={saveAiConfig}
-                  className="flex items-center gap-1.5 px-5 py-2 rounded-xl text-sm font-medium text-white"
-                  style={{ background: 'linear-gradient(135deg, var(--accent), var(--forest))' }}>
-                  <Save size={13} /> Kaydet
-                </button>
-              </div>
-            )}
-          </div>
 
           {/* ── Vector Docs (Entity Knowledge Base) ── */}
           <div className="rounded-2xl p-5" style={{ background: 'var(--surface-modal)', border: '1px solid var(--border)' }}>
@@ -2207,6 +2110,77 @@ export default function Settings() {
                     ))}
                   </div>
             }
+
+            {/* ── File upload (chunked + hash-diff indexed) ── */}
+            <div className="mt-5 pt-5" style={{ borderTop: '1px solid var(--border)' }}>
+              <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+                <div>
+                  <h4 className="text-sm font-semibold" style={{ color: 'var(--text-1)' }}>Dosya Yükle</h4>
+                  <p className="text-xs mt-0.5" style={{ color: 'var(--text-3)' }}>PDF, DOCX, XLSX, CSV, HTML, TXT — kategori seçip yükleyin, otomatik parçalanıp indexlenir</p>
+                </div>
+                <button onClick={loadKbDocuments} disabled={loadingKbDocs}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs"
+                  style={{ background: 'var(--surface-modal-2)', border: '1px solid var(--border)', color: 'var(--text-2)' }}>
+                  <RefreshCw size={12} className={loadingKbDocs ? 'animate-spin' : ''} /> Yenile
+                </button>
+              </div>
+
+              <div className="flex items-center gap-2 mb-4 flex-wrap">
+                <select value={kbCategory} onChange={e => setKbCategory(e.target.value)}
+                  className="px-3 py-2 rounded-lg text-sm outline-none"
+                  style={{ background: 'var(--surface-modal-2)', border: '1px solid var(--border)', color: 'var(--text-1)' }}>
+                  {ENTITY_KB_CATEGORIES.map(c => <option key={c.key} value={c.key}>{c.label}</option>)}
+                </select>
+                <label className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm cursor-pointer"
+                  style={{ background: 'var(--surface-modal-2)', border: '1px solid var(--border)', color: 'var(--text-2)' }}>
+                  <FileText size={14} />
+                  {kbFile ? kbFile.name : 'Dosya seç...'}
+                  <input type="file" className="hidden" accept=".pdf,.docx,.xlsx,.xls,.csv,.html,.htm,.txt,.md"
+                    onChange={e => setKbFile(e.target.files?.[0] ?? null)} />
+                </label>
+                <button onClick={uploadKbDocument} disabled={!kbFile || uploadingKb}
+                  className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs text-white disabled:opacity-50"
+                  style={{ background: 'linear-gradient(135deg, var(--accent), var(--forest))' }}>
+                  <Upload size={12} /> {uploadingKb ? 'Yükleniyor...' : 'Yükle & Indexle'}
+                </button>
+              </div>
+
+              {loadingKbDocs
+                ? <div className="text-center py-4 text-sm" style={{ color: 'var(--text-3)' }}>Yükleniyor...</div>
+                : kbDocs.length === 0
+                  ? <p className="text-xs text-center py-4 opacity-70" style={{ color: 'var(--text-3)' }}>Henüz dosya yüklenmedi</p>
+                  : <div className="space-y-2">
+                      {kbDocs.map((doc: any) => (
+                        <div key={doc.id} className="flex items-center justify-between gap-3 p-3 rounded-xl"
+                          style={{ background: 'var(--surface-modal-2)', border: '1px solid var(--border)' }}>
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="text-sm font-medium truncate" style={{ color: 'var(--text-1)' }}>{doc.originalFileName ?? doc.title}</span>
+                              <span className="text-[10px] px-1.5 py-0.5 rounded-full" style={{ background: 'rgba(99,102,241,0.10)', color: '#818cf8' }}>
+                                {ENTITY_KB_CATEGORIES.find(c => c.key === doc.category)?.label ?? doc.category}
+                              </span>
+                              {doc.status === 'active'
+                                ? <span className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-full" style={{ background: 'rgba(38,166,154,0.12)', color: 'var(--accent)' }}>
+                                    <CheckCircle size={9} /> İndexlendi
+                                  </span>
+                                : doc.status === 'failed'
+                                  ? <span className="inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-full" style={{ background: 'rgba(239,68,68,0.10)', color: '#f87171' }}>
+                                      <XCircle size={9} /> Hata
+                                    </span>
+                                  : <span className="text-[10px] px-1.5 py-0.5 rounded-full" style={{ background: 'rgba(251,191,36,0.10)', color: '#fbbf24' }}>İşleniyor</span>
+                              }
+                            </div>
+                          </div>
+                          <button onClick={() => deleteKbDocument(doc.id)}
+                            className="p-1.5 rounded-lg flex-shrink-0"
+                            style={{ background: 'rgba(239,68,68,0.08)', color: '#f87171', border: '1px solid rgba(239,68,68,0.15)' }}>
+                            <Trash2 size={13} />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+              }
+            </div>
           </div>
         </div>
       )}

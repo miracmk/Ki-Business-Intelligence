@@ -10,12 +10,13 @@ import type { FastifyPluginAsync } from 'fastify'
 import { z }                        from 'zod'
 import { db }                       from '../../lib/db.js'
 import {
-  aiSessions, kibiEntities, kibiTokenUsage, entityMetrics,
+  aiSessions, kibiEntities, kibiTokenUsage, entityMetrics, kbDocuments,
 } from '../../../db/schema.js'
 import { eq, and, sql, desc }       from 'drizzle-orm'
 import { runEntityAgent }           from '../../engine/ai/entity-agent.js'
 import { escalateToHuman, shouldEscalate } from '../../engine/ai/escalation-manager.js'
 import { checkMessageLimit }        from '../../lib/plan-limits.js'
+import { indexDocument, collectionForScope } from '../../engine/knowledge/indexer.js'
 
 function isUUID(s: string | null | undefined): boolean {
   return !!s && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)
@@ -206,22 +207,50 @@ export const entityAiRoutes: FastifyPluginAsync = async (app) => {
     const { status = 'pending' } = req.query as { status?: string }
 
     const rows = await db.execute(
-      `SELECT * FROM kb_approval_queue WHERE entity_id = '${entity.id}' AND status = '${status}' ORDER BY created_at DESC LIMIT 50` as any
+      sql`SELECT * FROM kb_approval_queue WHERE entity_id = ${entity.id} AND status = ${status} ORDER BY created_at DESC LIMIT 50`
     )
     return { queue: Array.isArray(rows) ? rows : (rows as any).rows ?? [] }
   })
 
   // ── PUT /entity-ai/kb-queue/:id/approve ───────────────────────────────────
+  // Approving copies the queued problem/solution pair into the Entity KB
+  // (kb_documents/kb_chunks, chunked + hashed) and embeds it into Qdrant.
   app.put('/kb-queue/:id/approve', { onRequest: [app.authenticate] }, async (req, reply) => {
     const user   = req.user as { sub: string; tenantId: string }
     const entity = await resolveEntity(user.tenantId)
     if (!entity) return reply.status(404).send({ error: 'Entity bulunamadı' })
 
     const { id } = req.params as { id: string }
-    await db.execute(
-      `UPDATE kb_approval_queue SET status='approved', reviewed_by='${user.sub}', reviewed_at=now() WHERE id='${id}' AND entity_id='${entity.id}'` as any
+    if (!isUUID(id)) return reply.status(400).send({ error: 'Geçersiz id' })
+
+    const rows = await db.execute(
+      sql`SELECT * FROM kb_approval_queue WHERE id = ${id} AND entity_id = ${entity.id} AND status = 'pending'`
     )
-    return { success: true }
+    const queueItem = (Array.isArray(rows) ? rows : (rows as any).rows ?? [])[0] as
+      { problem_summary: string | null; solution_text: string } | undefined
+    if (!queueItem) return reply.status(404).send({ error: 'Kayıt bulunamadı veya zaten işlendi' })
+
+    const text = [queueItem.problem_summary, queueItem.solution_text].filter(Boolean).join('\n\n')
+    const [doc] = await db.insert(kbDocuments).values({
+      scope:      'entity',
+      entityId:   entity.id,
+      category:   'support_solution',
+      title:      (queueItem.problem_summary || 'Destek Çözümü').slice(0, 200),
+      sourceType: 'conversation',
+      uploadedBy: user.sub,
+      status:     'processing',
+    }).returning()
+
+    try {
+      const result = await indexDocument({ documentId: doc!.id, scope: 'entity', entityId: entity.id, category: 'support_solution', text })
+      await db.execute(
+        sql`UPDATE kb_approval_queue SET status='approved', reviewed_by=${user.sub}, reviewed_at=now(), kb_collection=${collectionForScope('entity', entity.id)} WHERE id=${id} AND entity_id=${entity.id}`
+      )
+      return { success: true, documentId: doc!.id, ...result }
+    } catch (e: any) {
+      await db.update(kbDocuments).set({ status: 'failed' }).where(eq(kbDocuments.id, doc!.id))
+      return reply.status(500).send({ error: `İndexleme hatası: ${e.message}` })
+    }
   })
 
   // ── PUT /entity-ai/kb-queue/:id/reject ────────────────────────────────────
@@ -231,8 +260,10 @@ export const entityAiRoutes: FastifyPluginAsync = async (app) => {
     if (!entity) return reply.status(404).send({ error: 'Entity bulunamadı' })
 
     const { id } = req.params as { id: string }
+    if (!isUUID(id)) return reply.status(400).send({ error: 'Geçersiz id' })
+
     await db.execute(
-      `UPDATE kb_approval_queue SET status='rejected', reviewed_by='${user.sub}', reviewed_at=now() WHERE id='${id}' AND entity_id='${entity.id}'` as any
+      sql`UPDATE kb_approval_queue SET status='rejected', reviewed_by=${user.sub}, reviewed_at=now() WHERE id=${id} AND entity_id=${entity.id}`
     )
     return { success: true }
   })

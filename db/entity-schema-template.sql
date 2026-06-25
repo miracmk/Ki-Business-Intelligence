@@ -991,3 +991,47 @@ CREATE TABLE ":schema".support_ticket_messages (
 );
 
 CREATE INDEX support_ticket_messages_ticket_idx ON ":schema".support_ticket_messages (ticket_id, created_at);
+
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- FULFILLMENT SERVICE MANAGEMENT MODULE (Native Add-on — addon_fulfillment)
+-- YFZ 34 Faz 5b. Schema lives in Base DDL; CRUD/UI gated by entitlement.
+-- ═══════════════════════════════════════════════════════════════════════════════
+
+CREATE TABLE ":schema".erp_couriers (
+  id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  name            VARCHAR(255) NOT NULL,
+  carrier_code    VARCHAR(50), -- aras,yurtici,mng,ups,fedex,dhl,ptt,custom
+  api_credentials TEXT,        -- AES-256-GCM encrypted JSON (encryptJson)
+  is_active       BOOLEAN      DEFAULT TRUE,
+  created_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE ":schema".erp_shipments (
+  id                UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  order_id          UUID        NOT NULL REFERENCES ":schema".erp_orders(id) ON DELETE CASCADE,
+  courier_id        UUID        REFERENCES ":schema".erp_couriers(id) ON DELETE SET NULL,
+  tracking_number   VARCHAR(255),
+  carrier           VARCHAR(100),
+  status            VARCHAR(30)  DEFAULT 'picking', -- picking,packed,shipped,out_for_delivery,delivered,failed
+  shipping_address  JSONB,
+  shipped_at        TIMESTAMPTZ,
+  delivered_at      TIMESTAMPTZ,
+  notes             TEXT,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX erp_shipments_order_idx  ON ":schema".erp_shipments (order_id);
+CREATE INDEX erp_shipments_status_idx ON ":schema".erp_shipments (status);
+
+CREATE TABLE ":schema".erp_warehouse_picks (
+  id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  shipment_id     UUID        REFERENCES ":schema".erp_shipments(id) ON DELETE CASCADE,
+  warehouse_id    UUID        REFERENCES ":schema".erp_warehouses(id) ON DELETE SET NULL,
+  status          VARCHAR(30) DEFAULT 'pending', -- pending,picking,picked,packed
+  picked_by       UUID,
+  picked_at       TIMESTAMPTZ,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX erp_warehouse_picks_shipment_idx ON ":schema".erp_warehouse_picks (shipment_id);

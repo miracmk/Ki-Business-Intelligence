@@ -1517,3 +1517,13 @@ kb_chunks
   - `App.tsx`: yeni `/app/customer-service` route'u. `Layout.tsx`: yeni "Add-on Modüller" nav bölümü + "Müşteri Hizmetleri" linki — **bilinçli olarak her zaman görünür** (AI'nin aksine, add-on'lar keşfedilebilir/satılabilir olmalı, entitlement yoksa sayfa içi CTA gösterir, nav'da gizlenmez).
 - [x] Doğrulama: `tsc --noEmit` temiz, frontend build temiz, `docker compose restart ki_api` → sağlıklı, `/health` ok, `GET /api/v1/customer-service/tickets` auth'suz → 401. Migration `entity_ki_business` şemasında 3 yeni tablo oluşturduğu doğrulandı (`\dt entity_ki_business.support_*`).
 - Not: `support_portal_sessions` (müşteri self-service portal, token-bazlı auth-dışı erişim) plan §Faz 5a'da bahsedilmişti ama bu pasta kapsam dışı bırakıldı — ayrı bir auth modeli gerektiren büyük bir alt-özellik, gelecekte ayrı eklenebilir.
+
+### YFZ 34.6 — Fulfillment Service Management Add-on (Faz 5b) ✅ (2026-06-25)
+- [x] **Schema:** `erp_couriers` / `erp_shipments` / `erp_warehouse_picks` Base entity DDL'ine eklendi + `db/migrations/0019_fulfillment_tables.sql` ile mevcut tüm provision edilmiş şemalara geri uygulandı (psql, Faz 5a'daki onaylı desen). Doğrulandı: `entity_ki_business`'ta 3 yeni tablo.
+  - `erp_shipments.order_id → erp_orders` (Base ERP, Faz 4) — add-on, Base'in üzerine inşa ediliyor.
+  - Index isimleri şema-önek**siz** yazıldı (Faz 5a'da bulunan önceden var olan hata tekrarlanmadı).
+- [x] **Backend:** `src/api/routes/fulfillment-native.ts` (yeni) — `addon_fulfillment` entitlement gate (dosya geneli `preHandler` hook, admin/supervisor bypass). Kurye CRUD (API credentials `encryptJson` ile şifrelenir — `crmConnections` deseniyle tutarlı), sevkiyat CRUD (`order_id` zorunlu, durum `shipped`/`delivered`'a geçince timestamp otomatik), depo çıkış kayıtları (`picked` olunca `picked_by`/`picked_at` otomatik).
+  - `server.ts`'e `/api/v1/fulfillment-native` prefix'iyle kayıtlı.
+- [x] **Frontend:** `frontend/src/pages/Fulfillment.tsx` (yeni) — entitlement kilitli/aktif iki mod (`CustomerService.tsx` ile aynı desen), sevkiyat tablosu + "İlerlet" butonu (picking→packed→shipped→out_for_delivery→delivered durum zincirini tek tıkla ilerletir).
+  - `App.tsx`: `/app/fulfillment` route'u. `Layout.tsx`: "Add-on Modüller" bölümüne "Sevkiyat" linki eklendi.
+- [x] Doğrulama: `tsc --noEmit` temiz, frontend build temiz, `docker compose restart ki_api` → sağlıklı, `/health` ok, `GET /api/v1/fulfillment-native/shipments` auth'suz → 401.

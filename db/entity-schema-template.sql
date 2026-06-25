@@ -1119,3 +1119,63 @@ CREATE TABLE ":schema".crm_social_posts (
 );
 
 CREATE INDEX crm_social_posts_status_idx ON ":schema".crm_social_posts (status);
+
+-- ═══════════════════════════════════════════════════════════════════════════════
+-- EVENT MANAGEMENT MODULE (Native Add-on — addon_event)
+-- YFZ 34 Faz 5e. Schema lives in Base DDL; CRUD/UI gated by entitlement.
+-- Paid registrations soft-link to acc_invoices (consistent with the existing
+-- cross-module soft-link convention — see acc_invoices.order_id).
+-- ═══════════════════════════════════════════════════════════════════════════════
+
+CREATE TABLE ":schema".erp_event_venues (
+  id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  name            VARCHAR(255) NOT NULL,
+  address_line1   VARCHAR(500),
+  city            VARCHAR(100),
+  country         VARCHAR(2)  DEFAULT 'TR',
+  capacity        INTEGER,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE ":schema".erp_events (
+  id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  name            VARCHAR(500) NOT NULL,
+  description     TEXT,
+  venue_id        UUID        REFERENCES ":schema".erp_event_venues(id) ON DELETE SET NULL,
+  start_date      TIMESTAMPTZ NOT NULL,
+  end_date        TIMESTAMPTZ,
+  capacity        INTEGER,
+  status          VARCHAR(30) DEFAULT 'planned', -- planned,published,ongoing,completed,cancelled
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX erp_events_status_idx ON ":schema".erp_events (status);
+CREATE INDEX erp_events_start_idx  ON ":schema".erp_events (start_date);
+
+CREATE TABLE ":schema".erp_event_tickets (
+  id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  event_id        UUID        NOT NULL REFERENCES ":schema".erp_events(id) ON DELETE CASCADE,
+  name            VARCHAR(255) NOT NULL,
+  price           NUMERIC(15,2) DEFAULT 0,
+  currency        VARCHAR(3)  DEFAULT 'TRY',
+  quantity_total  INTEGER,
+  quantity_sold   INTEGER     DEFAULT 0,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX erp_event_tickets_event_idx ON ":schema".erp_event_tickets (event_id);
+
+CREATE TABLE ":schema".erp_event_registrations (
+  id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  event_id        UUID        NOT NULL REFERENCES ":schema".erp_events(id) ON DELETE CASCADE,
+  ticket_id       UUID        REFERENCES ":schema".erp_event_tickets(id) ON DELETE SET NULL,
+  contact_id      UUID        REFERENCES ":schema".crm_contacts(id) ON DELETE SET NULL,
+  invoice_id      UUID,       -- soft-link to acc_invoices
+  status          VARCHAR(30) DEFAULT 'registered', -- registered,checked_in,cancelled
+  registered_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  checked_in_at   TIMESTAMPTZ
+);
+
+CREATE INDEX erp_event_registrations_event_idx   ON ":schema".erp_event_registrations (event_id);
+CREATE INDEX erp_event_registrations_contact_idx ON ":schema".erp_event_registrations (contact_id);

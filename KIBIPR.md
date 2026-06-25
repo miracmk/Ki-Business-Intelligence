@@ -1547,3 +1547,13 @@ kb_chunks
 - [x] **Frontend:** `frontend/src/pages/Marketing.tsx` (yeni) — 2 sekme (E-posta Kampanyaları/Sosyal Medya Takvimi), kilitli/aktif iki mod, "AI ile İçerik Üret" butonu (Premium AI gerektiğini UI'da belirtiyor, 402 durumunda kullanıcıya açıklayıcı hata gösteriyor).
   - `App.tsx`: `/app/marketing` route'u. `Layout.tsx`: "Add-on Modüller" bölümüne "Marketing" linki eklendi.
 - [x] Doğrulama: `tsc --noEmit` temiz, frontend build temiz, `docker compose restart ki_api` → sağlıklı, `/health` ok, `GET /api/v1/marketing-native/campaigns` auth'suz → 401.
+
+### YFZ 34.9 — Event Management Add-on (Faz 5e) ✅ (2026-06-25)
+- [x] **Schema:** `erp_event_venues` / `erp_events` / `erp_event_tickets` / `erp_event_registrations` Base entity DDL'ine eklendi + `db/migrations/0022_event_tables.sql` ile geri uygulandı (aynı DO-block deseni). Doğrulandı: `entity_ki_business`'ta 4 yeni tablo.
+  - `erp_event_registrations.contact_id → crm_contacts` (FK, Base CRM) — katılımcı kimliği CRM'den.
+  - `erp_event_registrations.invoice_id` → `acc_invoices` **soft-link** (mevcut `acc_invoices.order_id` konvansiyonuyla tutarlı, FK değil).
+- [x] **Backend:** `src/api/routes/event-native.ts` (yeni) — `addon_event` entitlement gate. Mekan/etkinlik/bilet CRUD; **ücretli bilet kaydı oluşturulunca otomatik `acc_invoices` taslak faturası açılır** (Base Muhasebe'yi, Faz 2'yi yeniden kullanır — yeni bir faturalama yolu icat edilmedi) + `quantity_sold` sayacı artırılır; check-in endpoint'i.
+  - `server.ts`'e `/api/v1/event-native` prefix'iyle kayıtlı.
+- [x] **Frontend:** `frontend/src/pages/Events.tsx` (yeni) — kilitli/aktif iki mod, etkinlik kartları → detay görünümü (bilet tipleri + katılımcı kaydı + check-in akışı tek sayfada).
+  - `App.tsx`: `/app/events` route'u. `Layout.tsx`: "Add-on Modüller" bölümüne "Etkinlikler" linki eklendi.
+- [x] Doğrulama: `tsc --noEmit` temiz, frontend build temiz, `docker compose restart ki_api` → sağlıklı, `/health` ok, `GET /api/v1/event-native/events` auth'suz → 401.

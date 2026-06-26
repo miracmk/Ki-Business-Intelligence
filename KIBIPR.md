@@ -1590,3 +1590,36 @@ Plandaki **tüm fazlar** (`/root/.claude/plans/proje-vi-zyonu-ve-mi-mari-ancient
 - Add-on'lar için gerçek fiyatlandırma/ödeme UI'ı — şu an "Etkinleştir" butonu $0 ile aktive ediyor, `kibiPricingPackages`/Ki Wallet'a bağlı gerçek SKU/checkout akışı gelecek bir faz.
 
 **Git geçmişi:** YFZ 34.0 (`3b96af1`) → YFZ 34.10 (bu commit) — 13 commit, hepsi push edildi.
+
+---
+
+## FAZ 4+ — Agentic Platform Roadmap (2026-06-26'dan itibaren)
+
+> Tam roadmap: **`KIBI-PLATFORM-ROADMAP.md`** (repo root). Sıra: FAZ 4 (Metadata Foundation)
+> → FAZ 5 (Hooks+Rule Engine) → FAZ 6 (Blueprint) → FAZ 7 (Custom Functions) → FAZ 8
+> (Onboarding); FAZ 9 (Granüler Güvenlik) tüm fazlarla paralel. Auto mode'da uygulanıyor —
+> fazlar arası onay için durulmuyor, her alt-faz sonunda commit+push var.
+
+### FAZ 4.1 — Field/Module Registry ✅ (2026-06-26)
+- `db/schema.ts`: yeni control-plane tabloları `kibi_modules` (entity_id, key, label, is_system,
+  physical_table, icon) + `kibi_fields` (module_id, key, column_name, label, type enum
+  `kibi_field_type`('text'|'number'|'date'|'boolean'|'select'|'relation'|'ai'), is_system,
+  is_required, config jsonb, position). Unique index'ler: `(entity_id,key)`, `(module_id,key)`.
+- Migration: `db/migrations/0023_metadata_registry.sql` — `docker exec -i ki_postgres psql -U
+  platform -d ki_platform < db/migrations/0023_metadata_registry.sql` ile uygulandı (bu repo'da
+  drizzle-kit migrate journal'ı 0011'de durmuş; 0012+ tüm migration'lar bu projede hep doğrudan
+  psql exec ile uygulanıyor — `npx drizzle-kit migrate` 0012-0023 arasını OTOMATİK ÇALIŞTIRMAZ,
+  yeni ortamlarda manuel psql apply gerekecek).
+- `src/lib/metadata/seed-system-fields.ts`: `crm-native.ts`'in `COLUMN_MAP` + Zod şemalarından
+  (contactSchema/companySchema/dealSchema/activitySchema) türetilmiş 4 modül (crm_contacts/
+  companies/deals/activities), 83 alan — `is_system=true` olarak her provisioned entity'ye
+  upsert eder (idempotent, `onConflictDoUpdate`). `npx tsx src/lib/metadata/seed-system-fields.ts`
+  ile çalıştırılır (ki_api konteyneri içinde, DB ağına erişimi var).
+- Doğrulandı: seed 1 entity × 4 modül × 83 alan yazdı; 2. çalıştırmada satır sayısı değişmedi
+  (idempotent); `/health` ve mevcut contacts route'ları regresyonsuz (bu faz crm-native.ts'e
+  hiç dokunmadı — registry şu an sadece pasif kayıt, 4.3'te resolver.ts onu okumaya başlayacak).
+- **Not:** Diğer native dosyalardaki (`erp-native.ts`, `accounting.ts`, personnel/ecommerce/
+  marketing/fulfillment/event-native) modüller bu seed'e dahil değil — roadmap'in başlangıç
+  komutu kapsamı `crm-native.ts` ile sınırlamıştı. Registry boş modüller için 4.3'teki fallback
+  zaten statik COLUMN_MAP'e döner, bu yüzden eksik seed bir regresyon değil; genişletme istenirse
+  aynı `MODULE_DEFS` desenine yeni modüller eklenir.

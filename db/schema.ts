@@ -297,6 +297,51 @@ export const entityModuleEntitlementsRelations = relations(entityModuleEntitleme
   entity: one(kibiEntities, { fields: [entityModuleEntitlements.entityId], references: [kibiEntities.id] }),
 }))
 
+// FAZ 4.1: Field/Module metadata registry — control-plane source of truth for what
+// modules/fields exist per entity (native COLUMN_MAP-backed system fields seeded in,
+// custom fields added via UI later). See KIBI-PLATFORM-ROADMAP.md FAZ 4.
+export const kibiModules = pgTable('kibi_modules', {
+  id:            uuid('id').primaryKey().defaultRandom(),
+  entityId:      uuid('entity_id').notNull().references(() => kibiEntities.id, { onDelete: 'cascade' }),
+  key:           varchar('key', { length: 100 }).notNull(),       // 'crm_contacts', 'erp_products', or custom 'projeler'
+  label:         varchar('label', { length: 255 }).notNull(),
+  isSystem:      boolean('is_system').notNull().default(false),   // native table vs custom (JSONB-only)
+  physicalTable: varchar('physical_table', { length: 100 }),      // real table name if system, null if custom
+  icon:          varchar('icon', { length: 50 }),
+  createdAt:     timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({
+  entityKeyIdx: uniqueIndex('kibi_modules_entity_key_idx').on(t.entityId, t.key),
+}))
+
+export const kibiFieldTypeEnum = pgEnum('kibi_field_type', [
+  'text', 'number', 'date', 'boolean', 'select', 'relation', 'ai',
+])
+
+export const kibiFields = pgTable('kibi_fields', {
+  id:          uuid('id').primaryKey().defaultRandom(),
+  moduleId:    uuid('module_id').notNull().references(() => kibiModules.id, { onDelete: 'cascade' }),
+  key:         varchar('key', { length: 100 }).notNull(),         // camelCase, e.g. 'taxNumber'
+  columnName:  varchar('column_name', { length: 100 }),           // real column if system, null if custom (lives in custom_fields JSONB)
+  label:       varchar('label', { length: 255 }).notNull(),
+  type:        kibiFieldTypeEnum('type').notNull().default('text'),
+  isSystem:    boolean('is_system').notNull().default(false),
+  isRequired:  boolean('is_required').notNull().default(false),
+  config:      jsonb('config').$type<Record<string, unknown>>().default({}),  // select options, relation target, ai prompt config
+  position:    integer('position').notNull().default(0),
+  createdAt:   timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({
+  moduleKeyIdx: uniqueIndex('kibi_fields_module_key_idx').on(t.moduleId, t.key),
+}))
+
+export const kibiModulesRelations = relations(kibiModules, ({ one, many }) => ({
+  entity: one(kibiEntities, { fields: [kibiModules.entityId], references: [kibiEntities.id] }),
+  fields: many(kibiFields),
+}))
+
+export const kibiFieldsRelations = relations(kibiFields, ({ one }) => ({
+  module: one(kibiModules, { fields: [kibiFields.moduleId], references: [kibiModules.id] }),
+}))
+
 export const kibiModelRoleEnum = pgEnum('kibi_model_role', [
   'conversation', 'db_search', 'qdrant_search', 'redis_search',
   'intent', 'support_intent', 'support_refine', 'support_resolver', 'support_answering',

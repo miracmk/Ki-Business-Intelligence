@@ -1623,3 +1623,19 @@ Plandaki **tüm fazlar** (`/root/.claude/plans/proje-vi-zyonu-ve-mi-mari-ancient
   komutu kapsamı `crm-native.ts` ile sınırlamıştı. Registry boş modüller için 4.3'teki fallback
   zaten statik COLUMN_MAP'e döner, bu yüzden eksik seed bir regresyon değil; genişletme istenirse
   aynı `MODULE_DEFS` desenine yeni modüller eklenir.
+
+### FAZ 4.2 — GIN Index custom_fields ✅ (2026-06-26)
+- `db/migrations/0024_custom_fields_gin_index.sql`: 5 tabloda (`crm_contacts`, `crm_companies`,
+  `crm_deals`, `erp_products`, `erp_staff` — `custom_fields JSONB` içeren tüm tablolar) GIN index.
+  Mevcut tenant'lar için `DO $$ ... FOR r IN SELECT entity_db_schema FROM kibi_entities ... EXECUTE
+  format(...) $$` döngü deseni kullanıldı (0018_support_tables.sql'deki desenin aynısı — bu repo'da
+  entity-schema backfill konvansiyonu budur, `applySchemaIncrement()` runtime/provisioning için ayrı
+  bir yardımcı, migration backfill'i için kullanılmıyor).
+- `db/entity-schema-template.sql`: aynı 5 `CREATE INDEX ... USING GIN (custom_fields)` satırı, her
+  tablonun mevcut index bloğunun yanına eklendi (yeni tenant'lar için).
+- **Bilinç dahilinde alınan karar:** Index isimleri (`idx_crm_contacts_custom_fields_gin` vb.)
+  KASITLI OLARAK şema-prefiks'siz — dosyadaki eski `":schema"_xxx_idx` deseni (bkz. §12) geçersiz
+  SQL üretiyor (quoted identifier + bitişik bare identifier, ayraçsız). Index adları zaten şemaya
+  özgü olduğu için prefiks gereksiz; yeni eklenen satırlar bu bug'ı miras almadı.
+- Doğrulandı: migration `entity_ki_business`'a 5/5 index'i yazdı; `EXPLAIN` ile (`enable_seqscan=off`)
+  `custom_fields @> '{...}'` sorgusunun `Bitmap Index Scan`'a düştüğü teyit edildi.

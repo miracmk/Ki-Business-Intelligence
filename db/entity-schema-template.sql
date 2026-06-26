@@ -88,6 +88,8 @@ CREATE INDEX ":schema"_crm_contacts_email_idx    ON ":schema".crm_contacts (emai
 CREATE INDEX ":schema"_crm_contacts_company_idx  ON ":schema".crm_contacts (company_id);
 CREATE INDEX ":schema"_crm_contacts_type_idx     ON ":schema".crm_contacts (contact_type);
 CREATE INDEX ":schema"_crm_contacts_source_idx   ON ":schema".crm_contacts (source_type, external_id);
+-- FAZ 4.2: not schema-prefixed on purpose (see KIBIPR.md §12 — avoids the ":schema"_xxx_idx naming bug above).
+CREATE INDEX idx_crm_contacts_custom_fields_gin ON ":schema".crm_contacts USING GIN (custom_fields);
 
 -- ─────────────────────────────────────────────────────────────────────────────
 CREATE TABLE ":schema".crm_companies (
@@ -142,6 +144,7 @@ CREATE TABLE ":schema".crm_companies (
 
 CREATE INDEX ":schema"_crm_companies_name_idx ON ":schema".crm_companies (name);
 CREATE INDEX ":schema"_crm_companies_type_idx ON ":schema".crm_companies (company_type);
+CREATE INDEX idx_crm_companies_custom_fields_gin ON ":schema".crm_companies USING GIN (custom_fields);
 
 -- ─────────────────────────────────────────────────────────────────────────────
 CREATE TABLE ":schema".crm_deals (
@@ -183,6 +186,7 @@ CREATE TABLE ":schema".crm_deals (
 CREATE INDEX ":schema"_crm_deals_stage_idx   ON ":schema".crm_deals (stage);
 CREATE INDEX ":schema"_crm_deals_contact_idx ON ":schema".crm_deals (contact_id);
 CREATE INDEX ":schema"_crm_deals_company_idx ON ":schema".crm_deals (company_id);
+CREATE INDEX idx_crm_deals_custom_fields_gin ON ":schema".crm_deals USING GIN (custom_fields);
 
 -- ─────────────────────────────────────────────────────────────────────────────
 CREATE TABLE ":schema".crm_activities (
@@ -288,6 +292,7 @@ CREATE UNIQUE INDEX ":schema"_erp_products_sku_idx     ON ":schema".erp_products
 CREATE INDEX        ":schema"_erp_products_barcode_idx ON ":schema".erp_products (barcode)  WHERE barcode IS NOT NULL;
 CREATE INDEX        ":schema"_erp_products_category_idx ON ":schema".erp_products (category);
 CREATE INDEX        ":schema"_erp_products_supplier_idx ON ":schema".erp_products (supplier_id);
+CREATE INDEX idx_erp_products_custom_fields_gin ON ":schema".erp_products USING GIN (custom_fields);
 
 -- ─────────────────────────────────────────────────────────────────────────────
 CREATE TABLE ":schema".erp_stock_movements (
@@ -538,6 +543,7 @@ CREATE TABLE ":schema".erp_staff (
 CREATE UNIQUE INDEX ":schema"_erp_staff_employee_number_idx ON ":schema".erp_staff (employee_number) WHERE employee_number IS NOT NULL;
 CREATE INDEX        ":schema"_erp_staff_department_idx      ON ":schema".erp_staff (department);
 CREATE INDEX        ":schema"_erp_staff_status_idx          ON ":schema".erp_staff (status);
+CREATE INDEX idx_erp_staff_custom_fields_gin ON ":schema".erp_staff USING GIN (custom_fields);
 
 -- ─────────────────────────────────────────────────────────────────────────────
 CREATE TABLE ":schema".erp_staff_attendance (

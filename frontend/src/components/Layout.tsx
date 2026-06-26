@@ -6,7 +6,7 @@ import {
   Sun, Moon, Menu, X, ChevronDown, ChevronRight,
   MessageSquare, Bot, Settings2, BarChart3, Database,
   Bell, CheckCheck, Wallet, Users, Boxes, Headset, Truck, ShoppingCart, Megaphone, CalendarDays, IdCard,
-  GitBranch, Code2,
+  GitBranch, Code2, ListPlus, FileUp, Sparkles,
 } from 'lucide-react'
 import api from '../lib/api'
 
@@ -253,6 +253,30 @@ export default function Layout() {
           style={linkStyle(activeLink('/app/functions'))}
           onMouseEnter={hoverIn} onMouseLeave={e => hoverOut(e, activeLink('/app/functions'))}>
           <Code2 size={17} /><span className="text-sm font-medium">Fonksiyonlar</span>
+        </Link>
+
+        {/* Alan Yöneticisi — FAZ 8.3: modüllere özel alan ekleme sihirbazı */}
+        <Link to="/app/field-manager"
+          className="flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all duration-200"
+          style={linkStyle(activeLink('/app/field-manager'))}
+          onMouseEnter={hoverIn} onMouseLeave={e => hoverOut(e, activeLink('/app/field-manager'))}>
+          <ListPlus size={17} /><span className="text-sm font-medium">Alan Yöneticisi</span>
+        </Link>
+
+        {/* İçe Aktarma — FAZ 8.2: CSV/Excel kişi import + dedup */}
+        <Link to="/app/import"
+          className="flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all duration-200"
+          style={linkStyle(activeLink('/app/import'))}
+          onMouseEnter={hoverIn} onMouseLeave={e => hoverOut(e, activeLink('/app/import'))}>
+          <FileUp size={17} /><span className="text-sm font-medium">İçe Aktarma</span>
+        </Link>
+
+        {/* Sektörel Şablonlar — FAZ 8.1: industry template apply */}
+        <Link to="/app/onboarding"
+          className="flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all duration-200"
+          style={linkStyle(activeLink('/app/onboarding'))}
+          onMouseEnter={hoverIn} onMouseLeave={e => hoverOut(e, activeLink('/app/onboarding'))}>
+          <Sparkles size={17} /><span className="text-sm font-medium">Sektörel Şablonlar</span>
         </Link>
 
         {/* CRM Bağlantıları expandable (eski "CRM" — harici connector senkron/izleme, route değişmedi) */}

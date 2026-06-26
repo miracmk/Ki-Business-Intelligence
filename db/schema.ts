@@ -460,6 +460,18 @@ export const functionExecutionsRelations = relations(functionExecutions, ({ one 
   function: one(functionDefinitions, { fields: [functionExecutions.functionId], references: [functionDefinitions.id] }),
 }))
 
+// FAZ 8.1: industry templates — a JSON package of custom fields/blueprints/rules applied on
+// top of the already-seeded Base modules (FAZ 4.1) when a tenant picks an industry during
+// onboarding. Platform-wide catalog (no entity_id) — not entity-scoped data.
+export const industryTemplates = pgTable('industry_templates', {
+  id:         uuid('id').primaryKey().defaultRandom(),
+  key:        varchar('key', { length: 100 }).notNull().unique(),
+  label:      varchar('label', { length: 255 }).notNull(),
+  // { fields: [{moduleKey, key, label, type, config}], blueprints: [...], rules: [...] }
+  packageJson: jsonb('package_json').$type<unknown>().notNull().default({}),
+  createdAt:  timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+})
+
 export const kibiModelRoleEnum = pgEnum('kibi_model_role', [
   'conversation', 'db_search', 'qdrant_search', 'redis_search',
   'intent', 'support_intent', 'support_refine', 'support_resolver', 'support_answering',

@@ -40,7 +40,13 @@ const contactSchema = z.object({
   tags: z.array(z.string()).optional(),
   customFields: z.record(z.unknown()).optional(),
   doNotContact: z.boolean().optional(),
-})
+}).passthrough()
+// .passthrough(): registry-driven custom fields (FAZ 4.3/8.1) are dynamic keys this static
+// schema can't know about ahead of time. Without it Zod silently drops them before
+// buildInsert/buildUpdate ever see them — found live while testing an applied industry
+// template's custom field (contractValue never reached custom_fields). buildInsert/buildUpdate
+// remain the safety boundary: only registry-known keys (columnMap or customFieldKeys) are
+// ever used, so passthrough here doesn't widen what can reach SQL.
 
 const companySchema = z.object({
   name: z.string().min(1),
@@ -69,7 +75,7 @@ const companySchema = z.object({
   parentCompanyId: z.string().uuid().optional().nullable(),
   tags: z.array(z.string()).optional(),
   customFields: z.record(z.unknown()).optional(),
-})
+}).passthrough() // see contactSchema's .passthrough() comment above
 
 const dealSchema = z.object({
   title: z.string().min(1),
@@ -89,7 +95,7 @@ const dealSchema = z.object({
   assignedToUserId: z.string().uuid().optional().nullable(),
   tags: z.array(z.string()).optional(),
   customFields: z.record(z.unknown()).optional(),
-})
+}).passthrough() // see contactSchema's .passthrough() comment above
 
 const activitySchema = z.object({
   type: z.enum(['call', 'email', 'meeting', 'task', 'note', 'demo']),

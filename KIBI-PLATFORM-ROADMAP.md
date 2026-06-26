@@ -273,8 +273,12 @@ function bir rule action'ından tetiklenip `ctx.records.update` ile kayıt günc
 
 ---
 
-## FAZ 8 — No-Code Onboarding + Sektörel Şablonlar
+## FAZ 8 — No-Code Onboarding + Sektörel Şablonlar ✅ TAMAMLANDI (2026-06-26)
 > İlham: Zoho Kiosk Studio, HubSpot dedup.
+>
+> Detaylı uygulama kaydı: KIBIPR.md → "FAZ 8 — No-Code Onboarding + Sektörel Şablonlar"
+> bölümü. **Sıradaki: FAZ 9** (Granüler Güvenlik — owner_id + scope, tüm fazlarla paralel
+> olması gerekiyordu, ayrı bir final pass olarak uygulanıyor; bkz. KIBIPR.md notu).
 
 ### 8.1 — Sektörel Seed
 - `industry_templates` (merkezi DB): sektör → `{ modules[], fields[], blueprints[], rules[] }` JSON paketi.

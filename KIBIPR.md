@@ -1989,3 +1989,77 @@ denemeleri başarısız olarak doğrulandı).
 - Manuel test-run "test_function" job'ları normal action queue'yu paylaşıyor — yüksek
   hacimli rule-tetiklemeli `run_function` trafiği varken test-run gecikebilir (ayrı kuyruk
   YOK, kapsam dışı bırakıldı).
+
+---
+
+## FAZ 8 — No-Code Onboarding + Sektörel Şablonlar ✅ TAMAMLANDI (2026-06-26)
+
+### FAZ 8.1 — Sektörel Seed
+- `industry_templates` (merkezi DB, platform-wide katalog — entity_id YOK):
+  `db/migrations/0028_industry_templates.sql` (psql exec). `src/lib/onboarding/
+  seed-industry-templates.ts` 3 şablonu yazıyor (idempotent, `key` üzerinde upsert):
+  **e-ticaret** (preferredChannel/marketplaceSource custom field + yüksek-değer kuralı),
+  **danışmanlık/ajans** (projectType/industry custom field + 2 blueprint transition),
+  **B2B hizmet** (contractValue/renewalDate custom field + bir workflow rule).
+- `src/api/routes/onboarding.ts`: `GET /templates` (liste) + `POST /templates/:key/apply` —
+  paketin `fields[]`'ini var olan `kibi_modules` üzerine `kibi_fields` (is_system=false,
+  column_name=null) olarak yazar, `blueprints[]`'i `blueprint_transitions`'a,
+  `rules[]`'i `workflow_rules`'a. Modül entity'de yoksa o alan setini sessizce atlar
+  (`skippedModules`'te raporlanır, hata vermez).
+- **Bulunan ve düzeltilen GERÇEK bug (FAZ 4.3'ün customFields clobber'ının bir varyantı):**
+  industry template'in eklediği custom field'lar (`contractValue` vb.) normal CRM CRUD
+  route'larından (`POST /crm-native/companies` gibi) gönderildiğinde Zod şemaları (statik
+  `companySchema`/`contactSchema`/`dealSchema`) bunları SESSİZCE DROP ediyordu — şema bu
+  dinamik anahtarları hiç bilmiyor. Düzeltme: üç şemaya `.passthrough()` eklendi (`crm_
+  activities` hariç — custom_fields kolonu yok). **Güvenlik notu:** passthrough güvenlik
+  sınırını GENİŞLETMEZ — `buildInsert`/`buildUpdate` hâlâ yalnızca registry'nin bildiği
+  anahtarları (columnMap veya customFieldKeys) SQL'e yazıyor, passthrough sadece Zod'un
+  bu anahtarları erkenden silmesini önlüyor.
+- **Doğrulama (gerçek HTTP):** `b2b_service` şablonu uygulandı → `GET /metadata/crm_companies/
+  fields` yeni custom field'ları gösterdi; normal `POST /crm-native/companies` ile
+  `contractValue` gönderildi → `customFields.contractValue` doğru kaydedildi (passthrough
+  fix'i doğrulandı); yeni bir deal oluşturma şablonun rule'ünü tetikledi →
+  `leadSource='b2b-template'` otomatik set edildi. Test verisi temizlendi.
+
+### FAZ 8.2 — Import + Dedup Motoru
+- `src/engine/import/dedup.ts`: CSV (`papaparse`) / XLSX (`exceljs`) — bu repodaki
+  `file-extractor.ts` ile aynı kütüphaneler. Dedup: e-posta birebir eşleşme önce; yoksa
+  ad+firma üzerinde Dice coefficient (karakter bigram'ları, eşik 0.6, ad %70/firma %30
+  ağırlık) — yeni bağımlılık eklemeden basit fuzzy matching.
+  **Kapsam sınırı:** CSV/XLSX başlıkları camelCase field key'leriyle (firstName, lastName,
+  email, phone, companyName) AYNEN eşleşmeli — esnek başlık eşleştirme UI'ı yok.
+- `src/api/routes/import.ts`: `/contacts/preview` (multipart upload → dedup sonuçları) +
+  `/contacts/commit` (kullanıcı kararlarını uygular). **Commit, FAZ 7.2'nin
+  `records-bridge.ts`'ini (recordsCreate/recordsUpdate) yeniden kullanıyor** — registry-güvenli
+  kolon çözümleme üçüncü kez tekrar yazılmadı.
+- **Doğrulama (gerçek HTTP, gerçek dosya):** 3 satırlık CSV (1 birebir e-posta eşleşmesi,
+  1 fuzzy ad+firma eşleşmesi farklı e-postayla, 1 tamamen yeni) → dedup doğru sınıflandırdı
+  (`exact:1, fuzzy:1, new:1`, fuzzy skor 0.607). Commit: skip+merge+create üçü de doğru
+  uygulandı (merge'de telefon eklendi, create'de yeni kayıt oluştu). Test verisi temizlendi.
+
+### FAZ 8.3 — Alan Ekleme Sihirbazı (Liste/Form — Drag-Drop Canvas DEĞİL)
+- `src/api/routes/metadata.ts`'e yazma endpoint'leri eklendi: `POST .../fields` (custom alan
+  ekle, anahtar çakışması 409, camelCase regex doğrulaması), `DELETE .../fields/:id`
+  (**sistem alanları silinemez — 403**, gerçek HTTP ile doğrulandı), `POST .../fields/reorder`
+  (bulk position güncelleme). GET endpoint'i artık `id` alanını da döndürüyor (önceden
+  yoktu — write endpoint'leri eklenince fark edildi, düzeltildi).
+  Her yazma `invalidateModuleSchemaCache()` çağırıyor (FAZ 4.3'ün resolver cache'i bayatlamasın).
+  **Bilinçli kapsam kararı (FAZ 6.3 ile aynı çizgide):** `frontend/src/pages/FieldManager.tsx`
+  yukarı/aşağı oklarla sıralama yapan bir liste — React Flow/drag-drop canvas YOK.
+  Sadece FAZ 4.1'in registry seed'inin kapsadığı 4 CRM modülü (contacts/companies/deals/
+  activities) seçilebilir — diğer native modüller registry'de yok.
+- **Doğrulama (gerçek HTTP + gerçek tarayıcı):** özel alan eklendi (`vipStatus`), `id` ile
+  geri döndüğü doğrulandı; silindi; sistem alanı (`firstName`) silinmeye çalışıldı → 403.
+  Playwright'ta sayfa render + alan ekleme, konsol hatası YOK.
+
+**Faz 8 DoD karşılandı:** Yeni tenant sektör seçip (onboarding/apply), CSV import edip
+(dedup'lu), UI'dan alan ekleyerek operasyonel olabiliyor — üç adım da gerçek HTTP
+istekleriyle ayrı ayrı doğrulandı (uçtan uca "5 dakika" akışının tek bir UI sihirbazında
+zincirlenmesi kapsam dışı — üç ayrı sayfa/endpoint olarak var, birleşik onboarding wizard'ı
+gelecek bir iyileştirme).
+
+### FAZ 8'den Taşınan Yeni Kapsam Notları (deferred listesine ek)
+- Üç onboarding adımı (şablon seç, import, alan ekle) ayrı sayfalarda — tek akışlı bir
+  "onboarding wizard" YOK.
+- Import dedup'ı yalnızca `crm_contacts`'a özel; companies/deals import'u YOK.
+- Alan Yöneticisi yalnızca FAZ 4.1'in seed ettiği 4 CRM modülünü destekliyor.

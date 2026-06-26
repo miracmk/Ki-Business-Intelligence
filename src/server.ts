@@ -23,6 +23,8 @@ import { crmNativeRoutes }  from './api/routes/crm-native.js'
 import { metadataRoutes }   from './api/routes/metadata.js'
 import { blueprintRoutes }  from './api/routes/blueprint.js'
 import { functionRoutes }   from './api/routes/functions.js'
+import { onboardingRoutes } from './api/routes/onboarding.js'
+import { importRoutes }     from './api/routes/import.js'
 import { erpNativeRoutes }  from './api/routes/erp-native.js'
 import { customerServiceRoutes } from './api/routes/customer-service.js'
 import { fulfillmentNativeRoutes } from './api/routes/fulfillment-native.js'
@@ -114,6 +116,8 @@ await app.register(async (api) => {
   await api.register(metadataRoutes,   { prefix: '/metadata' })
   await api.register(blueprintRoutes,  { prefix: '/blueprint' })
   await api.register(functionRoutes,   { prefix: '/functions' })
+  await api.register(onboardingRoutes, { prefix: '/onboarding' })
+  await api.register(importRoutes,     { prefix: '/import' })
   await api.register(erpNativeRoutes,  { prefix: '/erp-native' })
   await api.register(customerServiceRoutes, { prefix: '/customer-service' })
   await api.register(fulfillmentNativeRoutes, { prefix: '/fulfillment-native' })

@@ -2079,3 +2079,99 @@ doğrulandı (uçtan uca "5 dakika" akışının tek bir UI sihirbazında zincir
   "onboarding wizard" (örn. yeni tenant kaydından sonra otomatik yönlendirme) YOK.
 - Import dedup'ı yalnızca `crm_contacts`'a özel; companies/deals import'u YOK.
 - Alan Yöneticisi yalnızca FAZ 4.1'in seed ettiği 4 CRM modülünü destekliyor.
+
+---
+
+## FAZ 9 — Granüler Güvenlik ✅ TAMAMLANDI (2026-06-26)
+
+> Roadmap "TÜM FAZLARLA PARALEL" diyor; pratikte tek bir final pass olarak uygulandı (4-8
+> bittikten sonra) — paralel uygulamanın faydası (her faz kendi tablosuna owner_id eklerken
+> ilerlemek) bu oturumda fazlar sırayla bitirildiği için gerçekleşmedi, ama sonuç aynı:
+> tüm CRM tabloları artık owner_id/scope kapsamında.
+
+### FAZ 9.1 — `owner_id` Kolonu
+- `db/entity-schema-template.sql`: `crm_contacts`/`crm_companies`/`crm_deals`'a `owner_id UUID`
+  eklendi (yeni tenant'lar için). `crm_activities` **zaten** kullanılmayan bir
+  `created_by_user_id` kolonuna sahipti — yeni bir `owner_id` eklemek yerine bu kolon scope
+  kolonu olarak yeniden kullanıldı (gereksiz kolon çoğaltması yapılmadı).
+- `db/migrations/0029_owner_id.sql` (psql exec, FAZ 4.1 konvansiyonu, DO-loop ile mevcut
+  tenant'lara backfill): 3 tabloya `ALTER TABLE ... ADD COLUMN IF NOT EXISTS owner_id`,
+  4 tabloya GIN olmayan düz btree index. **Mevcut satırlar için backfill:**
+  `owner_id = assigned_to_user_id WHERE owner_id IS NULL` — scope filtrelemesi devreye
+  girdiğinde var olan kayıtların, zaten atanmış oldukları kullanıcının elinden aniden
+  kaybolmaması için (FK constraint yok, sadece UUID tipinde — gerçek `users.id` validasyonu
+  uygulama katmanında).
+
+### FAZ 9.2 — Dinamik WHERE Enjeksiyonu
+- `src/lib/security/scope.ts`: `applyScope(conditions, params, user, ownerColumn='owner_id')`
+  (liste/GET sorgularına koşul ekler), `injectOwnerId(cols, placeholders, params, userSub,
+  ownerColumn)` (INSERT'e owner_id ekler), `scopeCondition(params, user, ownerColumn)`
+  (tekil id WHERE'lerine — PUT/DELETE — ek koşul döner).
+  **Rol modeli:** `admin`/`supervisor`/`entity_main`/`entity_supervisor` kısıtsız (hepsini
+  görür); diğer TÜM roller (örn. `employee`) sadece kendi `owner_id`'sine eşit kayıtları
+  görür. **Bilinçli kapsam daraltması:** roadmap'in "self OR team OR admin" üç katmanlı
+  modeli YOK — bu veri modelinde manager/team kavramı (kibi_entity_users'ta manager_id
+  yok) hiç mevcut değil, bu yüzden iki katmanlı (self / herkes) bir scope uygulandı.
+  **Güvenlik tasarımı, bilerek fail-closed:** `user.sub` geçerli bir UUID değilse (gerçek
+  JWT'lerde olmaması gerekir, ama savunma amaçlı) filtre `1=0` ekler (HİÇBİR şey göstermez)
+  — sessizce filtreyi atlayıp her şeyi göstermek YERİNE. Bu, scope mekanizmasının asıl işini
+  sessizce devre dışı bırakabilecek tek nokta olduğu için özellikle önemli.
+- **Kablolama (`crm-native.ts`, 4 modül × GET/POST/PUT/DELETE = 16 call site):** her GET
+  (liste) `applyScope` çağırıyor; her POST `injectOwnerId` ile owner_id/created_by_user_id'yi
+  İSTEMCİDEN ASLA almadan (her zaman `req.user.sub`'tan) set ediyor; her PUT/DELETE
+  `scopeCondition`'ı WHERE'e ekliyor — **id'yi bilen ama sahibi olmayan bir kullanıcı bile
+  kaydı düzenleyemez/silemez** (deals'ın blueprint-gating'li PUT'unda `prev` satırının
+  SELECT'i de scope'lu — sahibi olmayan kullanıcı geçiş kuralını değerlendirecek state'i bile
+  okuyamıyor, 404 alıyor).
+- **Bilinçli kapsam dışı bırakma (roadmap'in "ctx.records.* de bu scope'a tabi olmalı" notu):**
+  `src/engine/functions/records-bridge.ts` (FAZ 7.2, custom function'ların `ctx.records.*`'ı)
+  ve `src/api/routes/import.ts`'in commit'i (FAZ 8.2) scope'a TABİ DEĞİL — kasıtlı. Sebep:
+  rule-tetiklemeli fonksiyon çalıştırmalarında (workflow_rules → queue → worker) hiçbir
+  "işlemi yapan kullanıcı" kavramı yok (rule'u kuran admin ile her tetiklenmede aktif olan
+  bir insan kullanıcı FARKLI kavramlar) — `update_field` handler'ı (FAZ 5.5) da aynı sebeple
+  zaten scope'suz bir sistem eylemi. Bulk CSV import da benzer şekilde toplu/idari bir işlem.
+  Bu, FAZ 5.5'ten beri var olan tutarlı bir "insan CRUD'u kullanıcı-scope'lu, sistem/toplu
+  eylemler entity-genelinde" ayrımı — yeni bir yetki açığı DEĞİL.
+- **Doğrulama (gerçek HTTP, 3 farklı rol/kullanıcı ile):**
+  1. `userA` (role=`employee`) bir contact/company/deal/activity oluşturdu →
+     `owner_id`/`created_by_user_id` gerçekten `userA`'nın `sub`'ına set edildi (DB'den
+     doğrulandı, istemciden gönderilmedi).
+  2. `userA` listesinde 1 kayıt görüyor; `userB` (role=`employee`, farklı sub) AYNI
+     entity'de 0 kayıt görüyor (4 modülün hepsinde, ayrı ayrı test edildi).
+  3. `admin` (role=`entity_main`) TÜM kayıtları görüyor (scope yok).
+  4. `userB`, `userA`'nın deal/contact id'sini bilerek PUT/DELETE denedi: contact/company'de
+     `{"ok":true}` ama DB'de DEĞİŞMEDİ (sessiz no-op, var olduğunu bile sızdırmıyor); deal'de
+     beforeSave'in `prev` SELECT'i scope'lu olduğu için 404 "Anlaşma bulunamadı" döndü
+     (deals'ın blueprint-gating akışı farklı hata şekli üretiyor, ikisi de doğru sonuca
+     ulaşıyor — kayıt değişmiyor).
+  5. `userA` kendi deal'ini normal şekilde güncelleyebildi (regresyon yok).
+  Test verisi temizlendi. `security-test.ts` (FAZ 7) tekrar çalıştırıldı — 7/7 geçti
+  (FAZ 9'un scope değişiklikleri isolate güvenliğini etkilemedi, beklenen).
+
+**Faz 9 DoD karşılandı:** Satış temsilcisi (restricted role) yalnızca kendi kayıtlarını
+görüyor; admin/entity_main hepsini görüyor — gerçek HTTP istekleriyle 3 farklı kimlikle
+doğrulandı. ("Ekibinin" kayıtlarını görme kısmı, team/manager kavramı bu veri modelinde
+mevcut olmadığı için kapsam dışı — yukarıda gerekçelendirildi.)
+
+### FAZ 9'dan Taşınan Yeni Kapsam Notları (deferred listesine ek)
+- Team/manager hiyerarşisi YOK — scope yalnızca iki katmanlı (self / herkes).
+- `ctx.records.*` (custom functions) ve CSV import commit'i scope'a tabi DEĞİL (kasıtlı,
+  yukarıda gerekçelendirildi) — bu iki yol entity-genelinde çalışıyor.
+- ERP/Muhasebe/add-on tabloları `owner_id` almadı — yalnızca 4 CRM tablosu (FAZ 9'un DoD
+  örneği "satış temsilcisi"yle eşleşen kapsam).
+- `assigned_to_user_id`'den `owner_id`'ye backfill tek seferlik — ileride `assigned_to_user_id`
+  değişse owner_id otomatik güncellenmez (ikisi artık bağımsız alanlar, kasıtlı: owner_id
+  "kim oluşturdu", assigned_to_user_id "kim sorumlu" — farklı semantikler).
+
+---
+
+## Roadmap Durumu — TÜM FAZLAR (4-9) TAMAMLANDI (2026-06-26)
+
+FAZ 4 → 5 → 6 → 7 → 8 sıralı, FAZ 9 final pass olarak tamamlandı. Tek mimari override:
+FAZ 7'nin node:vm → isolated-vm geçişi (kullanıcı onayıyla, güvenlik incelemesi sonrası).
+Tüm fazlarda bulunan gerçek bug'lar (FAZ 4.3 customFields clobber, FAZ 8.1 Zod passthrough
+eksikliği, FAZ 7.1 ast-guard top-level-await parse hatası, FAZ 7.5 webhook GET+body hatası,
+FAZ 7.4 requiredIf/showIf default karışıklığı) canlı testlerle bulunup aynı oturumda
+düzeltildi — hiçbiri "bilinen sorun" olarak bırakılmadı. Kapsam daraltmaları (yukarıdaki
+her faz bölümünün "deferred" notları) bilinçli ve gerekçeli; KIBI-PLATFORM-ROADMAP.md'nin
+ilgili faz başlıklarında da işaretli.

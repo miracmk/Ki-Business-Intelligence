@@ -299,8 +299,12 @@ function bir rule action'ından tetiklenip `ctx.records.update` ile kayıt günc
 
 ---
 
-## FAZ 9 — Granüler Güvenlik (TÜM FAZLARLA PARALEL — kesinti yok)
+## FAZ 9 — Granüler Güvenlik (TÜM FAZLARLA PARALEL — kesinti yok) ✅ TAMAMLANDI (2026-06-26)
 > İlham: Salesforce SOQL-respecting actions, record-level security.
+>
+> Detaylı uygulama kaydı: KIBIPR.md → "FAZ 9 — Granüler Güvenlik" bölümü. Pratikte paralel
+> değil, FAZ 4-8 bittikten sonra tek bir final pass olarak uygulandı (sonuç aynı: 4 CRM
+> tablosu owner_id/scope kapsamında). **Tüm roadmap (FAZ 4-9) tamamlandı.**
 
 ### 9.1 — `owner_id` Ekle
 - `entity-schema-template.sql` + tüm mevcut entity şemalarına migration: ana tablolara
@@ -328,6 +332,15 @@ FAZ 9 (Security) ────── her fazla paralel, her tabloya owner_id + sc
 
 **Kesin sıra:** 4 → 5 → 6 → 7 → 8. Faz 9, Faz 4'le başlar ve her fazda ilgili tablolara
 `owner_id` + scope eklenerek ilerler.
+
+## ✅ Durum (2026-06-26): TÜM FAZLAR (4-9) TAMAMLANDI
+
+Detaylı uygulama kayıtları, gerçek HTTP/tarayıcı doğrulamaları, bulunan+düzeltilen bug'lar
+ve bilinçli kapsam daraltmaları için **KIBIPR.md**'nin ilgili "FAZ N" bölümlerine bakın.
+Tek mimari override: FAZ 7'de roadmap'in "node:vm + AST denetimi" tasarımı bir güvenlik
+incelemesi sonrası kullanıcı onayıyla `isolated-vm`'e değiştirildi (gerekçe: node:vm + AST
+denylist, `ctx` bridge'inin döndürdüğü host-realm objeleri üzerinden gerçek bir kaçış
+yoluna sahip — bkz. KIBIPR.md FAZ 7 başlığındaki uyarı kutusu).
 
 ## Başlangıç Komutu (Claude Code'a ilk talimat)
 > "FAZ 4.1'den başla. `db/schema.ts`'e `kibi_modules` + `kibi_fields` tablolarını ekle,

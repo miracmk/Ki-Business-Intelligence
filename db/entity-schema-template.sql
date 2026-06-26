@@ -70,6 +70,7 @@ CREATE TABLE ":schema".crm_contacts (
   -- Relations
   company_id          UUID,        -- references crm_companies.id
   assigned_to_user_id UUID,        -- references public.users.id
+  owner_id            UUID,        -- FAZ 9.1: record creator, references public.users.id — record-level security (src/lib/security/scope.ts)
 
   -- Metadata
   tags                JSONB        DEFAULT '[]',
@@ -90,6 +91,7 @@ CREATE INDEX ":schema"_crm_contacts_type_idx     ON ":schema".crm_contacts (cont
 CREATE INDEX ":schema"_crm_contacts_source_idx   ON ":schema".crm_contacts (source_type, external_id);
 -- FAZ 4.2: not schema-prefixed on purpose (see KIBIPR.md §12 — avoids the ":schema"_xxx_idx naming bug above).
 CREATE INDEX idx_crm_contacts_custom_fields_gin ON ":schema".crm_contacts USING GIN (custom_fields);
+CREATE INDEX idx_crm_contacts_owner_id ON ":schema".crm_contacts (owner_id);
 
 -- ─────────────────────────────────────────────────────────────────────────────
 CREATE TABLE ":schema".crm_companies (
@@ -132,6 +134,7 @@ CREATE TABLE ":schema".crm_companies (
   account_score       SMALLINT     DEFAULT 0,
 
   assigned_to_user_id UUID,
+  owner_id            UUID,        -- FAZ 9.1: record creator — record-level security (src/lib/security/scope.ts)
   parent_company_id   UUID,        -- holding/subsidiary
 
   tags                JSONB        DEFAULT '[]',
@@ -145,6 +148,7 @@ CREATE TABLE ":schema".crm_companies (
 CREATE INDEX ":schema"_crm_companies_name_idx ON ":schema".crm_companies (name);
 CREATE INDEX ":schema"_crm_companies_type_idx ON ":schema".crm_companies (company_type);
 CREATE INDEX idx_crm_companies_custom_fields_gin ON ":schema".crm_companies USING GIN (custom_fields);
+CREATE INDEX idx_crm_companies_owner_id ON ":schema".crm_companies (owner_id);
 
 -- ─────────────────────────────────────────────────────────────────────────────
 CREATE TABLE ":schema".crm_deals (
@@ -174,6 +178,7 @@ CREATE TABLE ":schema".crm_deals (
   won_reason          TEXT,
 
   assigned_to_user_id UUID,
+  owner_id            UUID,        -- FAZ 9.1: record creator — record-level security (src/lib/security/scope.ts)
   tags                JSONB        DEFAULT '[]',
   custom_fields       JSONB        DEFAULT '{}',
 
@@ -187,6 +192,7 @@ CREATE INDEX ":schema"_crm_deals_stage_idx   ON ":schema".crm_deals (stage);
 CREATE INDEX ":schema"_crm_deals_contact_idx ON ":schema".crm_deals (contact_id);
 CREATE INDEX ":schema"_crm_deals_company_idx ON ":schema".crm_deals (company_id);
 CREATE INDEX idx_crm_deals_custom_fields_gin ON ":schema".crm_deals USING GIN (custom_fields);
+CREATE INDEX idx_crm_deals_owner_id ON ":schema".crm_deals (owner_id);
 
 -- ─────────────────────────────────────────────────────────────────────────────
 CREATE TABLE ":schema".crm_activities (
@@ -222,6 +228,7 @@ CREATE TABLE ":schema".crm_activities (
 CREATE INDEX ":schema"_crm_activities_contact_idx ON ":schema".crm_activities (contact_id);
 CREATE INDEX ":schema"_crm_activities_deal_idx    ON ":schema".crm_activities (deal_id);
 CREATE INDEX ":schema"_crm_activities_due_idx     ON ":schema".crm_activities (due_date);
+CREATE INDEX idx_crm_activities_created_by_user_id ON ":schema".crm_activities (created_by_user_id);
 
 -- ═══════════════════════════════════════════════════════════════════════════════
 -- ERP MODULE

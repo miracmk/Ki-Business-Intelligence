@@ -10,6 +10,7 @@ import { blueprintApprovals } from '../../../db/schema.js'
 import { queryEntitySchema } from '../../lib/entity-provisioner.js'
 import { getModuleSchema, type ModuleSchema } from '../../lib/metadata/resolver.js'
 import { runHooks, runBeforeSaveHooks } from '../../lib/hooks/lifecycle.js'
+import { applyScope, injectOwnerId, scopeCondition } from '../../lib/security/scope.js'
 
 const contactSchema = z.object({
   firstName: z.string().optional(),
@@ -250,6 +251,7 @@ export const crmNativeRoutes: FastifyPluginAsync = async (app) => {
     const params: unknown[] = []
     if (type) { params.push(type); conditions.push(`contact_type = $${params.length}`) }
     if (search) { params.push(`%${search}%`); conditions.push(`(full_name ILIKE $${params.length} OR email ILIKE $${params.length} OR company_name ILIKE $${params.length})`) }
+    applyScope(conditions, params, req.user as any)
     const contacts = await queryEntitySchema(ctx.schema, `
       SELECT ${selectCols('crm_contacts', ['created_at AS "createdAt"', 'updated_at AS "updatedAt"'])}
       FROM crm_contacts WHERE ${conditions.join(' AND ')} ORDER BY created_at DESC
@@ -265,6 +267,7 @@ export const crmNativeRoutes: FastifyPluginAsync = async (app) => {
     const data = { ...body.data, fullName: body.data.fullName || [body.data.firstName, body.data.lastName].filter(Boolean).join(' ') || undefined }
     const moduleSchema = await getModuleSchema(ctx.entityId, 'crm_contacts')
     const { cols, placeholders, params } = buildInsert('crm_contacts', data, moduleSchema)
+    injectOwnerId(cols, placeholders, params, (req.user as any).sub)
     const rows = await queryEntitySchema(ctx.schema, `
       INSERT INTO crm_contacts (${cols.join(', ')}) VALUES (${placeholders.join(', ')})
       RETURNING ${selectCols('crm_contacts')}
@@ -283,7 +286,9 @@ export const crmNativeRoutes: FastifyPluginAsync = async (app) => {
     const { sets, params } = buildUpdate('crm_contacts', body.data, moduleSchema)
     if (sets.length === 0) return { ok: true }
     params.push(id)
-    await queryEntitySchema(ctx.schema, `UPDATE crm_contacts SET ${sets.join(', ')}, updated_at = NOW() WHERE id = $${params.length}`, params)
+    const idPlaceholder = params.length
+    const scope = scopeCondition(params, req.user as any)
+    await queryEntitySchema(ctx.schema, `UPDATE crm_contacts SET ${sets.join(', ')}, updated_at = NOW() WHERE id = $${idPlaceholder}${scope}`, params)
     const [updated] = await queryEntitySchema(ctx.schema, `SELECT ${selectCols('crm_contacts')} FROM crm_contacts WHERE id = $1`, [id])
     if (updated) await runHooks('afterSave', { entityId: ctx.entityId, schema: ctx.schema, moduleKey: 'crm_contacts', table: 'crm_contacts', trigger: 'on_update', record: updated })
     return { ok: true }
@@ -293,8 +298,10 @@ export const crmNativeRoutes: FastifyPluginAsync = async (app) => {
     const ctx = await resolveEntityContext((req.user as any).tenantId)
     if (!ctx) return reply.status(404).send({ error: 'Entity şeması hazır değil' })
     const { id } = req.params as { id: string }
+    const params: unknown[] = [id]
+    const scope = scopeCondition(params, req.user as any)
     // Soft delete — consistent with deleted_at column + GDPR-minded entity-schema design
-    await queryEntitySchema(ctx.schema, `UPDATE crm_contacts SET deleted_at = NOW() WHERE id = $1`, [id])
+    await queryEntitySchema(ctx.schema, `UPDATE crm_contacts SET deleted_at = NOW() WHERE id = $1${scope}`, params)
     return { ok: true }
   })
 
@@ -306,6 +313,7 @@ export const crmNativeRoutes: FastifyPluginAsync = async (app) => {
     const conditions = ['deleted_at IS NULL']
     const params: unknown[] = []
     if (search) { params.push(`%${search}%`); conditions.push(`name ILIKE $${params.length}`) }
+    applyScope(conditions, params, req.user as any)
     const companies = await queryEntitySchema(ctx.schema, `
       SELECT ${selectCols('crm_companies', ['created_at AS "createdAt"', 'updated_at AS "updatedAt"'])}
       FROM crm_companies WHERE ${conditions.join(' AND ')} ORDER BY name ASC
@@ -320,6 +328,7 @@ export const crmNativeRoutes: FastifyPluginAsync = async (app) => {
     if (!body.success) return reply.status(400).send({ error: body.error.flatten() })
     const moduleSchema = await getModuleSchema(ctx.entityId, 'crm_companies')
     const { cols, placeholders, params } = buildInsert('crm_companies', body.data, moduleSchema)
+    injectOwnerId(cols, placeholders, params, (req.user as any).sub)
     const rows = await queryEntitySchema(ctx.schema, `
       INSERT INTO crm_companies (${cols.join(', ')}) VALUES (${placeholders.join(', ')})
       RETURNING ${selectCols('crm_companies')}
@@ -338,7 +347,9 @@ export const crmNativeRoutes: FastifyPluginAsync = async (app) => {
     const { sets, params } = buildUpdate('crm_companies', body.data, moduleSchema)
     if (sets.length === 0) return { ok: true }
     params.push(id)
-    await queryEntitySchema(ctx.schema, `UPDATE crm_companies SET ${sets.join(', ')}, updated_at = NOW() WHERE id = $${params.length}`, params)
+    const idPlaceholder = params.length
+    const scope = scopeCondition(params, req.user as any)
+    await queryEntitySchema(ctx.schema, `UPDATE crm_companies SET ${sets.join(', ')}, updated_at = NOW() WHERE id = $${idPlaceholder}${scope}`, params)
     const [updated] = await queryEntitySchema(ctx.schema, `SELECT ${selectCols('crm_companies')} FROM crm_companies WHERE id = $1`, [id])
     if (updated) await runHooks('afterSave', { entityId: ctx.entityId, schema: ctx.schema, moduleKey: 'crm_companies', table: 'crm_companies', trigger: 'on_update', record: updated })
     return { ok: true }
@@ -348,7 +359,9 @@ export const crmNativeRoutes: FastifyPluginAsync = async (app) => {
     const ctx = await resolveEntityContext((req.user as any).tenantId)
     if (!ctx) return reply.status(404).send({ error: 'Entity şeması hazır değil' })
     const { id } = req.params as { id: string }
-    await queryEntitySchema(ctx.schema, `UPDATE crm_companies SET deleted_at = NOW() WHERE id = $1`, [id])
+    const params: unknown[] = [id]
+    const scope = scopeCondition(params, req.user as any)
+    await queryEntitySchema(ctx.schema, `UPDATE crm_companies SET deleted_at = NOW() WHERE id = $1${scope}`, params)
     return { ok: true }
   })
 
@@ -360,6 +373,7 @@ export const crmNativeRoutes: FastifyPluginAsync = async (app) => {
     const conditions = ['deleted_at IS NULL']
     const params: unknown[] = []
     if (stage) { params.push(stage); conditions.push(`stage = $${params.length}`) }
+    applyScope(conditions, params, req.user as any)
     const deals = await queryEntitySchema(ctx.schema, `
       SELECT ${selectCols('crm_deals', ['created_at AS "createdAt"', 'updated_at AS "updatedAt"', 'closed_at AS "closedAt"'])}
       FROM crm_deals WHERE ${conditions.join(' AND ')} ORDER BY created_at DESC
@@ -374,6 +388,7 @@ export const crmNativeRoutes: FastifyPluginAsync = async (app) => {
     if (!body.success) return reply.status(400).send({ error: body.error.flatten() })
     const moduleSchema = await getModuleSchema(ctx.entityId, 'crm_deals')
     const { cols, placeholders, params } = buildInsert('crm_deals', body.data, moduleSchema)
+    injectOwnerId(cols, placeholders, params, (req.user as any).sub)
     const rows = await queryEntitySchema(ctx.schema, `
       INSERT INTO crm_deals (${cols.join(', ')}) VALUES (${placeholders.join(', ')})
       RETURNING ${selectCols('crm_deals')}
@@ -395,7 +410,9 @@ export const crmNativeRoutes: FastifyPluginAsync = async (app) => {
     // FAZ 6.2: beforeSave gate. `record` here is the PROJECTED post-write state
     // ({...prev, ...patch}) — not just the patch — so conditions can reference fields the
     // caller didn't touch (e.g. dealValue when only `stage` is in the request body).
-    const [prev] = await queryEntitySchema(ctx.schema, `SELECT ${selectCols('crm_deals')} FROM crm_deals WHERE id = $1`, [id])
+    const prevParams: unknown[] = [id]
+    const prevScope = scopeCondition(prevParams, req.user as any)
+    const [prev] = await queryEntitySchema(ctx.schema, `SELECT ${selectCols('crm_deals')} FROM crm_deals WHERE id = $1${prevScope}`, prevParams)
     if (!prev) return reply.status(404).send({ error: 'Anlaşma bulunamadı' })
     const projected = { ...prev, ...body.data }
     const gate = await runBeforeSaveHooks({ entityId: ctx.entityId, schema: ctx.schema, moduleKey: 'crm_deals', table: 'crm_deals', trigger: 'on_update', record: projected, prev })
@@ -420,7 +437,9 @@ export const crmNativeRoutes: FastifyPluginAsync = async (app) => {
     const closingStages = ['won', 'lost']
     const extraSet = body.data.stage && closingStages.includes(body.data.stage) ? `, closed_at = NOW()` : ''
     params.push(id)
-    await queryEntitySchema(ctx.schema, `UPDATE crm_deals SET ${sets.join(', ')}, updated_at = NOW()${extraSet} WHERE id = $${params.length}`, params)
+    const dealIdPlaceholder = params.length
+    const updateScope = scopeCondition(params, req.user as any)
+    await queryEntitySchema(ctx.schema, `UPDATE crm_deals SET ${sets.join(', ')}, updated_at = NOW()${extraSet} WHERE id = $${dealIdPlaceholder}${updateScope}`, params)
     const [updated] = await queryEntitySchema(ctx.schema, `SELECT ${selectCols('crm_deals')} FROM crm_deals WHERE id = $1`, [id])
     if (updated) await runHooks('afterSave', { entityId: ctx.entityId, schema: ctx.schema, moduleKey: 'crm_deals', table: 'crm_deals', trigger: 'on_update', record: updated })
     return { ok: true }
@@ -430,7 +449,9 @@ export const crmNativeRoutes: FastifyPluginAsync = async (app) => {
     const ctx = await resolveEntityContext((req.user as any).tenantId)
     if (!ctx) return reply.status(404).send({ error: 'Entity şeması hazır değil' })
     const { id } = req.params as { id: string }
-    await queryEntitySchema(ctx.schema, `UPDATE crm_deals SET deleted_at = NOW() WHERE id = $1`, [id])
+    const params: unknown[] = [id]
+    const scope = scopeCondition(params, req.user as any)
+    await queryEntitySchema(ctx.schema, `UPDATE crm_deals SET deleted_at = NOW() WHERE id = $1${scope}`, params)
     return { ok: true }
   })
 
@@ -443,6 +464,7 @@ export const crmNativeRoutes: FastifyPluginAsync = async (app) => {
     const params: unknown[] = []
     if (dealId) { params.push(dealId); conditions.push(`deal_id = $${params.length}`) }
     if (contactId) { params.push(contactId); conditions.push(`contact_id = $${params.length}`) }
+    applyScope(conditions, params, req.user as any, 'created_by_user_id')
     const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''
     const activities = await queryEntitySchema(ctx.schema, `
       SELECT ${selectCols('crm_activities', ['created_at AS "createdAt"', 'updated_at AS "updatedAt"', 'completed_at AS "completedAt"', 'duration_minutes AS "durationMinutes"'])}
@@ -458,6 +480,7 @@ export const crmNativeRoutes: FastifyPluginAsync = async (app) => {
     if (!body.success) return reply.status(400).send({ error: body.error.flatten() })
     const moduleSchema = await getModuleSchema(ctx.entityId, 'crm_activities')
     const { cols, placeholders, params } = buildInsert('crm_activities', body.data, moduleSchema)
+    injectOwnerId(cols, placeholders, params, (req.user as any).sub, 'created_by_user_id')
     const rows = await queryEntitySchema(ctx.schema, `
       INSERT INTO crm_activities (${cols.join(', ')}) VALUES (${placeholders.join(', ')})
       RETURNING ${selectCols('crm_activities')}
@@ -478,7 +501,9 @@ export const crmNativeRoutes: FastifyPluginAsync = async (app) => {
     if (sets.length === 0) return { ok: true }
     const extraSet = body.data.status === 'completed' ? `, completed_at = NOW()` : ''
     params.push(id)
-    await queryEntitySchema(ctx.schema, `UPDATE crm_activities SET ${sets.join(', ')}, updated_at = NOW()${extraSet} WHERE id = $${params.length}`, params)
+    const idPlaceholder = params.length
+    const scope = scopeCondition(params, req.user as any, 'created_by_user_id')
+    await queryEntitySchema(ctx.schema, `UPDATE crm_activities SET ${sets.join(', ')}, updated_at = NOW()${extraSet} WHERE id = $${idPlaceholder}${scope}`, params)
     const [updated] = await queryEntitySchema(ctx.schema, `SELECT ${selectCols('crm_activities')} FROM crm_activities WHERE id = $1`, [id])
     if (updated) await runHooks('afterSave', { entityId: ctx.entityId, schema: ctx.schema, moduleKey: 'crm_activities', table: 'crm_activities', trigger: 'on_update', record: updated })
     return { ok: true }
@@ -488,7 +513,9 @@ export const crmNativeRoutes: FastifyPluginAsync = async (app) => {
     const ctx = await resolveEntityContext((req.user as any).tenantId)
     if (!ctx) return reply.status(404).send({ error: 'Entity şeması hazır değil' })
     const { id } = req.params as { id: string }
-    await queryEntitySchema(ctx.schema, `DELETE FROM crm_activities WHERE id = $1`, [id])
+    const params: unknown[] = [id]
+    const scope = scopeCondition(params, req.user as any, 'created_by_user_id')
+    await queryEntitySchema(ctx.schema, `DELETE FROM crm_activities WHERE id = $1${scope}`, params)
     return { ok: true }
   })
 }

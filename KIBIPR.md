@@ -2052,14 +2052,30 @@ denemeleri başarısız olarak doğrulandı).
   geri döndüğü doğrulandı; silindi; sistem alanı (`firstName`) silinmeye çalışıldı → 403.
   Playwright'ta sayfa render + alan ekleme, konsol hatası YOK.
 
-**Faz 8 DoD karşılandı:** Yeni tenant sektör seçip (onboarding/apply), CSV import edip
-(dedup'lu), UI'dan alan ekleyerek operasyonel olabiliyor — üç adım da gerçek HTTP
-istekleriyle ayrı ayrı doğrulandı (uçtan uca "5 dakika" akışının tek bir UI sihirbazında
-zincirlenmesi kapsam dışı — üç ayrı sayfa/endpoint olarak var, birleşik onboarding wizard'ı
-gelecek bir iyileştirme).
+### FAZ 8.1/8.2 frontend sayfaları eklendi (FieldManager zaten vardı, ikisi eksikti)
+Bu KIBIPR bölümü ilk yazıldığında 8.1/8.2 yalnızca backend + curl ile doğrulanmıştı, 8.3'ün
+`FieldManager.tsx`'i hariç hiçbir adımın gerçek bir sayfası yoktu. Tamamlandı:
+- `frontend/src/pages/Onboarding.tsx`: şablon listesi + "Uygula" butonu, uygulanan
+  alan/blueprint/rule sayısını gösteriyor. `/app/onboarding` route + sidebar linki
+  ("Sektörel Şablonlar").
+- `frontend/src/pages/Import.tsx`: dosya seç → dedup önizleme tablosu (birebir/olası/yeni
+  rozetleri, satır başına create/merge/skip seçimi, varsayılanlar `match`'e göre otomatik) →
+  içe aktar → sonuç özeti. `/app/import` route + sidebar linki ("İçe Aktarma").
+  `frontend/src/lib/api.ts`'in global `Content-Type` override'ı olmadığı doğrulandı
+  (FormData upload `Files.tsx`'teki desenle aynı şekilde çalışıyor).
+- **Doğrulama (gerçek tarayıcı, Playwright):** üç sayfa (`onboarding`,`field-manager`,`import`)
+  ayrı ayrı yüklendi, başlık görünür, konsol hatası YOK. `FieldManager`'da gerçek bir alan
+  ekleme+silme döngüsü UI üzerinden tekrarlandı (`testUiField` eklendi → listede görüldü →
+  silindi → listede kalmadığı doğrulandı).
+
+**Faz 8 DoD karşılandı:** Yeni tenant sektör seçip (Onboarding.tsx), CSV import edip
+(dedup'lu, Import.tsx), UI'dan alan ekleyerek (FieldManager.tsx) operasyonel olabiliyor —
+üçü de artık gerçek sayfalar (yalnızca backend/curl değil), her biri Playwright ile
+doğrulandı (uçtan uca "5 dakika" akışının tek bir UI sihirbazında zincirlenmesi kapsam dışı
+— üç ayrı sayfa olarak var, birleşik onboarding wizard'ı gelecek bir iyileştirme).
 
 ### FAZ 8'den Taşınan Yeni Kapsam Notları (deferred listesine ek)
 - Üç onboarding adımı (şablon seç, import, alan ekle) ayrı sayfalarda — tek akışlı bir
-  "onboarding wizard" YOK.
+  "onboarding wizard" (örn. yeni tenant kaydından sonra otomatik yönlendirme) YOK.
 - Import dedup'ı yalnızca `crm_contacts`'a özel; companies/deals import'u YOK.
 - Alan Yöneticisi yalnızca FAZ 4.1'in seed ettiği 4 CRM modülünü destekliyor.

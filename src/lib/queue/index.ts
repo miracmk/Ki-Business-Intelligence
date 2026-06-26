@@ -4,7 +4,7 @@
 // configured with `maxRetriesPerRequest: 3` for normal request/response use, and handing
 // that to a Worker throws on startup ("BullMQ: Your redis options maxRetriesPerRequest must
 // be null").
-import { Queue } from 'bullmq'
+import { Queue, QueueEvents, type Job } from 'bullmq'
 import { Redis } from 'ioredis'
 import { env } from '../../../config/env.js'
 
@@ -29,11 +29,30 @@ export const actionQueue = new Queue(ACTION_QUEUE_NAME, {
   },
 })
 
-export type ActionType = 'email' | 'webhook' | 'update_field' | 'require_approval' | 'run_function'
+export type ActionType = 'email' | 'webhook' | 'update_field' | 'require_approval' | 'run_function' | 'test_function'
 
 // Job data is intentionally flat/self-contained — the worker process has no HTTP request
 // context, so every field a handler needs (entityId, schema, table, ids) must travel with
 // the job rather than being re-derived from req.user et al.
 export async function enqueueAction(type: ActionType, data: Record<string, unknown>): Promise<void> {
   await actionQueue.add(type, data)
+}
+
+// FAZ 7.3: lets the API process enqueue a job and await its result without ever running user
+// code itself — "test_function" jobs are picked up and EXECUTED by the worker process only;
+// this just waits for that to finish. Own ioredis connection per BullMQ's recommendation
+// (each Queue/Worker/QueueEvents should have its own connection).
+let queueEvents: QueueEvents | null = null
+function getQueueEvents(): QueueEvents {
+  if (!queueEvents) {
+    queueEvents = new QueueEvents(ACTION_QUEUE_NAME, {
+      connection: new Redis(env.REDIS_URL, { maxRetriesPerRequest: null, enableReadyCheck: false }),
+    })
+  }
+  return queueEvents
+}
+
+export async function enqueueAndWait(type: ActionType, data: Record<string, unknown>, timeoutMs = 15_000): Promise<unknown> {
+  const job: Job = await actionQueue.add(type, data)
+  return job.waitUntilFinished(getQueueEvents(), timeoutMs)
 }

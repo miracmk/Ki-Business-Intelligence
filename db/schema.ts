@@ -420,6 +420,46 @@ export const blueprintApprovalsRelations = relations(blueprintApprovals, ({ one 
   transition: one(blueprintTransitions, { fields: [blueprintApprovals.transitionId], references: [blueprintTransitions.id] }),
 }))
 
+// FAZ 7.3: custom functions (Katman B). The code itself is just text here — all the actual
+// safety lives in src/engine/functions/ (isolated-vm + AST guard), not in this table.
+export const functionDefinitions = pgTable('function_definitions', {
+  id:         uuid('id').primaryKey().defaultRandom(),
+  entityId:   uuid('entity_id').notNull().references(() => kibiEntities.id, { onDelete: 'cascade' }),
+  name:       varchar('name', { length: 255 }).notNull(),
+  code:       text('code').notNull(),
+  isActive:   boolean('is_active').notNull().default(true),
+  createdAt:  timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt:  timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({
+  entityIdx: index('function_definitions_entity_idx').on(t.entityId),
+}))
+
+export const functionExecutionStatusEnum = pgEnum('function_execution_status', ['success', 'error'])
+
+export const functionExecutions = pgTable('function_executions', {
+  id:          uuid('id').primaryKey().defaultRandom(),
+  functionId:  uuid('function_id').notNull().references(() => functionDefinitions.id, { onDelete: 'cascade' }),
+  entityId:    uuid('entity_id').notNull().references(() => kibiEntities.id, { onDelete: 'cascade' }),
+  triggeredBy: jsonb('triggered_by').$type<Record<string, unknown>>().notNull().default({}), // {moduleKey,recordId,ruleId} or {type:'manual'}
+  status:      functionExecutionStatusEnum('status').notNull(),
+  result:      jsonb('result').$type<unknown>(),
+  error:       text('error'),
+  logs:        jsonb('logs').$type<string[]>().notNull().default([]),
+  durationMs:  integer('duration_ms').notNull().default(0),
+  createdAt:   timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({
+  functionIdx: index('function_executions_function_idx').on(t.functionId, t.createdAt),
+}))
+
+export const functionDefinitionsRelations = relations(functionDefinitions, ({ one, many }) => ({
+  entity:     one(kibiEntities, { fields: [functionDefinitions.entityId], references: [kibiEntities.id] }),
+  executions: many(functionExecutions),
+}))
+
+export const functionExecutionsRelations = relations(functionExecutions, ({ one }) => ({
+  function: one(functionDefinitions, { fields: [functionExecutions.functionId], references: [functionDefinitions.id] }),
+}))
+
 export const kibiModelRoleEnum = pgEnum('kibi_model_role', [
   'conversation', 'db_search', 'qdrant_search', 'redis_search',
   'intent', 'support_intent', 'support_refine', 'support_resolver', 'support_answering',

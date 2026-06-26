@@ -1893,3 +1893,99 @@ kontrolüyle (dealValue>0) bloklanıyor — gerçek HTTP istekleriyle uçtan uca
 - **FAZ 6.2:** Blueprint gating yalnızca `crm_deals.stage`'e (PUT /deals/:id) bağlandı; diğer
   modüllerin hiçbir alanı blueprint kontrolünde değil (mekanizma jenerik, sadece bu tek
   call-site'a kablolanmış durumda).
+
+---
+
+## FAZ 7 — Custom Functions ✅ TAMAMLANDI (2026-06-26) — MİMARİ KARAR roadmap'i GEÇERSİZ KILDI
+
+> **ÖNEMLİ:** Roadmap'in orijinal tasarımı ("SANDBOX YOK, node:vm + AST denetimi, isolated-vm
+> DEĞİL") bir güvenlik incelemesinden sonra KULLANICI ONAYIYLA değiştirildi. node:vm + AST
+> denylist gerçek bir güvenlik sınırı DEĞİL — kullanıcı kodu `ctx.records.find(...)` gibi
+> bridge'in DÖNDÜRDÜĞÜ bir host-realm objesine eriştiği anda `.constructor.constructor` ile
+> host `Function`'a (ve `process.env`, `DATABASE_URL`, `ENCRYPTION_KEY`, `OPENROUTER_API_KEY`
+> içeren worker process'ine) ulaşabilir — hiçbir yasaklı token kullanmadan. Bu, tek-tenant'ta
+> teorik, 2. tenant onboard edilince **cross-tenant RCE**'ye dönüşen bir risk. Kullanıcıya 3
+> seçenek sunuldu (roadmap'e sadık+uyarı / process-izolasyonlu hafifletme / gerçek isolate);
+> **seçilen: gerçek V8 isolate (`isolated-vm`)**. Bu, sonraki oturumlarda bu kararı
+> sorgulamadan kabul edin — kullanıcı bilerek roadmap'in "isolated-vm DEĞİL" talimatını geçti.
+
+### FAZ 7.1/7.2 — Executor + AST Guard + Context API
+- `src/engine/functions/executor.ts`: her çalıştırma kendi `ivm.Isolate({memoryLimit:64})` +
+  `Context`'inde. Gerçek güvenlik sınırı BU — host realm ile PAYLAŞILAN hiçbir şey yok.
+  `ctx.records.*`/`ctx.http.*`/`ctx.log` host'taki gerçek fonksiyonlara `ivm.Reference` +
+  `.apply(..., {arguments:{copy:true}, result:{promise:true, copy:true}})` ile bağlanıyor —
+  isolate'e GİREN/ÇIKAN her şey deep-copy (ExternalCopy semantiği), hiçbir canlı host
+  referansı sızmıyor. Timeout (`script.run(context, {timeout})`) GERÇEK bir V8-seviyesi kesme
+  — `while(true){}` VE `while(true){await Promise.resolve()}` (async microtask flood, node:vm
+  ASLA durduramaz) ikisi de aynı şekilde kesiliyor, canlı testle doğrulandı.
+- `src/engine/functions/ast-guard.ts` (`validateFunctionCode`): roadmap'in istediği
+  `require`/`process`/`eval`/`Function`/`fs`/`child_process`/`global`/`globalThis` denylist'i
+  hâlâ var — **ama artık defense-in-depth/hızlı hata mesajı amaçlı, güvenlik sınırı isolate.**
+  Kod, gerçekten çalıştırılacağı `(async()=>{...})()` sarmalıyla parse ediliyor — aksi halde
+  her async kullanıcı fonksiyonu "top-level await" sözdizimi hatasıyla reddediliyordu (canlı
+  testte bulunup düzeltildi).
+- `src/engine/functions/records-bridge.ts`: `ctx.records.find/create/update` FAZ 4.3'ün
+  `getModuleSchema()` registry'sinden kolon çözer — fonksiyon yazarının verdiği `moduleKey`/
+  alan adları SQL'e DOĞRUDAN hiç ulaşmıyor (FAZ 5.5 `updateField` deseniyle aynı disiplin).
+- `src/engine/functions/safe-fetch.ts`: `ctx.http.*` HOST'ta gerçek ağ isteği yapıyor (isolate
+  ağa çıkamaz, host'a geri çağırıyor) — bu yüzden kendi SSRF korumasına sahip: private/
+  loopback/link-local IP aralıkları (169.254.169.254 cloud metadata dahil) + `localhost` + 10
+  saniye timeout + 1MB yanıt sınırı. **Not:** domain allowlist YOK, sadece private-IP guard —
+  roadmap "allowlist domain" diyor ama bu Faz 7'de bir allowlist YÖNETİM UI'ı gerektirir,
+  kapsam dışı bırakıldı (yalnızca SSRF'e karşı genel guard var).
+- **`src/engine/functions/security-test.ts`** — manuel güvenlik regresyon scripti (bu repo'da
+  test framework'ü yok, CI'a bağlı değil): `docker exec ki_worker npx tsx
+  src/engine/functions/security-test.ts`. **Her ikisi de gerçek veriyle test edildi:**
+  `ctx.records.find()`'ın döndürdüğü GERÇEK satır dizisi üzerinde `.constructor.constructor`
+  escape denemesi VE düz `{}.constructor.constructor` denemesi — ikisi de `process is not
+  defined` ile başarısız oldu (isolate'in KENDİ realm'inde, host'unkinde değil). 7/7 kontrol
+  geçti. **Executor/ast-guard/safe-fetch/records-bridge'e her değişiklikten sonra bu script
+  yeniden çalıştırılmalı.**
+
+### FAZ 7.3 — function_definitions/function_executions + Trigger Binding
+- `db/migrations/0027_functions.sql` (psql exec ile uygulandı). `function_executions` HER
+  çalıştırmayı (manuel test VEYA rule-tetiklemeli) loglar — başarısız olsa bile, throw'dan
+  ÖNCE yazılır (BullMQ retry/backoff diğer handler'larla aynı şekilde işliyor).
+- `src/workers/handlers/runFunction.ts`: FAZ 5.5/6'nın stub'ı **DEĞİŞTİRİLDİ** (ikisi birden
+  çalışmıyor — tek yürütme yolu). `evaluator.ts`'in `{type:'run_function', config:{functionId}}`
+  action'ı zaten jenerik enqueue ediyordu (FAZ 5.4'ten beri), yalnızca handler'ın gerçek
+  çalıştırma yapması gerekiyordu.
+- `src/api/routes/functions.ts`: CRUD + manuel "test çalıştır". **Kritik mimari detay:** test
+  çalıştırma endpoint'i `executeFunction`'ı API process'inde ASLA çağırmıyor — `enqueueAndWait()`
+  (`src/lib/queue/index.ts`, `job.waitUntilFinished(QueueEvents)`) ile bir `test_function` job'ı
+  kuyruğa yazıp WORKER'ın bitirmesini bekliyor. Bu, roadmap'in "yalnızca worker'da çalışır, ana
+  API process'inde ASLA" kuralını manuel test-run için de korur (ilk taslakta bu kural ihlal
+  edilmişti, gözden geçirilip düzeltildi).
+- `frontend/src/pages/Functions.tsx`: liste + oluştur (düz textarea, Monaco yok — FAZ 6.3'ün
+  "form, canvas değil" kapsam kararıyla aynı çizgide) + test çalıştır + çalıştırma geçmişi.
+- **Doğrulama (gerçek HTTP + gerçek worker + gerçek tarayıcı):** fonksiyon oluşturma (yasaklı
+  identifier'la oluşturma denemesi 400 ile reddedildi), `/test` ile çalıştırma (kuyruktan,
+  ~50ms), `workflow_rules`'a `run_function` action'ı eklenip gerçek bir deal create ile
+  tetiklenmesi → `function_executions`'a doğru `triggeredBy` (moduleKey/recordId/ruleId) ile
+  kaydedildi. Playwright ile UI'da oluşturma+çalıştırma, konsol hatası YOK.
+
+### FAZ 7.4 — Client Scripts (DynamicForm, deklaratif)
+- `frontend/src/components/DynamicForm.tsx`: `field.config.clientScript = {showIf?, requiredIf?}`
+  — **kod DEĞİL, veri** — backend `evaluator.ts` ile AYNI `{field,op,value}`/and/or koşul
+  formatını yorumlayan küçük bir `matchesConditions()` kopyası (frontend'de `eval()`/`Function()`
+  YOK — Faz 7'nin izole edilmiş tek code-exec yüzeyinin yanına ikinci, çok daha zayıf bir
+  tane eklememek için bilinçli karar, roadmap'in kendisi de bunu söylüyor).
+  `showIf` yanlışsa alan render edilmiyor (gizli); `requiredIf` doğruysa label'a `*` ekleniyor.
+- **Doğrulama (gerçek tarayıcı):** `crm_contacts.companyName` alanına `requiredIf:
+  {field:'contactType', op:'=', value:'customer'}` eklendi — "Kişi Tipi" select'i 'lead'
+  iken "Şirket Adı" etiketi yıldızsız, 'customer'a çevrilince ANINDA `*` ile güncellendi
+  (Playwright, konsol hatası YOK). Test config'i temizlendi.
+
+**Faz 7 DoD karşılandı (güvenlik mimarisi değişikliğiyle):** Kullanıcı UI'dan JS function
+yazıp kaydediyor; **AST denetimi + (asıl sınır olan) V8 isolate** tehlikeli kodu reddediyor/
+çevreliyor; function bir rule action'ından tetiklenip `ctx.records.update` ile kayıt
+güncelleyebiliyor (mekanizma `records-bridge.ts`'de hazır, `security-test.ts`'te escape
+denemeleri başarısız olarak doğrulandı).
+
+### FAZ 7'den Taşınan Yeni Kapsam Notları (deferred listesine ek)
+- `ctx.http.*`'ta domain allowlist YOK, yalnızca SSRF private-IP guard'ı var.
+- `ctx.records.find` sonuçları 50 satırla sınırlı, `deleted_at` kolonu olmayan tablolarda
+  (örn. ileride eklenecek custom modüller) sessizce boş dönüyor (try/catch fallback).
+- Manuel test-run "test_function" job'ları normal action queue'yu paylaşıyor — yüksek
+  hacimli rule-tetiklemeli `run_function` trafiği varken test-run gecikebilir (ayrı kuyruk
+  YOK, kapsam dışı bırakıldı).

@@ -10,6 +10,7 @@ import Modules from './pages/Modules'
 import Crm from './pages/Crm'
 import Erp from './pages/Erp'
 import Blueprint from './pages/Blueprint'
+import Functions from './pages/Functions'
 import CustomerService from './pages/CustomerService'
 import Fulfillment from './pages/Fulfillment'
 import Ecommerce from './pages/Ecommerce'
@@ -56,6 +57,7 @@ function AppShell() {
           <Route path="crm-native" element={<Crm />} />
           <Route path="erp-native" element={<Erp />} />
           <Route path="blueprint" element={<Blueprint />} />
+          <Route path="functions" element={<Functions />} />
           <Route path="customer-service" element={<CustomerService />} />
           <Route path="fulfillment" element={<Fulfillment />} />
           <Route path="ecommerce" element={<Ecommerce />} />

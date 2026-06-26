@@ -227,8 +227,17 @@ blueprint_transitions
 
 ---
 
-## FAZ 7 — Custom Functions (Katman B — gerçek custom scripting)
+## FAZ 7 — Custom Functions (Katman B — gerçek custom scripting) ✅ TAMAMLANDI (2026-06-26)
 > İlham: Deluge, Apex @InvocableMethod. **SANDBOX YOK** — AST-validated executor.
+>
+> **MİMARİ DEĞİŞİKLİK (kullanıcı onayıyla):** Uygulamadan önce bir güvenlik incelemesi, bu
+> bölümün "node:vm + AST denetimi, isolated-vm DEĞİL" tasarımının gerçek bir güvenlik sınırı
+> SAĞLAMADIĞINI gösterdi (`ctx.records.*` gibi bridge fonksiyonlarının döndürdüğü herhangi bir
+> host-realm objesi `.constructor.constructor` ile host `Function`'a kaçış sağlıyor — AST
+> denylist bunu hiç görmüyor). Kullanıcıya seçenek sunuldu, **gerçek V8 isolate
+> (`isolated-vm`) seçildi** — yukarıdaki "SANDBOX YOK"/"isolated-vm DEĞİL" satırları bu faz
+> için GEÇERSİZDİR. Detay + güvenlik test sonuçları: KIBIPR.md → "FAZ 7 — Custom Functions"
+> bölümünün başındaki uyarı kutusu. Sıradaki: **FAZ 8** (No-Code Onboarding).
 
 ### 7.1 — Function Executor
 `src/engine/functions/executor.ts`:

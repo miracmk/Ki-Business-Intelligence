@@ -7,13 +7,15 @@ import { webhookHandler } from './handlers/webhook.js'
 import { emailHandler } from './handlers/email.js'
 import { runFunctionHandler } from './handlers/runFunction.js'
 import { requireApprovalHandler } from './handlers/requireApproval.js'
+import { testFunctionHandler } from './handlers/testFunction.js'
 
-const handlers: Record<ActionType, (data: any) => Promise<void>> = {
+const handlers: Record<ActionType, (data: any) => Promise<unknown>> = {
   update_field:      updateFieldHandler,
   webhook:           webhookHandler,
   email:             emailHandler,
   run_function:      runFunctionHandler,
   require_approval:  requireApprovalHandler,
+  test_function:     testFunctionHandler,
 }
 
 const worker = new Worker(
@@ -21,7 +23,7 @@ const worker = new Worker(
   async (job: Job) => {
     const handler = handlers[job.name as ActionType]
     if (!handler) throw new Error(`Bilinmeyen action tipi: ${job.name}`)
-    await handler(job.data)
+    return handler(job.data)
   },
   { connection: queueConnection, concurrency: 5 },
 )

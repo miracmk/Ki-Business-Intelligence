@@ -5,6 +5,41 @@ import api from '../lib/api'
 // If the registry has no fields for moduleKey (entity not seeded, or module not in
 // registry yet), falls back to whatever the caller passes as `fallback` — this is the
 // "kademeli geçiş" the roadmap calls for: nothing breaks for modules not yet migrated.
+//
+// FAZ 7.4: client scripts are DATA, not code — `field.config.clientScript` carries a
+// declarative condition (same {field,op,value}/and/or shape as the backend rule evaluator,
+// src/engine/rules/evaluator.ts) that this component interprets directly. There is
+// deliberately no eval()/Function() path here: letting a "client script" mean executable JS
+// in the browser would be a second, much weaker code-execution surface sitting right next
+// to FAZ 7's carefully isolated one — the roadmap calls this out explicitly, and it's worth
+// keeping that boundary even though it'd be more flexible to allow real expressions.
+
+type ConditionOp = '=' | '!=' | '>' | '>=' | '<' | '<=' | 'contains' | 'in'
+type ConditionLeaf = { field: string; op: ConditionOp; value: unknown }
+type ConditionNode = ConditionLeaf | { and: ConditionNode[] } | { or: ConditionNode[] }
+
+function matchesConditions(node: ConditionNode | null | undefined, record: Record<string, unknown>): boolean {
+  if (!node) return true
+  if ('and' in node) return node.and.every((n) => matchesConditions(n, record))
+  if ('or' in node) return node.or.some((n) => matchesConditions(n, record))
+  const actual = record[node.field]
+  switch (node.op) {
+    case '=': return actual === node.value
+    case '!=': return actual !== node.value
+    case '>': return Number(actual) > Number(node.value)
+    case '>=': return Number(actual) >= Number(node.value)
+    case '<': return Number(actual) < Number(node.value)
+    case '<=': return Number(actual) <= Number(node.value)
+    case 'contains': return typeof actual === 'string' && actual.includes(String(node.value))
+    case 'in': return Array.isArray(node.value) && node.value.includes(actual)
+    default: return false
+  }
+}
+
+interface ClientScript {
+  showIf?: ConditionNode
+  requiredIf?: ConditionNode
+}
 
 export type FieldType = 'text' | 'number' | 'date' | 'boolean' | 'select' | 'relation' | 'ai'
 
@@ -49,18 +84,25 @@ export default function DynamicForm({ moduleKey, value, onChange, fallback, excl
 
   const visible = fields
     .filter((f) => !excludeKeys.includes(f.key))
+    .filter((f) => matchesConditions((f.config?.clientScript as ClientScript | undefined)?.showIf, value))
     .sort((a, b) => a.position - b.position)
 
   const set = (key: string, val: unknown) => onChange({ ...value, [key]: val })
 
   return (
     <div className="grid gap-3 sm:grid-cols-2">
-      {visible.map((f) => (
-        <div key={f.key}>
-          <label className="text-xs text-gray-400">{f.label}{f.isRequired ? ' *' : ''}</label>
-          <div className="mt-1">{renderInput(f, value[f.key], set, relationOptions[f.key], inputClassName)}</div>
-        </div>
-      ))}
+      {visible.map((f) => {
+        const clientScript = f.config?.clientScript as ClientScript | undefined
+        // requiredIf absent means "not conditionally required" (false) — unlike showIf,
+        // where absence means "always visible" (true). Don't reuse one default for both.
+        const required = f.isRequired || (clientScript?.requiredIf ? matchesConditions(clientScript.requiredIf, value) : false)
+        return (
+          <div key={f.key}>
+            <label className="text-xs text-gray-400">{f.label}{required ? ' *' : ''}</label>
+            <div className="mt-1">{renderInput(f, value[f.key], set, relationOptions[f.key], inputClassName)}</div>
+          </div>
+        )
+      })}
     </div>
   )
 }

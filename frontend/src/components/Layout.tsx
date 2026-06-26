@@ -6,7 +6,7 @@ import {
   Sun, Moon, Menu, X, ChevronDown, ChevronRight,
   MessageSquare, Bot, Settings2, BarChart3, Database,
   Bell, CheckCheck, Wallet, Users, Boxes, Headset, Truck, ShoppingCart, Megaphone, CalendarDays, IdCard,
-  GitBranch,
+  GitBranch, Code2,
 } from 'lucide-react'
 import api from '../lib/api'
 
@@ -245,6 +245,14 @@ export default function Layout() {
           style={linkStyle(activeLink('/app/blueprint'))}
           onMouseEnter={hoverIn} onMouseLeave={e => hoverOut(e, activeLink('/app/blueprint'))}>
           <GitBranch size={17} /><span className="text-sm font-medium">Blueprint</span>
+        </Link>
+
+        {/* Fonksiyonlar — FAZ 7: izole V8 isolate içinde çalışan özel JS fonksiyonları */}
+        <Link to="/app/functions"
+          className="flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all duration-200"
+          style={linkStyle(activeLink('/app/functions'))}
+          onMouseEnter={hoverIn} onMouseLeave={e => hoverOut(e, activeLink('/app/functions'))}>
+          <Code2 size={17} /><span className="text-sm font-medium">Fonksiyonlar</span>
         </Link>
 
         {/* CRM Bağlantıları expandable (eski "CRM" — harici connector senkron/izleme, route değişmedi) */}

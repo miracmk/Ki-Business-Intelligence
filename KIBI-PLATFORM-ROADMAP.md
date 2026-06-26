@@ -157,8 +157,11 @@ contacts CRUD regresyonsuz çalışıyor.
 
 ---
 
-## FAZ 5 — Event-Driven Hooks + Declarative Rule Engine (Katman A)
+## FAZ 5 — Event-Driven Hooks + Declarative Rule Engine (Katman A) ✅ TAMAMLANDI (2026-06-26)
 > İlham: ActiveCampaign behavioral triggers, Salesforce deterministic gating, Zoho workflow rules.
+>
+> Detaylı uygulama kaydı: KIBIPR.md → "FAZ 5 — Event-Driven Hooks + Declarative Rule Engine"
+> bölümü. Sıradaki: **FAZ 6** (Blueprint/State Machine).
 
 ### 5.1 — BullMQ Ekle
 - `package.json`'a `bullmq` ekle. `src/lib/queue/index.ts`: Redis bağlantısını mevcut `ioredis`

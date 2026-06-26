@@ -8,7 +8,7 @@ import { z } from 'zod'
 import { db } from '../../lib/db.js'
 import { queryEntitySchema } from '../../lib/entity-provisioner.js'
 import { getModuleSchema, type ModuleSchema } from '../../lib/metadata/resolver.js'
-import { runAiFields } from '../../lib/metadata/ai-fields.js'
+import { runHooks } from '../../lib/hooks/lifecycle.js'
 
 const contactSchema = z.object({
   firstName: z.string().optional(),
@@ -261,8 +261,7 @@ export const crmNativeRoutes: FastifyPluginAsync = async (app) => {
       INSERT INTO crm_contacts (${cols.join(', ')}) VALUES (${placeholders.join(', ')})
       RETURNING ${selectCols('crm_contacts')}
     `, params)
-    const aiUpdates = await runAiFields(ctx.entityId, ctx.schema, 'crm_contacts', 'crm_contacts', rows[0])
-    if (Object.keys(aiUpdates).length) rows[0].customFields = { ...rows[0].customFields, ...aiUpdates }
+    await runHooks('afterSave', { entityId: ctx.entityId, schema: ctx.schema, moduleKey: 'crm_contacts', table: 'crm_contacts', trigger: 'on_create', record: rows[0] })
     return reply.status(201).send({ contact: rows[0] })
   })
 
@@ -278,7 +277,7 @@ export const crmNativeRoutes: FastifyPluginAsync = async (app) => {
     params.push(id)
     await queryEntitySchema(ctx.schema, `UPDATE crm_contacts SET ${sets.join(', ')}, updated_at = NOW() WHERE id = $${params.length}`, params)
     const [updated] = await queryEntitySchema(ctx.schema, `SELECT ${selectCols('crm_contacts')} FROM crm_contacts WHERE id = $1`, [id])
-    if (updated) await runAiFields(ctx.entityId, ctx.schema, 'crm_contacts', 'crm_contacts', updated)
+    if (updated) await runHooks('afterSave', { entityId: ctx.entityId, schema: ctx.schema, moduleKey: 'crm_contacts', table: 'crm_contacts', trigger: 'on_update', record: updated })
     return { ok: true }
   })
 
@@ -317,8 +316,7 @@ export const crmNativeRoutes: FastifyPluginAsync = async (app) => {
       INSERT INTO crm_companies (${cols.join(', ')}) VALUES (${placeholders.join(', ')})
       RETURNING ${selectCols('crm_companies')}
     `, params)
-    const aiUpdates = await runAiFields(ctx.entityId, ctx.schema, 'crm_companies', 'crm_companies', rows[0])
-    if (Object.keys(aiUpdates).length) rows[0].customFields = { ...rows[0].customFields, ...aiUpdates }
+    await runHooks('afterSave', { entityId: ctx.entityId, schema: ctx.schema, moduleKey: 'crm_companies', table: 'crm_companies', trigger: 'on_create', record: rows[0] })
     return reply.status(201).send({ company: rows[0] })
   })
 
@@ -334,7 +332,7 @@ export const crmNativeRoutes: FastifyPluginAsync = async (app) => {
     params.push(id)
     await queryEntitySchema(ctx.schema, `UPDATE crm_companies SET ${sets.join(', ')}, updated_at = NOW() WHERE id = $${params.length}`, params)
     const [updated] = await queryEntitySchema(ctx.schema, `SELECT ${selectCols('crm_companies')} FROM crm_companies WHERE id = $1`, [id])
-    if (updated) await runAiFields(ctx.entityId, ctx.schema, 'crm_companies', 'crm_companies', updated)
+    if (updated) await runHooks('afterSave', { entityId: ctx.entityId, schema: ctx.schema, moduleKey: 'crm_companies', table: 'crm_companies', trigger: 'on_update', record: updated })
     return { ok: true }
   })
 
@@ -372,8 +370,7 @@ export const crmNativeRoutes: FastifyPluginAsync = async (app) => {
       INSERT INTO crm_deals (${cols.join(', ')}) VALUES (${placeholders.join(', ')})
       RETURNING ${selectCols('crm_deals')}
     `, params)
-    const aiUpdates = await runAiFields(ctx.entityId, ctx.schema, 'crm_deals', 'crm_deals', rows[0])
-    if (Object.keys(aiUpdates).length) rows[0].customFields = { ...rows[0].customFields, ...aiUpdates }
+    await runHooks('afterSave', { entityId: ctx.entityId, schema: ctx.schema, moduleKey: 'crm_deals', table: 'crm_deals', trigger: 'on_create', record: rows[0] })
     return reply.status(201).send({ deal: rows[0] })
   })
 
@@ -391,7 +388,7 @@ export const crmNativeRoutes: FastifyPluginAsync = async (app) => {
     params.push(id)
     await queryEntitySchema(ctx.schema, `UPDATE crm_deals SET ${sets.join(', ')}, updated_at = NOW()${extraSet} WHERE id = $${params.length}`, params)
     const [updated] = await queryEntitySchema(ctx.schema, `SELECT ${selectCols('crm_deals')} FROM crm_deals WHERE id = $1`, [id])
-    if (updated) await runAiFields(ctx.entityId, ctx.schema, 'crm_deals', 'crm_deals', updated)
+    if (updated) await runHooks('afterSave', { entityId: ctx.entityId, schema: ctx.schema, moduleKey: 'crm_deals', table: 'crm_deals', trigger: 'on_update', record: updated })
     return { ok: true }
   })
 
@@ -431,8 +428,8 @@ export const crmNativeRoutes: FastifyPluginAsync = async (app) => {
       INSERT INTO crm_activities (${cols.join(', ')}) VALUES (${placeholders.join(', ')})
       RETURNING ${selectCols('crm_activities')}
     `, params)
-    // No AI field wiring here: crm_activities has no custom_fields column (unlike
-    // contacts/companies/deals), so runAiFields's UPDATE would fail. Out of scope for 4.5.
+    // aiFieldHook self-skips crm_activities (no custom_fields column); ruleEngineHook still runs.
+    await runHooks('afterSave', { entityId: ctx.entityId, schema: ctx.schema, moduleKey: 'crm_activities', table: 'crm_activities', trigger: 'on_create', record: rows[0] })
     return reply.status(201).send({ activity: rows[0] })
   })
 
@@ -448,6 +445,8 @@ export const crmNativeRoutes: FastifyPluginAsync = async (app) => {
     const extraSet = body.data.status === 'completed' ? `, completed_at = NOW()` : ''
     params.push(id)
     await queryEntitySchema(ctx.schema, `UPDATE crm_activities SET ${sets.join(', ')}, updated_at = NOW()${extraSet} WHERE id = $${params.length}`, params)
+    const [updated] = await queryEntitySchema(ctx.schema, `SELECT ${selectCols('crm_activities')} FROM crm_activities WHERE id = $1`, [id])
+    if (updated) await runHooks('afterSave', { entityId: ctx.entityId, schema: ctx.schema, moduleKey: 'crm_activities', table: 'crm_activities', trigger: 'on_update', record: updated })
     return { ok: true }
   })
 

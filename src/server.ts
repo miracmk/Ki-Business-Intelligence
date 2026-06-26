@@ -41,6 +41,7 @@ import { entityAiRoutes }     from './api/routes/entity-ai.js'
 import { dashboardRoutes }    from './api/routes/dashboard.js'
 import { entitlementsRoutes } from './api/routes/entitlements.js'
 import { webhookRoutes }      from './api/webhooks/index.js'
+import './lib/hooks/register.js' // FAZ 5.2: registers afterSave hooks (AI fields, rule engine)
 
 const FRONTEND_DIST = process.env['FRONTEND_DIST'] ?? '/app/frontend/dist'
 

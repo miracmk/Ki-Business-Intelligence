@@ -342,6 +342,35 @@ export const kibiFieldsRelations = relations(kibiFields, ({ one }) => ({
   module: one(kibiModules, { fields: [kibiFields.moduleId], references: [kibiModules.id] }),
 }))
 
+// FAZ 5.3: declarative rule engine (Katman A) — deterministic IF/THEN rules, no code-exec.
+// Only 'on_create'/'on_update' are wired to the lifecycle hooks as of FAZ 5; 'on_stage_change'
+// and 'scheduled' are accepted by the enum (so rule authors aren't blocked) but not yet
+// evaluated anywhere — 'on_stage_change' needs FAZ 6's transition tracking, 'scheduled' needs
+// a cron-style queue producer neither of which exist yet.
+export const workflowRuleTriggerEnum = pgEnum('workflow_rule_trigger', [
+  'on_create', 'on_update', 'on_stage_change', 'scheduled',
+])
+
+export const workflowRules = pgTable('workflow_rules', {
+  id:         uuid('id').primaryKey().defaultRandom(),
+  entityId:   uuid('entity_id').notNull().references(() => kibiEntities.id, { onDelete: 'cascade' }),
+  moduleKey:  varchar('module_key', { length: 100 }).notNull(),
+  name:       varchar('name', { length: 255 }).notNull(),
+  isActive:   boolean('is_active').notNull().default(true),
+  trigger:    workflowRuleTriggerEnum('trigger').notNull(),
+  conditions: jsonb('conditions').$type<unknown>().default(null),    // AND/OR tree of {field,op,value}, null = always match
+  actions:    jsonb('actions').$type<unknown[]>().notNull().default([]), // [{type, config}]
+  createdAt:  timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt:  timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({
+  entityModuleIdx: index('workflow_rules_entity_module_idx').on(t.entityId, t.moduleKey),
+  entityActiveIdx: index('workflow_rules_entity_active_idx').on(t.entityId, t.isActive),
+}))
+
+export const workflowRulesRelations = relations(workflowRules, ({ one }) => ({
+  entity: one(kibiEntities, { fields: [workflowRules.entityId], references: [kibiEntities.id] }),
+}))
+
 export const kibiModelRoleEnum = pgEnum('kibi_model_role', [
   'conversation', 'db_search', 'qdrant_search', 'redis_search',
   'intent', 'support_intent', 'support_refine', 'support_resolver', 'support_answering',

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Plus, Trash2, Edit2, X, RefreshCw } from 'lucide-react'
 import api from '../lib/api'
+import DynamicForm from '../components/DynamicForm'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 interface Contact { id: string; fullName?: string; firstName?: string; lastName?: string; email?: string; phone?: string; companyName?: string; contactType?: string; leadStatus?: string; companyId?: string }
@@ -77,16 +78,26 @@ export default function Crm() {
     }
     return (
       <Modal title={contactModal?.id ? 'Kişi Düzenle' : 'Yeni Kişi'} onClose={() => setContactModal(null)}>
-        <div className="grid gap-3 sm:grid-cols-2">
-          <F label="Ad"><input value={form.firstName} onChange={e => setForm({ ...form, firstName: e.target.value })} className={iCls} /></F>
-          <F label="Soyad"><input value={form.lastName} onChange={e => setForm({ ...form, lastName: e.target.value })} className={iCls} /></F>
-          <F label="Email"><input value={form.email} onChange={e => setForm({ ...form, email: e.target.value })} className={iCls} /></F>
-          <F label="Telefon"><input value={form.phone} onChange={e => setForm({ ...form, phone: e.target.value })} className={iCls} /></F>
-          <F label="Firma Adı"><input value={form.companyName} onChange={e => setForm({ ...form, companyName: e.target.value })} className={iCls} /></F>
-          <F label="Tür"><select value={form.contactType} onChange={e => setForm({ ...form, contactType: e.target.value })} className={iCls}>
-            {Object.entries(CONTACT_TYPE_LBL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
-          </select></F>
-        </div>
+        <DynamicForm
+          moduleKey="crm_contacts"
+          value={form}
+          onChange={setForm}
+          inputClassName={iCls}
+          excludeKeys={['fullName', 'customFields', 'tags', 'leadScore', 'opportunityScore', 'doNotContact']}
+          relationOptions={{ companyId: companies.map(c => ({ value: c.id, label: c.name })) }}
+          fallback={
+            <div className="grid gap-3 sm:grid-cols-2">
+              <F label="Ad"><input value={form.firstName} onChange={e => setForm({ ...form, firstName: e.target.value })} className={iCls} /></F>
+              <F label="Soyad"><input value={form.lastName} onChange={e => setForm({ ...form, lastName: e.target.value })} className={iCls} /></F>
+              <F label="Email"><input value={form.email} onChange={e => setForm({ ...form, email: e.target.value })} className={iCls} /></F>
+              <F label="Telefon"><input value={form.phone} onChange={e => setForm({ ...form, phone: e.target.value })} className={iCls} /></F>
+              <F label="Firma Adı"><input value={form.companyName} onChange={e => setForm({ ...form, companyName: e.target.value })} className={iCls} /></F>
+              <F label="Tür"><select value={form.contactType} onChange={e => setForm({ ...form, contactType: e.target.value })} className={iCls}>
+                {Object.entries(CONTACT_TYPE_LBL).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+              </select></F>
+            </div>
+          }
+        />
         <div className="flex gap-3 justify-end">
           <button onClick={() => setContactModal(null)} className="px-4 py-2 rounded-2xl border border-[#2a2a2a] text-gray-400">İptal</button>
           <button onClick={save} className="px-4 py-2 rounded-2xl bg-[#6366f1] text-white">Kaydet</button>

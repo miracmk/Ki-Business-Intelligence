@@ -7,6 +7,8 @@ import type { FastifyPluginAsync } from 'fastify'
 import { z } from 'zod'
 import { db } from '../../lib/db.js'
 import { queryEntitySchema } from '../../lib/entity-provisioner.js'
+import { getModuleSchema, type ModuleSchema } from '../../lib/metadata/resolver.js'
+import { runAiFields } from '../../lib/metadata/ai-fields.js'
 
 const contactSchema = z.object({
   firstName: z.string().optional(),
@@ -147,27 +149,72 @@ function selectCols(table: keyof typeof COLUMN_MAP, extra: string[] = []): strin
   return ['id', ...fieldCols, ...extra].join(', ')
 }
 
-function buildInsert(table: keyof typeof COLUMN_MAP, data: Record<string, unknown>) {
-  const map = COLUMN_MAP[table]
+// FAZ 4.3: `moduleSchema` (registry-driven, see resolver.ts) overrides COLUMN_MAP when
+// present; registry-empty modules fall back to the static COLUMN_MAP unchanged. Keys not
+// in the column map but listed as a registry custom field merge into custom_fields JSONB
+// instead of being silently dropped — this is the new capability 4.4's dynamic form will
+// rely on. No registry-defined custom field may be named 'customFields' (reserved for the
+// legacy full-object body field, which keeps overwriting custom_fields wholesale).
+function buildInsert(table: keyof typeof COLUMN_MAP, data: Record<string, unknown>, moduleSchema?: ModuleSchema | null) {
+  // Merge per-key, not whole-module replace: a key missing from the registry (e.g. not
+  // seeded yet) still resolves via the static COLUMN_MAP instead of silently dropping.
+  const map = { ...COLUMN_MAP[table], ...(moduleSchema?.columnMap ?? {}) }
+  const customKeys = moduleSchema?.customFieldKeys
   const cols: string[] = []
   const params: unknown[] = []
+  let customPayload: Record<string, unknown> | undefined
   for (const [key, val] of Object.entries(data)) {
     if (val === undefined) continue
-    cols.push(map[key])
-    params.push(typeof val === 'object' && val !== null ? JSON.stringify(val) : val)
+    if (map[key] === 'custom_fields' && val && typeof val === 'object') {
+      customPayload = { ...customPayload, ...(val as Record<string, unknown>) }
+      continue
+    }
+    if (map[key]) {
+      cols.push(map[key])
+      params.push(typeof val === 'object' && val !== null ? JSON.stringify(val) : val)
+    } else if (customKeys?.has(key)) {
+      customPayload = { ...customPayload, [key]: val }
+    }
+  }
+  if (customPayload) {
+    cols.push('custom_fields')
+    params.push(JSON.stringify(customPayload))
   }
   const placeholders = cols.map((_, i) => `$${i + 1}`)
   return { cols, placeholders, params }
 }
 
-function buildUpdate(table: keyof typeof COLUMN_MAP, data: Record<string, unknown>) {
-  const map = COLUMN_MAP[table]
+function buildUpdate(table: keyof typeof COLUMN_MAP, data: Record<string, unknown>, moduleSchema?: ModuleSchema | null) {
+  // Merge per-key, not whole-module replace — see buildInsert comment above.
+  const map = { ...COLUMN_MAP[table], ...(moduleSchema?.columnMap ?? {}) }
+  const customKeys = moduleSchema?.customFieldKeys
   const sets: string[] = []
   const params: unknown[] = []
+  let customPayload: Record<string, unknown> | undefined
+  let fullOverwrite = false
   for (const [key, val] of Object.entries(data)) {
     if (val === undefined) continue
-    params.push(typeof val === 'object' && val !== null ? JSON.stringify(val) : val)
-    sets.push(`${map[key]} = $${params.length}`)
+    if (map[key] === 'custom_fields' && val && typeof val === 'object') {
+      customPayload = { ...customPayload, ...(val as Record<string, unknown>) }
+      fullOverwrite = true
+      continue
+    }
+    if (map[key]) {
+      params.push(typeof val === 'object' && val !== null ? JSON.stringify(val) : val)
+      sets.push(`${map[key]} = $${params.length}`)
+      continue
+    }
+    if (customKeys?.has(key)) {
+      customPayload = { ...customPayload, [key]: val }
+    }
+  }
+  if (customPayload) {
+    params.push(JSON.stringify(customPayload))
+    // Legacy `customFields` body field keeps its full-overwrite semantics; genuinely
+    // dynamic per-field custom keys merge non-destructively into existing JSONB instead.
+    sets.push(fullOverwrite
+      ? `custom_fields = $${params.length}`
+      : `custom_fields = custom_fields || $${params.length}::jsonb`)
   }
   return { sets, params }
 }
@@ -208,11 +255,14 @@ export const crmNativeRoutes: FastifyPluginAsync = async (app) => {
     const body = contactSchema.safeParse(req.body)
     if (!body.success) return reply.status(400).send({ error: body.error.flatten() })
     const data = { ...body.data, fullName: body.data.fullName || [body.data.firstName, body.data.lastName].filter(Boolean).join(' ') || undefined }
-    const { cols, placeholders, params } = buildInsert('crm_contacts', data)
+    const moduleSchema = await getModuleSchema(ctx.entityId, 'crm_contacts')
+    const { cols, placeholders, params } = buildInsert('crm_contacts', data, moduleSchema)
     const rows = await queryEntitySchema(ctx.schema, `
       INSERT INTO crm_contacts (${cols.join(', ')}) VALUES (${placeholders.join(', ')})
       RETURNING ${selectCols('crm_contacts')}
     `, params)
+    const aiUpdates = await runAiFields(ctx.entityId, ctx.schema, 'crm_contacts', 'crm_contacts', rows[0])
+    if (Object.keys(aiUpdates).length) rows[0].customFields = { ...rows[0].customFields, ...aiUpdates }
     return reply.status(201).send({ contact: rows[0] })
   })
 
@@ -222,10 +272,13 @@ export const crmNativeRoutes: FastifyPluginAsync = async (app) => {
     const { id } = req.params as { id: string }
     const body = contactSchema.partial().safeParse(req.body)
     if (!body.success) return reply.status(400).send({ error: body.error.flatten() })
-    const { sets, params } = buildUpdate('crm_contacts', body.data)
+    const moduleSchema = await getModuleSchema(ctx.entityId, 'crm_contacts')
+    const { sets, params } = buildUpdate('crm_contacts', body.data, moduleSchema)
     if (sets.length === 0) return { ok: true }
     params.push(id)
     await queryEntitySchema(ctx.schema, `UPDATE crm_contacts SET ${sets.join(', ')}, updated_at = NOW() WHERE id = $${params.length}`, params)
+    const [updated] = await queryEntitySchema(ctx.schema, `SELECT ${selectCols('crm_contacts')} FROM crm_contacts WHERE id = $1`, [id])
+    if (updated) await runAiFields(ctx.entityId, ctx.schema, 'crm_contacts', 'crm_contacts', updated)
     return { ok: true }
   })
 
@@ -258,11 +311,14 @@ export const crmNativeRoutes: FastifyPluginAsync = async (app) => {
     if (!ctx) return reply.status(404).send({ error: 'Entity şeması hazır değil' })
     const body = companySchema.safeParse(req.body)
     if (!body.success) return reply.status(400).send({ error: body.error.flatten() })
-    const { cols, placeholders, params } = buildInsert('crm_companies', body.data)
+    const moduleSchema = await getModuleSchema(ctx.entityId, 'crm_companies')
+    const { cols, placeholders, params } = buildInsert('crm_companies', body.data, moduleSchema)
     const rows = await queryEntitySchema(ctx.schema, `
       INSERT INTO crm_companies (${cols.join(', ')}) VALUES (${placeholders.join(', ')})
       RETURNING ${selectCols('crm_companies')}
     `, params)
+    const aiUpdates = await runAiFields(ctx.entityId, ctx.schema, 'crm_companies', 'crm_companies', rows[0])
+    if (Object.keys(aiUpdates).length) rows[0].customFields = { ...rows[0].customFields, ...aiUpdates }
     return reply.status(201).send({ company: rows[0] })
   })
 
@@ -272,10 +328,13 @@ export const crmNativeRoutes: FastifyPluginAsync = async (app) => {
     const { id } = req.params as { id: string }
     const body = companySchema.partial().safeParse(req.body)
     if (!body.success) return reply.status(400).send({ error: body.error.flatten() })
-    const { sets, params } = buildUpdate('crm_companies', body.data)
+    const moduleSchema = await getModuleSchema(ctx.entityId, 'crm_companies')
+    const { sets, params } = buildUpdate('crm_companies', body.data, moduleSchema)
     if (sets.length === 0) return { ok: true }
     params.push(id)
     await queryEntitySchema(ctx.schema, `UPDATE crm_companies SET ${sets.join(', ')}, updated_at = NOW() WHERE id = $${params.length}`, params)
+    const [updated] = await queryEntitySchema(ctx.schema, `SELECT ${selectCols('crm_companies')} FROM crm_companies WHERE id = $1`, [id])
+    if (updated) await runAiFields(ctx.entityId, ctx.schema, 'crm_companies', 'crm_companies', updated)
     return { ok: true }
   })
 
@@ -307,11 +366,14 @@ export const crmNativeRoutes: FastifyPluginAsync = async (app) => {
     if (!ctx) return reply.status(404).send({ error: 'Entity şeması hazır değil' })
     const body = dealSchema.safeParse(req.body)
     if (!body.success) return reply.status(400).send({ error: body.error.flatten() })
-    const { cols, placeholders, params } = buildInsert('crm_deals', body.data)
+    const moduleSchema = await getModuleSchema(ctx.entityId, 'crm_deals')
+    const { cols, placeholders, params } = buildInsert('crm_deals', body.data, moduleSchema)
     const rows = await queryEntitySchema(ctx.schema, `
       INSERT INTO crm_deals (${cols.join(', ')}) VALUES (${placeholders.join(', ')})
       RETURNING ${selectCols('crm_deals')}
     `, params)
+    const aiUpdates = await runAiFields(ctx.entityId, ctx.schema, 'crm_deals', 'crm_deals', rows[0])
+    if (Object.keys(aiUpdates).length) rows[0].customFields = { ...rows[0].customFields, ...aiUpdates }
     return reply.status(201).send({ deal: rows[0] })
   })
 
@@ -321,12 +383,15 @@ export const crmNativeRoutes: FastifyPluginAsync = async (app) => {
     const { id } = req.params as { id: string }
     const body = dealSchema.partial().safeParse(req.body)
     if (!body.success) return reply.status(400).send({ error: body.error.flatten() })
-    const { sets, params } = buildUpdate('crm_deals', body.data)
+    const moduleSchema = await getModuleSchema(ctx.entityId, 'crm_deals')
+    const { sets, params } = buildUpdate('crm_deals', body.data, moduleSchema)
     if (sets.length === 0) return { ok: true }
     const closingStages = ['won', 'lost']
     const extraSet = body.data.stage && closingStages.includes(body.data.stage) ? `, closed_at = NOW()` : ''
     params.push(id)
     await queryEntitySchema(ctx.schema, `UPDATE crm_deals SET ${sets.join(', ')}, updated_at = NOW()${extraSet} WHERE id = $${params.length}`, params)
+    const [updated] = await queryEntitySchema(ctx.schema, `SELECT ${selectCols('crm_deals')} FROM crm_deals WHERE id = $1`, [id])
+    if (updated) await runAiFields(ctx.entityId, ctx.schema, 'crm_deals', 'crm_deals', updated)
     return { ok: true }
   })
 
@@ -360,11 +425,14 @@ export const crmNativeRoutes: FastifyPluginAsync = async (app) => {
     if (!ctx) return reply.status(404).send({ error: 'Entity şeması hazır değil' })
     const body = activitySchema.safeParse(req.body)
     if (!body.success) return reply.status(400).send({ error: body.error.flatten() })
-    const { cols, placeholders, params } = buildInsert('crm_activities', body.data)
+    const moduleSchema = await getModuleSchema(ctx.entityId, 'crm_activities')
+    const { cols, placeholders, params } = buildInsert('crm_activities', body.data, moduleSchema)
     const rows = await queryEntitySchema(ctx.schema, `
       INSERT INTO crm_activities (${cols.join(', ')}) VALUES (${placeholders.join(', ')})
       RETURNING ${selectCols('crm_activities')}
     `, params)
+    // No AI field wiring here: crm_activities has no custom_fields column (unlike
+    // contacts/companies/deals), so runAiFields's UPDATE would fail. Out of scope for 4.5.
     return reply.status(201).send({ activity: rows[0] })
   })
 
@@ -374,7 +442,8 @@ export const crmNativeRoutes: FastifyPluginAsync = async (app) => {
     const { id } = req.params as { id: string }
     const body = activitySchema.partial().safeParse(req.body)
     if (!body.success) return reply.status(400).send({ error: body.error.flatten() })
-    const { sets, params } = buildUpdate('crm_activities', body.data)
+    const moduleSchema = await getModuleSchema(ctx.entityId, 'crm_activities')
+    const { sets, params } = buildUpdate('crm_activities', body.data, moduleSchema)
     if (sets.length === 0) return { ok: true }
     const extraSet = body.data.status === 'completed' ? `, completed_at = NOW()` : ''
     params.push(id)

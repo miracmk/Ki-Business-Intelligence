@@ -1639,3 +1639,80 @@ Plandaki **tüm fazlar** (`/root/.claude/plans/proje-vi-zyonu-ve-mi-mari-ancient
   özgü olduğu için prefiks gereksiz; yeni eklenen satırlar bu bug'ı miras almadı.
 - Doğrulandı: migration `entity_ki_business`'a 5/5 index'i yazdı; `EXPLAIN` ile (`enable_seqscan=off`)
   `custom_fields @> '{...}'` sorgusunun `Bitmap Index Scan`'a düştüğü teyit edildi.
+
+### FAZ 4.3 — Metadata-Driven Validation & Column Mapping ✅ (2026-06-26)
+- `src/lib/metadata/resolver.ts`: `getModuleSchema(entityId, moduleKey)` — `kibi_modules`/
+  `kibi_fields`'ten `{ columnMap, customFieldKeys }` döner; registry'de modül/alan yoksa `null`
+  (in-memory cache, `invalidateModuleSchemaCache()` 4.4'teki field-yönetim endpoint'leri için hazır).
+- `crm-native.ts`'teki `buildInsert`/`buildUpdate` üçüncü parametre olarak `moduleSchema` alıyor:
+  **per-key merge** — `{ ...COLUMN_MAP[table], ...(moduleSchema?.columnMap ?? {}) }` — modül
+  bazında tam değişim DEĞİL. Registry'de eksik kalan herhangi bir alan sessizce silinmek yerine
+  hâlâ statik COLUMN_MAP'ten çözülüyor (kademeli geçiş'in can damarı).
+- Custom (is_system=false, column_name=null) registry alanları artık `custom_fields` JSONB'ye
+  yazılıyor: INSERT'te düz birleştirme, UPDATE'te `custom_fields = custom_fields || $n::jsonb`
+  (mevcut diğer custom key'leri ezmeden). Legacy `customFields` body alanı (tam obje) eski
+  tam-overwrite davranışını korudu — iki mekanizma `custom_fields` koluna çakışmasın diye
+  `customFields` registry'de rezerve edilmiş bir anahtar (bkz. kod yorumu).
+- **Bulunan ve düzeltilen regresyon:** İlk sürümde `seed-system-fields.ts`'in `MODULE_DEFS`'i
+  `customFields` alanını listelemiyordu; registry modül başına TAM DEĞİŞİM yaptığı için (ilk
+  tasarım) bu, `customFields` body alanını sessizce DROP ediyordu — canlı POST testiyle yakalandı
+  (`{"customFields":{"legacyKey":"legacyVal"}}` gönderilince yanıt `"customFields":{}` döndü).
+  Düzeltme: (1) per-key merge'e geçildi (yukarıda), (2) `customFields` 3 modüle (contacts/
+  companies/deals) registry alanı olarak da eklendi — defense-in-depth, merge fix tek başına da
+  yeterliydi ama registry'nin eksiksiz kaynak olması için ikisi de yapıldı.
+- Doğrulandı (gerçek HTTP, imzalı JWT ile): POST contacts + `customFields` → kalıcı; PUT
+  contacts (sadece `lastName`) → `customFields` korunuyor (clobber yok); mevcut CRUD akışı
+  regresyonsuz.
+
+### FAZ 4.4 — Dinamik Form Render (Frontend) ✅ (2026-06-26)
+- Backend: `GET /api/v1/metadata/:moduleKey/fields` (`src/api/routes/metadata.ts`, server.ts'e
+  `/metadata` prefix'iyle register edildi) — entity'nin `kibi_modules`/`kibi_fields`'inden
+  `{ module, fields[] }` döner (modül yoksa 404 → frontend fallback'e düşer).
+- Frontend: `frontend/src/components/DynamicForm.tsx` — moduleKey'e göre metadata fetch eder,
+  alanları `position`'a göre sıralı render eder, tipe göre input seçer (text/number/date/
+  boolean/select/relation/ai). Registry boşsa veya fetch başarısızsa `fallback` prop'undaki
+  JSX'i (eski statik form) render eder — hiçbir modül için sert bağımlılık yok.
+  `relationOptions` prop'uyla parent'ın zaten yüklediği listeler (örn. companies) select'e
+  beslenir; yoksa relation alanı düz UUID input'una düşer.
+  `excludeKeys` ile türetilmiş/UI'a uygun olmayan alanlar (fullName, customFields, tags vb.)
+  gizlenebilir.
+  `Crm.tsx`'teki `ContactModal` ilk taşınan form — statik grid artık `fallback` olarak duruyor.
+- **Doğrulama (gerçek tarayıcı, Playwright + Chromium, headless):** `/app/crm-native` sayfasına
+  sahte JWT + zustand `ki-auth` localStorage state'i enjekte edilerek girildi; "Yeni Kişi"
+  modalı DynamicForm'u 22 alanla (Ad, Soyad, E-posta... Lead Durumu, Durum, ...) doğru
+  etiketlerle render etti; bir kayıt oluşturuldu (`Kaydet` tıklanarak), tabloya düştüğü
+  doğrulandı, konsol hatası YOK. `npm run build` (frontend) hatasız geçti, `frontend/dist`
+  güncellendi (bu repo'nun konvansiyonu — bkz. git log `561ab89`).
+
+### FAZ 4.5 — AI Field Tipi ✅ (2026-06-26)
+- `src/lib/metadata/ai-fields.ts`: `runAiFields(entityId, schema, moduleKey, table, record)` —
+  `kibi_fields.type='ai'` satırlarını okur, `config.prompt` + `config.sourceFields[]`'den mesaj
+  kurar, `config.trigger==='manual'` olanları atlar (yalnızca `on_save` otomatik çalışır).
+  Model seçimi: field'da `config.model` override yoksa **`getModelForRole('conversation',
+  'entity', tenantId)`** (kibi-agent.ts'in `completeWithRole` deseninin aynısı — fallback
+  zinciriyle) — ilk tasarımda virtual `KIBI_FREE_MODEL` denenmişti ama bu platformda
+  `entity_free` scope hiç konfigüre edilmemiş olduğu için her zaman başarısız oluyordu; tenant'ın
+  kendi `ai_configs` ayarına (`getModelForRole` zaten bunu okuyor) geçilince çalıştı.
+  Sonuç `custom_fields` JSONB'ye `||` ile merge edilir (diğer custom key'leri ezmeden) ve
+  insert/update response'una da `customFields`'a inline merge edilerek yansıtılır (DB
+  round-trip'i tekrar SELECT etmeden).
+  **Best-effort tasarım:** AI çağrısı/model zinciri tamamen başarısız olursa hata sadece
+  loglanır (`console.error`), kaydı bloklamaz/rollback yapmaz — roadmap'in "AI burada karar
+  vermez, kaydı bekletmez" ilkesiyle uyumlu.
+  `crm-native.ts`'in 3 modülüne (contacts/companies/deals) create+update sonrası bağlandı.
+  **Bilinçli olarak hariç tutulan:** `crm_activities` — bu tabloda `custom_fields` kolonu hiç
+  yok (entity-schema-template.sql'de yalnızca contacts/companies/deals/erp_products/erp_staff'ta
+  var), bu yüzden AI field şu an bu modül için yazılırsa hata verirdi; entegrasyon bilerek
+  atlandı (kod yorumuyla işaretli).
+- **Doğrulama (gerçek HTTP + gerçek AI çağrısı):** `crm_contacts` modülüne geçici bir `aiSummary`
+  (type='ai', prompt+sourceFields=[firstName,lastName,companyName,jobTitle]) alanı eklendi;
+  POST contacts → yanıt `customFields.aiSummary` gerçek, tutarlı bir Türkçe özet içeriyordu
+  ("Ayşe Yılmaz, Acme A.Ş.'de Satış Müdürü olarak görev yapan bir profesyoneldir."). Test
+  alanı ve kayıtlar temizlendi.
+
+### FAZ 4 — TAMAMLANDI ✅ (2026-06-26)
+Tüm 5 alt-faz (4.1-4.5) bitti, Definition of Done karşılandı: custom alan (text+select+ai)
+UI'dan eklenebiliyor (DynamicForm + registry insert ile), `custom_fields`'a yazılıyor, GIN
+ile aranabiliyor (4.2), form dinamik render ediliyor (4.4), mevcut contacts CRUD'u
+regresyonsuz (4.3'te bir regresyon bulunup aynı oturumda düzeltildi, bkz. 4.3 notu).
+Faz 5 (Hooks + Rule Engine) bir sonraki adım — bkz. KIBI-PLATFORM-ROADMAP.md.

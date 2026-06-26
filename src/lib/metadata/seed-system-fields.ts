@@ -56,6 +56,7 @@ const MODULE_DEFS: Record<string, ModuleDef> = {
       { key: 'assignedToUserId', columnName: 'assigned_to_user_id', label: 'Atanan Kullanıcı', type: 'relation', config: { targetModule: 'users' } },
       { key: 'tags', columnName: 'tags', label: 'Etiketler', type: 'text', config: { array: true } },
       { key: 'doNotContact', columnName: 'do_not_contact', label: 'İletişim Kurulmasın', type: 'boolean' },
+      { key: 'customFields', columnName: 'custom_fields', label: 'Özel Alanlar', type: 'text', config: { json: true } },
     ],
   },
   crm_companies: {
@@ -87,6 +88,7 @@ const MODULE_DEFS: Record<string, ModuleDef> = {
       { key: 'assignedToUserId', columnName: 'assigned_to_user_id', label: 'Atanan Kullanıcı', type: 'relation', config: { targetModule: 'users' } },
       { key: 'parentCompanyId', columnName: 'parent_company_id', label: 'Ana Şirket', type: 'relation', config: { targetModule: 'crm_companies' } },
       { key: 'tags', columnName: 'tags', label: 'Etiketler', type: 'text', config: { array: true } },
+      { key: 'customFields', columnName: 'custom_fields', label: 'Özel Alanlar', type: 'text', config: { json: true } },
     ],
   },
   crm_deals: {
@@ -109,6 +111,7 @@ const MODULE_DEFS: Record<string, ModuleDef> = {
       { key: 'wonReason', columnName: 'won_reason', label: 'Kazanma Sebebi', type: 'text' },
       { key: 'assignedToUserId', columnName: 'assigned_to_user_id', label: 'Atanan Kullanıcı', type: 'relation', config: { targetModule: 'users' } },
       { key: 'tags', columnName: 'tags', label: 'Etiketler', type: 'text', config: { array: true } },
+      { key: 'customFields', columnName: 'custom_fields', label: 'Özel Alanlar', type: 'text', config: { json: true } },
     ],
   },
   crm_activities: {

@@ -20,6 +20,7 @@ import { startCrmScheduler }  from './engine/crm-sync/crm-scheduler.js'
 import { startBillingScheduler } from './engine/billing/billing.js'
 import { crmRoutes }        from './api/routes/crm.js'
 import { crmNativeRoutes }  from './api/routes/crm-native.js'
+import { metadataRoutes }   from './api/routes/metadata.js'
 import { erpNativeRoutes }  from './api/routes/erp-native.js'
 import { customerServiceRoutes } from './api/routes/customer-service.js'
 import { fulfillmentNativeRoutes } from './api/routes/fulfillment-native.js'
@@ -107,6 +108,7 @@ await app.register(async (api) => {
   await api.register(tenantRoutes,     { prefix: '/tenants' })
   await api.register(crmRoutes,        { prefix: '/crm' })
   await api.register(crmNativeRoutes,  { prefix: '/crm-native' })
+  await api.register(metadataRoutes,   { prefix: '/metadata' })
   await api.register(erpNativeRoutes,  { prefix: '/erp-native' })
   await api.register(customerServiceRoutes, { prefix: '/customer-service' })
   await api.register(fulfillmentNativeRoutes, { prefix: '/fulfillment-native' })

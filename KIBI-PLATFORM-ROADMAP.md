@@ -76,9 +76,12 @@
 
 ---
 
-## FAZ 4 — Metadata Foundation
+## FAZ 4 — Metadata Foundation ✅ TAMAMLANDI (2026-06-26)
 > **En yüksek kaldıraç. Tüm sonraki fazların önkoşulu. BURADAN BAŞLA.**
 > İlham: Attio custom objects, Zoho custom modules.
+>
+> Detaylı uygulama kaydı (commit'ler, doğrulama adımları, bulunan/düzeltilen regresyon):
+> KIBIPR.md → "FAZ 4+ — Agentic Platform Roadmap" bölümü. Sıradaki: **FAZ 5**.
 
 ### 4.1 — Field/Module Registry (merkezi DB, Drizzle)
 `db/schema.ts`'e iki yeni control-plane tablosu ekle (entity şemasına DEĞİL, merkeze):

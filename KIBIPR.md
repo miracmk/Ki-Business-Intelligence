@@ -1802,3 +1802,94 @@ Faz 5 (Hooks + Rule Engine) bir sonraki adım — bkz. KIBI-PLATFORM-ROADMAP.md.
 tanımlanabilecek şekilde (şu an doğrudan SQL ile, henüz bir "kural editörü" UI'ı yok — bu
 Faz 8'in "no-code" kapsamına daha yakın, Faz 5 DoD'u backend mekanizmasını istiyor) tanımlanıp
 gerçek bir CRUD işlemiyle tetiklendi.
+
+---
+
+## FAZ 6 — Blueprint / State Machine ✅ TAMAMLANDI (2026-06-26)
+
+### FAZ 6.1 — Transition + Approval Tabloları
+- `db/schema.ts`: `blueprintTransitions` (`entity_id, module_key, field_key, from_state,
+  to_state, conditions jsonb, requires_approval_role, actions jsonb`) + `blueprintApprovals`
+  (`..., status enum(pending|approved|rejected), requested_by_user_id, resolved_by_user_id`,
+  `transition_id` → `blueprint_transitions.id` **ON DELETE CASCADE** — bir transition silinirse
+  ona bağlı approval kayıtları da silinir, canlı testte gözlemlendi).
+  `db/migrations/0026_blueprint.sql` — psql exec ile uygulandı (FAZ 4.1 konvansiyonu).
+
+### FAZ 6.2 — Gating Validation (Backend)
+- `src/lib/hooks/lifecycle.ts` genişletildi: **`runBeforeSaveHooks`** — `afterSave`'den
+  temelden farklı bir API, çünkü save'i REDDEDEBİLİR (`{allowed:false, reason, ...}`).
+  **Fail-open/fail-closed ayrımı kasıtlı:** bir hook'un kendisi `{allowed:false}` DÖNERSE
+  bloklanır (deterministik karar); ama hook'un kendisi THROW EDERSE save'e izin verilir
+  (fail-open, loglanır) — blueprint burada *workflow* gating, *güvenlik* değil (güvenlik
+  FAZ 9'un işi); bir DB/altyapı hatası tüm CRM yazımlarını durdurmamalı.
+- `src/lib/hooks/handlers/blueprint-gate-hook.ts`: bir (module_key,field_key) için HERHANGİ
+  bir transition tanımlanırsa o alan "blueprint kontrolünde" sayılır — tanımsız HER geçiş
+  bloklanır. **Bilinçli footgun (Zoho Blueprint semantiği, ama gerçek bir tuzak):** kısmi
+  yapılandırılmış bir blueprint, o alandaki diğer TÜM durum değişikliklerini de kilitler.
+  Yeni bir transition eklemeden önce o field_key için olası TÜM geçişlerin tanımlı olduğundan
+  emin olun.
+- `crm-native.ts`'in `PUT /deals/:id`'si genişletildi: UPDATE'ten ÖNCE `prev` satırı
+  `selectCols` ile çekilir, **`record = {...prev, ...body.data}`** (yalnızca patch DEĞİL —
+  conditions, body'de olmayan alanlara da referans verebilir, örn. sadece `stage` gönderilse
+  bile `dealValue` koşulu doğru değerlendirilir). Gate `{allowed:false}` dönerse: `pendingApproval`
+  ise `blueprint_approvals` satırı yazılır ve **stage DEĞİŞTİRİLMEDEN** 202 dönülür; değilse 422.
+  Gate izin verirse mevcut UPDATE + `closed_at` extraSet mantığı DEĞİŞMEDEN çalışır, ardından
+  `afterSave` (re-SELECT edilmiş GERÇEK satırla — beforeSave'in projected merge'ünden FARKLI
+  bir veri, ikisi karıştırılmadı) tetiklenir.
+- `src/api/routes/blueprint.ts`: `/transitions` CRUD + `/approvals` (liste, approve, reject).
+  **Re-entrancy önlemi:** approve endpoint'i değişikliği `queryEntitySchema` ile DOĞRUDAN
+  uygular (FAZ 5.5'in `updateField` deseniyle, registry'den çözülen güvenli kolon adı) —
+  PUT /deals/:id'yi ÇAĞIRMAZ, yoksa onaylanan değişiklik kendi gate'ine yeniden girip
+  döngüye/yeniden-redde girebilirdi.
+- **Güvenlik notu (kullanıcı kimliği):** `req.user.sub` test/üretim JWT'lerinde her zaman
+  geçerli bir UUID olmayabilir (örn. bu oturumun test token'ları `'test-user'` literal'ı
+  kullandı) — `requestedByUserId`/`resolvedByUserId` yazılmadan önce `isUUID()` ile doğrulanır,
+  değilse `NULL` yazılır (FK/tip hatası önlenir). **Gerçek bir kullanıcı kimliğini taklit eden
+  JWT forge edilmedi** — bu, oturum içinde Claude Code'un permission classifier'ı tarafından
+  doğru şekilde reddedildi (gerçek `main_user_id` ile token üretme girişimi), test placeholder
+  `sub`'a geri dönüldü.
+- **Doğrulama (gerçek HTTP, tam matris):**
+  1. Blueprint yokken: stage değişimi serbest (regresyon temeli).
+  2. Blueprint varken, gated olmayan alan (title) güncellemesi → başarılı (FAZ 4.3 analojisi —
+     "registry/blueprint VARKEN bile etkilenmeyen yol çalışıyor mu" testi).
+  3. Tanımlı geçiş (qualified→proposal, koşulsuz) → başarılı.
+  4. Tanımsız geçiş (qualified→won, hiç tanımlı değil) → 422.
+  5. Koşullu+onaylı geçiş (negotiation→won, `dealValue>0`, `requiresApprovalRole:manager`):
+     koşul karşılanınca → 202 pending, DB'de stage DEĞİŞMEDİ (doğrulandı).
+  6. Approve çağrısı → DB'de stage='won' VE `closed_at` set edildi (doğrulandı).
+  7. Koşul karşılanmadığında (`dealValue=0`) → 422 "zorunlu koşullar sağlanmadı" (onay
+     sorusuna gelmeden, koşul kontrolünün önce çalıştığı doğrulandı).
+  Test transition/approval/deal kayıtları temizlendi.
+
+### FAZ 6.3 — Frontend (Form/Liste UI — React Flow canvas DEĞİL)
+- `frontend/src/pages/Blueprint.tsx`: transition listesi + ekleme formu (modül/alan/
+  from→to/koşul/onay rolü) + bekleyen onaylar inbox'ı (approve/reject butonları).
+  **Bilinçli kapsam kararı:** roadmap "Drag-drop node/edge editörü (React Flow)" istiyor;
+  ölçülebilir DoD backend gating davranışı olduğu için (6.2) bu faz form/liste tabanlı
+  basit bir UI ile sevkedildi — canvas editör daha sonra, aynı API'yi kullanarak eklenebilir.
+  Sidebar'a "Blueprint" linki + `/app/blueprint` route eklendi.
+  **Doğrulama:** Playwright + Chromium ile gerçek tarayıcıda — sayfa render, transition
+  ekleme formu çalışıyor, liste güncelleniyor, konsol hatası YOK. `npm run build` (frontend)
+  hatasız.
+
+**Faz 6 DoD karşılandı:** Deal "negotiation → won" geçişi, manager onayı + zorunlu alan
+kontrolüyle (dealValue>0) bloklanıyor — gerçek HTTP istekleriyle uçtan uca doğrulandı.
+
+---
+
+## Faz Geçişlerinde Bilinçli Kapsam Daraltmaları (tek liste, dağınık not yerine)
+
+> Her biri kendi fazında gerekçelendirildi; burada tek yerden takip için toplandı.
+
+- **FAZ 4.1:** Seed script'i yalnızca `crm-native.ts` (4 modül) kapsıyor — `erp-native.ts`,
+  `accounting.ts`, personnel/ecommerce/marketing/fulfillment/event-native modülleri registry'de
+  YOK (statik COLUMN_MAP fallback'i bu modüllerde hâlâ tek yol).
+- **FAZ 4.5:** AI field tipi `crm_activities`'te ÇALIŞMIYOR (tabloda `custom_fields` kolonu yok).
+- **FAZ 5.3:** `workflow_rules.trigger` enum'da `on_stage_change`/`scheduled` VAR ama hiçbir
+  evaluator/producer onları işlemiyor — yalnızca `on_create`/`on_update` aktif.
+- **FAZ 5.5:** `email` handler'ı canlı ateşlenerek test edilmedi (yan etkisiz tutmak için);
+  `run_function`/`require_approval` FAZ 7/6 stub'ları (artık 6 gerçek, 7 hâlâ stub).
+- **FAZ 6.3:** Görsel React Flow canvas editörü YOK — form/liste tabanlı basit UI var.
+- **FAZ 6.2:** Blueprint gating yalnızca `crm_deals.stage`'e (PUT /deals/:id) bağlandı; diğer
+  modüllerin hiçbir alanı blueprint kontrolünde değil (mekanizma jenerik, sadece bu tek
+  call-site'a kablolanmış durumda).

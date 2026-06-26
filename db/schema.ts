@@ -371,6 +371,55 @@ export const workflowRulesRelations = relations(workflowRules, ({ one }) => ({
   entity: one(kibiEntities, { fields: [workflowRules.entityId], references: [kibiEntities.id] }),
 }))
 
+// FAZ 6.1: Blueprint / state machine — deterministic gating on a field's value transitions
+// (e.g. crm_deals.stage). Defining ANY transition for a (module_key, field_key) pair puts
+// that field under blueprint control: every other, undefined transition on that field is
+// then blocked. See KIBIPR.md FAZ 6 for this footgun spelled out for rule authors.
+export const blueprintTransitions = pgTable('blueprint_transitions', {
+  id:                   uuid('id').primaryKey().defaultRandom(),
+  entityId:             uuid('entity_id').notNull().references(() => kibiEntities.id, { onDelete: 'cascade' }),
+  moduleKey:            varchar('module_key', { length: 100 }).notNull(),
+  fieldKey:             varchar('field_key', { length: 100 }).notNull(),   // e.g. 'stage'
+  fromState:            varchar('from_state', { length: 100 }).notNull(),
+  toState:              varchar('to_state', { length: 100 }).notNull(),
+  conditions:           jsonb('conditions').$type<unknown>().default(null), // required-field checks, evaluator.ts format
+  requiresApprovalRole: varchar('requires_approval_role', { length: 50 }),
+  actions:              jsonb('actions').$type<unknown[]>().notNull().default([]),
+  createdAt:            timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({
+  entityModuleFieldIdx: index('blueprint_transitions_entity_module_field_idx').on(t.entityId, t.moduleKey, t.fieldKey),
+}))
+
+export const blueprintTransitionsRelations = relations(blueprintTransitions, ({ one }) => ({
+  entity: one(kibiEntities, { fields: [blueprintTransitions.entityId], references: [kibiEntities.id] }),
+}))
+
+export const blueprintApprovalStatusEnum = pgEnum('blueprint_approval_status', ['pending', 'approved', 'rejected'])
+
+export const blueprintApprovals = pgTable('blueprint_approvals', {
+  id:             uuid('id').primaryKey().defaultRandom(),
+  entityId:       uuid('entity_id').notNull().references(() => kibiEntities.id, { onDelete: 'cascade' }),
+  moduleKey:      varchar('module_key', { length: 100 }).notNull(),
+  table:          varchar('table', { length: 100 }).notNull(),
+  recordId:       uuid('record_id').notNull(),
+  fieldKey:       varchar('field_key', { length: 100 }).notNull(),
+  fromState:      varchar('from_state', { length: 100 }).notNull(),
+  toState:        varchar('to_state', { length: 100 }).notNull(),
+  transitionId:   uuid('transition_id').notNull().references(() => blueprintTransitions.id, { onDelete: 'cascade' }),
+  status:         blueprintApprovalStatusEnum('status').notNull().default('pending'),
+  requestedByUserId: uuid('requested_by_user_id').references(() => users.id, { onDelete: 'set null' }),
+  resolvedByUserId:  uuid('resolved_by_user_id').references(() => users.id, { onDelete: 'set null' }),
+  resolvedAt:     timestamp('resolved_at', { withTimezone: true }),
+  createdAt:      timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({
+  entityStatusIdx: index('blueprint_approvals_entity_status_idx').on(t.entityId, t.status),
+}))
+
+export const blueprintApprovalsRelations = relations(blueprintApprovals, ({ one }) => ({
+  entity:     one(kibiEntities, { fields: [blueprintApprovals.entityId], references: [kibiEntities.id] }),
+  transition: one(blueprintTransitions, { fields: [blueprintApprovals.transitionId], references: [blueprintTransitions.id] }),
+}))
+
 export const kibiModelRoleEnum = pgEnum('kibi_model_role', [
   'conversation', 'db_search', 'qdrant_search', 'redis_search',
   'intent', 'support_intent', 'support_refine', 'support_resolver', 'support_answering',

@@ -6,9 +6,10 @@
 import type { FastifyPluginAsync } from 'fastify'
 import { z } from 'zod'
 import { db } from '../../lib/db.js'
+import { blueprintApprovals } from '../../../db/schema.js'
 import { queryEntitySchema } from '../../lib/entity-provisioner.js'
 import { getModuleSchema, type ModuleSchema } from '../../lib/metadata/resolver.js'
-import { runHooks } from '../../lib/hooks/lifecycle.js'
+import { runHooks, runBeforeSaveHooks } from '../../lib/hooks/lifecycle.js'
 
 const contactSchema = z.object({
   firstName: z.string().optional(),
@@ -219,9 +220,10 @@ function buildUpdate(table: keyof typeof COLUMN_MAP, data: Record<string, unknow
   return { sets, params }
 }
 
+const isUUID = (s: string | null | undefined): boolean =>
+  !!s && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)
+
 async function resolveEntityContext(tenantId: string | null): Promise<{ entityId: string; schema: string } | null> {
-  const isUUID = (s: string | null | undefined) =>
-    !!s && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)
   if (!isUUID(tenantId)) return null
   const entity = await db.query.kibiEntities.findFirst({
     where: (t, { eq }) => eq(t.entityId, tenantId!),
@@ -383,6 +385,32 @@ export const crmNativeRoutes: FastifyPluginAsync = async (app) => {
     const moduleSchema = await getModuleSchema(ctx.entityId, 'crm_deals')
     const { sets, params } = buildUpdate('crm_deals', body.data, moduleSchema)
     if (sets.length === 0) return { ok: true }
+
+    // FAZ 6.2: beforeSave gate. `record` here is the PROJECTED post-write state
+    // ({...prev, ...patch}) — not just the patch — so conditions can reference fields the
+    // caller didn't touch (e.g. dealValue when only `stage` is in the request body).
+    const [prev] = await queryEntitySchema(ctx.schema, `SELECT ${selectCols('crm_deals')} FROM crm_deals WHERE id = $1`, [id])
+    if (!prev) return reply.status(404).send({ error: 'Anlaşma bulunamadı' })
+    const projected = { ...prev, ...body.data }
+    const gate = await runBeforeSaveHooks({ entityId: ctx.entityId, schema: ctx.schema, moduleKey: 'crm_deals', table: 'crm_deals', trigger: 'on_update', record: projected, prev })
+    if (!gate.allowed) {
+      if (gate.pendingApproval && gate.transitionId) {
+        await db.insert(blueprintApprovals).values({
+          entityId: ctx.entityId,
+          moduleKey: 'crm_deals',
+          table: 'crm_deals',
+          recordId: id,
+          fieldKey: 'stage',
+          fromState: String(prev.stage),
+          toState: String(projected.stage),
+          transitionId: gate.transitionId,
+          requestedByUserId: isUUID((req.user as any).sub) ? (req.user as any).sub : null,
+        })
+        return reply.status(202).send({ pendingApproval: true, reason: gate.reason })
+      }
+      return reply.status(422).send({ error: gate.reason ?? 'Geçişe izin verilmiyor' })
+    }
+
     const closingStages = ['won', 'lost']
     const extraSet = body.data.stage && closingStages.includes(body.data.stage) ? `, closed_at = NOW()` : ''
     params.push(id)

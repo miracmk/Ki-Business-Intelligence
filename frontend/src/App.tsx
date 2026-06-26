@@ -9,6 +9,7 @@ import Dashboard from './pages/Dashboard'
 import Modules from './pages/Modules'
 import Crm from './pages/Crm'
 import Erp from './pages/Erp'
+import Blueprint from './pages/Blueprint'
 import CustomerService from './pages/CustomerService'
 import Fulfillment from './pages/Fulfillment'
 import Ecommerce from './pages/Ecommerce'
@@ -25,6 +26,7 @@ import Admin from './pages/Admin'
 import PlatformSettings from './pages/PlatformSettings'
 import Register from './pages/Register'
 import KiWallet from './pages/KiWallet'
+import PrivacyPolicy from './pages/PrivacyPolicy'
 function PrivateRoute({ children }: { children: React.ReactNode }) {
   const { accessToken } = useAuth()
   if (!accessToken) return <Navigate to="/app/login" replace />
@@ -44,6 +46,7 @@ function AppShell() {
     <div className="min-h-screen">
       <Routes>
         <Route path="/" element={<Landing />} />
+        <Route path="/privacy-policy" element={<PrivacyPolicy />} />
         <Route path="/app/login" element={<Login />} />
         <Route path="/app/login/2fa" element={<TwoFactor />} />
         <Route path="/app/register" element={<Register />} />
@@ -52,6 +55,7 @@ function AppShell() {
           <Route path="dashboard"  element={<Dashboard />} />
           <Route path="crm-native" element={<Crm />} />
           <Route path="erp-native" element={<Erp />} />
+          <Route path="blueprint" element={<Blueprint />} />
           <Route path="customer-service" element={<CustomerService />} />
           <Route path="fulfillment" element={<Fulfillment />} />
           <Route path="ecommerce" element={<Ecommerce />} />

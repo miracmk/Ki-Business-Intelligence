@@ -6,6 +6,7 @@ import {
   Sun, Moon, Menu, X, ChevronDown, ChevronRight,
   MessageSquare, Bot, Settings2, BarChart3, Database,
   Bell, CheckCheck, Wallet, Users, Boxes, Headset, Truck, ShoppingCart, Megaphone, CalendarDays, IdCard,
+  GitBranch,
 } from 'lucide-react'
 import api from '../lib/api'
 
@@ -236,6 +237,14 @@ export default function Layout() {
           style={linkStyle(activeLink('/app/erp-native'))}
           onMouseEnter={hoverIn} onMouseLeave={e => hoverOut(e, activeLink('/app/erp-native'))}>
           <Boxes size={17} /><span className="text-sm font-medium">ERP</span>
+        </Link>
+
+        {/* Blueprint — FAZ 6: deterministik geçiş kuralları + onay kuyruğu (örn. deal stage) */}
+        <Link to="/app/blueprint"
+          className="flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all duration-200"
+          style={linkStyle(activeLink('/app/blueprint'))}
+          onMouseEnter={hoverIn} onMouseLeave={e => hoverOut(e, activeLink('/app/blueprint'))}>
+          <GitBranch size={17} /><span className="text-sm font-medium">Blueprint</span>
         </Link>
 
         {/* CRM Bağlantıları expandable (eski "CRM" — harici connector senkron/izleme, route değişmedi) */}

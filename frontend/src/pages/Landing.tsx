@@ -563,6 +563,12 @@ export default function Landing() {
             <span>© 2026 Ki Business Intelligence</span>
             <span>Powered by KIBI AI</span>
             <a
+              href="/privacy-policy"
+              className="hover:text-[var(--accent)] transition-colors"
+            >
+              Gizlilik Politikası
+            </a>
+            <a
               href="mailto:destek@kibusiness.co"
               className="hover:text-[var(--accent)] transition-colors"
             >

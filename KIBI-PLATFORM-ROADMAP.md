@@ -198,8 +198,11 @@ workflow_rules
 
 ---
 
-## FAZ 6 — Blueprint / State Machine
+## FAZ 6 — Blueprint / State Machine ✅ TAMAMLANDI (2026-06-26)
 > İlham: Zoho Blueprint, Salesforce stage gating.
+>
+> Detaylı uygulama kaydı: KIBIPR.md → "FAZ 6 — Blueprint / State Machine" bölümü.
+> Sıradaki: **FAZ 7** (Custom Functions).
 
 ### 6.1 — Transition Tablosu (merkezi DB)
 ```

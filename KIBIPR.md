@@ -2349,3 +2349,91 @@ FAZ 7.4 requiredIf/showIf default karışıklığı) canlı testlerle bulunup ay
 düzeltildi — hiçbiri "bilinen sorun" olarak bırakılmadı. Kapsam daraltmaları (yukarıdaki
 her faz bölümünün "deferred" notları) bilinçli ve gerekçeli; KIBI-PLATFORM-ROADMAP.md'nin
 ilgili faz başlıklarında da işaretli.
+
+---
+
+## KiBI WebApp Redesign — Nav Restructure + Settings Split (2026-06-27)
+
+> Roadmap dışı, kullanıcının verdiği bir Claude Design mockup'tan ("KiBI AI WebApp.dc.html")
+> başlatıldı. Mockup statik bir prototip (sahte veri, kendi "DC" runtime'ı) — bizim
+> endpointlerimizi/wizardlarımızı atlamadan, görsel IA'sını (gruplu sidebar) ve paletini
+> gerçek uygulamaya işledik. Kullanıcı ayrıca mockup'taki bir isimlendirme hatasını
+> düzeltmemizi istedi: "CRM Setup" → **Entity Settings** (entity'nin TÜM ayarları — AI,
+> import/export, entegrasyonlar, custom modül/field, workflow, branding, business hours,
+> kullanıcılar, locale), **Platform Settings** → KiBI'ın TÜM platform ayarları (tenant
+> yönetimi, fiyatlandırma/faturalama). Kullanıcı ayrıca backend-first/API-first mimariyi
+> açıkça istedi: nav config backend'de yaşar, frontend sadece render eder — gelecekte yeni
+> bir frontend (mobile vb.) aynı backend'i değiştirmeden kullanabilsin.
+
+### Bölüm A — Backend: nav-catalog + kalıcı, role-aware nav config
+- `src/lib/nav-catalog.ts` (yeni): sidebar'ın TEK static kaynağı — 9 grup (dashboard/crm/
+  sales/inventory/finance/hr/operations/platform/ai), 41 item. Her `page` item GERÇEK bir
+  route'a işaret ediyor; sayfası olmayan item'lar (`sales_quotes`, `sales_orders`,
+  `hr_leave`, `hr_attendance`, `hr_recruitment`) `kind:'placeholder'` ile işaretli —
+  kullanıcının seçimiyle menüden ÇIKARILMADI, generic "Yakında" kartı gösteriyor.
+- `entity_sidebar_nav_config` tablosu (migration 0033) — entity başına SADECE override
+  satırları tutuyor (position/isVisible/allowedRoles), FAZ4.3'ün registry-merge disiplini
+  gibi hiçbir zaman tam liste değişimi değil — satırı olmayan item catalog default'unu kullanır.
+- `src/api/routes/nav-config.ts`: `GET /nav-config` catalog+override+role+entitlement'ı
+  SUNUCU TARAFINDA çözüp hazır ağaç döndürür (frontend artık hiçbir entitlement/route mantığı
+  taşımıyor); `PUT /nav-config` (entity_main/entity_supervisor/admin/supervisor) upsert eder;
+  `GET /nav-config/catalog` Entity Settings'in Navigasyon sekmesi için filtrelenmemiş liste.
+  **Canlı doğrulandı:** entity_sub/entity_main arasında rol-filtreli çıktı farkı, PUT'un
+  entity_sub için 403'ü, visibility/role override'ların entitlement'tan bağımsız çalışması,
+  catalog'un admin-only 403'ü — hepsi gerçek HTTP istekleriyle test edildi, test verisi temizlendi.
+
+### Bölüm B — Frontend: generic nav renderer + palet/tipografi
+- `Layout.tsx` sidebar'ı artık `GET /nav-config`'i render eden ince bir bileşen — hardcoded
+  `<Link>` blokları, `isAdminOrSupervisor`/`aiPremiumActive` client-side gating mantığı kaldırıldı.
+  **Bulunan performans regresyonu:** ilk versiyon `import * as LucideIcons` kullandı —
+  lucide-react'in ~1500 ikonunun TAMAMINI bundle'a soktu (699KB → 1.43MB ana chunk). Düzeltme:
+  `src/lib/icon-map.ts` — sadece kullanılan 39 ikonun explicit (tree-shake edilebilir) import'u,
+  bundle 699KB'a geri döndü (doğrulandı).
+  Sidebar artık ikona-daraltma toggle'ı da destekliyor (mockup'tan).
+- `ComingSoon.tsx` (yeni) — `kind:'placeholder'` item'lar için generic kart.
+  `index.css`/`index.html`: Poppins (başlıklar) + Mulish (gövde) fontu eklendi, mevcut
+  CSS-variable Aurora Glass tema sistemine işlendi (light/dark toggle bozulmadı, mockup'ın
+  sabit hex renkleri KOPYALANMADI — `--accent` zaten mockup'ın teal'ine yakındı).
+- `Crm.tsx`/`Erp.tsx`/`Personnel.tsx`: `?view=`/`?tab=` query param ile ilk sekmeyi
+  seçebiliyor (Accounting.tsx'in zaten yaptığı gibi) — nav-catalog'un derin linkleri çalışıyor.
+  **Canlı doğrulandı:** `/app/crm-native?view=deals` doğrudan Anlaşmalar sekmesini açıyor,
+  sidebar doğru item'ı aktif gösteriyor.
+
+### Bölüm C — Settings ayrımı (kullanıcının asıl talebi)
+- **Entity Settings** (`Settings.tsx`, `/app/settings`): yeni "Genel Bakış" sekmesi —
+  mockup'ın kategori-grid görselini kullanıyor, her kart GERÇEK bir hedefe gidiyor (Field
+  Manager, Functions, Blueprint, Import, Onboarding, AI Modeli, Kanallar, Plan, Güvenlik,
+  yeni Navigasyon sekmesi). Var olan 8 sekme değişmeden korundu — sadece eklendi.
+- **Tarih/Saat/Çalışma Saatleri**: ilk denemede `kibi_entities`'e yeni kolon eklendi
+  (migration 0034) — ama implementasyon sırasında `kibi_entities.timezone/language/logoUrl`
+  kolonlarının da hiçbir route tarafından OKUNMADIĞI/YAZILMADIĞI keşfedildi (gerçek canlı veri
+  yolu `tenants.settings` JSONB blob'u, `PUT /tenants/me/settings`). Migration 0034 GERİ ALINDI
+  (hem DB'den hem schema.ts'ten) — yeni alanlar (`dateFormat`/`timeFormat`/`businessHours`)
+  bunun yerine `TenantSettings` arayüzüne ve var olan `/me/settings` endpoint'ine eklendi,
+  gerçekten çalışan deseni izleyerek. Çalışma Saatleri 7 günlük açık/kapalı + saat editörü.
+  **Canlı doğrulandı:** PUT → GET round-trip ile persist doğrulandı, test verisi temizlendi.
+- **Navigasyon sekmesi** (Entity Settings): grup başına item listesi, yukarı/aşağı sıralama
+  (FieldManager.tsx'in buton tabanlı reorder deseni, yeni drag-drop bağımlılığı YOK), Görünür
+  checkbox'ı, entity rolleri için (Yönetici/Denetçi/Alt Kullanıcı) ayrı checkbox'lar; platform-
+  only item'lar ("Platform tarafından kısıtlı" notuyla) düzenlenemez bırakıldı.
+  **Canlı doğrulandı:** checkbox tıklaması gerçek `PUT /nav-config` çağrısı tetikliyor (200),
+  DB'de persist oluyor — UI'dan tetiklenen ilk gerçek entegrasyon testi.
+- **Platform Settings** (`PlatformSettings.tsx`, admin/supervisor-only): yeni "Entity
+  Yönetimi" sekmesi (hızlı metrikler + Admin.tsx'in tam liste/düzenleme akışına link —
+  Admin.tsx'in entity-tablosu mantığını YİNELEMEDEN), yeni "Fiyatlandırma & Faturalama"
+  sekmesi `kibi_pricing_packages`'ı düzenliyor (yeni `PUT /admin/plans/:id`, admin-only —
+  `GET /plans` zaten vardı ama editörü ve onu kullanan bir frontend'i yoktu).
+  **Doğrulama notu:** gerçek fiyatlandırma tablosuna canlı bir yazma testi YAPILMADI —
+  permission classifier bunu paylaşılan/üretim faturalama verisine onaysız bir mutasyon
+  olarak doğru şekilde engelledi (nav-config'in izole, entity-scoped test satırlarından
+  farklı olarak bu TÜM entity'lerin faturalamasını etkiler). Sadece güvenli yollar test
+  edildi: supervisor için 403, geçersiz body için 400 (hiçbir mutasyon olmadan). Yazma
+  kodu, codebase'de zaten doğrulanmış aynı drizzle update deseniyle birebir aynı.
+
+### Bu turdan taşınan kapsam notları
+- `entity-etl.ts`'in DB-bağlantı senkron motoru (FAZ 10.5'te not edilen) hâlâ ele alınmadı —
+  bu redesign onu kapsamadı.
+- Mockup'ın dashboard kartları/AI özet paneli birebir taşınmadı — kullanıcının onayladığı
+  plan kapsamı sidebar + settings ayrımıydı, Dashboard.tsx'in görsel yeniden tasarımı değildi.
+- Sales modülü (Quotes & Proposals, Sales Orders) hâlâ gerçek bir sayfaya sahip değil —
+  şimdilik placeholder; gerçek bir sayfa gerekirse ayrı bir görev.

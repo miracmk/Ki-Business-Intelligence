@@ -307,6 +307,11 @@ export const kibiModules = pgTable('kibi_modules', {
   label:         varchar('label', { length: 255 }).notNull(),
   isSystem:      boolean('is_system').notNull().default(false),   // native table vs custom (JSONB-only)
   physicalTable: varchar('physical_table', { length: 100 }),      // real table name if system, null if custom
+  // FAZ 10.2: not every native table has a `deleted_at` column (only crm_contacts/companies/
+  // deals, erp_products do) — records-bridge.ts's recordsFind used to hardcode a
+  // `deleted_at IS NULL` filter and silently returned [] for every module lacking that
+  // column (caught while extending the registry to ERP/Accounting). Registry-driven now.
+  hasDeletedAt:  boolean('has_deleted_at').notNull().default(false),
   icon:          varchar('icon', { length: 50 }),
   createdAt:     timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 }, (t) => ({
@@ -471,6 +476,39 @@ export const industryTemplates = pgTable('industry_templates', {
   packageJson: jsonb('package_json').$type<unknown>().notNull().default({}),
   createdAt:  timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 })
+
+// FAZ 10.3: AI write approval queue. The AI agent's tool layer (FAZ 10.4) can only READ
+// native CRM/ERP/Accounting tables directly and PROPOSE writes — it never calls
+// recordsCreate/Update/Delete itself. A human approves/rejects here; only approval applies
+// the write, via records-bridge.ts (same registry-safe column resolution as everywhere else).
+export const aiActionTypeEnum = pgEnum('ai_action_type', ['create', 'update', 'delete'])
+export const aiActionStatusEnum = pgEnum('ai_action_status', ['pending', 'approved', 'rejected'])
+
+export const aiPendingActions = pgTable('ai_pending_actions', {
+  id:               uuid('id').primaryKey().defaultRandom(),
+  entityId:         uuid('entity_id').notNull().references(() => kibiEntities.id, { onDelete: 'cascade' }),
+  moduleKey:        varchar('module_key', { length: 100 }).notNull(),
+  action:           aiActionTypeEnum('action').notNull(),
+  recordId:         uuid('record_id'), // null for create
+  proposedData:     jsonb('proposed_data').$type<Record<string, unknown>>(), // null for delete
+  summary:          text('summary').notNull(), // human-readable: what + why, for the approver to judge
+  sessionId:        varchar('session_id', { length: 100 }), // which AI chat session proposed this
+  // FAZ 10.4: full audit trail — who asked the AI to do this (via chat), who resolved it.
+  // The requester may approve/reject their OWN proposal directly (same chat, no separate
+  // admin step needed) — see src/api/routes/ai-actions.ts. Elevated roles may resolve ANY
+  // proposal via the dedicated inbox (frontend/src/pages/AiActions.tsx).
+  requestedByUserId: uuid('requested_by_user_id').references(() => users.id, { onDelete: 'set null' }),
+  status:           aiActionStatusEnum('status').notNull().default('pending'),
+  resolvedByUserId: uuid('resolved_by_user_id').references(() => users.id, { onDelete: 'set null' }),
+  resolvedAt:       timestamp('resolved_at', { withTimezone: true }),
+  createdAt:        timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({
+  entityStatusIdx: index('ai_pending_actions_entity_status_idx').on(t.entityId, t.status),
+}))
+
+export const aiPendingActionsRelations = relations(aiPendingActions, ({ one }) => ({
+  entity: one(kibiEntities, { fields: [aiPendingActions.entityId], references: [kibiEntities.id] }),
+}))
 
 export const kibiModelRoleEnum = pgEnum('kibi_model_role', [
   'conversation', 'db_search', 'qdrant_search', 'redis_search',

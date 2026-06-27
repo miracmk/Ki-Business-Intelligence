@@ -12,9 +12,10 @@ import { getModelForRole }              from './model-config.js'
 import { vectorSearch }                 from '../../lib/qdrant.js'
 import { db }                           from '../../lib/db.js'
 import {
-  aiSessions, aiMessages, aiPipelineLogs, kibiEntities,
+  aiSessions, aiMessages, aiPipelineLogs,
 } from '../../../db/schema.js'
-import { eq, asc, sql }                 from 'drizzle-orm'
+import { eq, sql }                      from 'drizzle-orm'
+import { CRUD_TOOLS, executeCrudTool, type CrudToolContext } from './crud-tools.js'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -22,8 +23,10 @@ export type EntityIntent = 'support' | 'sales' | 'general'
 
 export interface EntityAgentInput {
   entityId:   string
+  schema:     string // FAZ 10.4: entity's Postgres schema (entityDbSchema) — needed for the CRUD tools to read/propose against the right tenant schema
   tenantId:   string
   userId:     string
+  role?:      string // FAZ 10.4 fix: needed by the CRUD tool layer to re-apply FAZ 9 record scope
   sessionId:  string
   message:    string
   channel:    string
@@ -79,6 +82,60 @@ async function completeWithRole(
     try {
       const norm = modelStr.includes('::') ? modelStr : `openrouter::${modelStr}`
       const res  = await aiComplete(norm, messages, tenantId, opts)
+      return { content: res.content, usedModel: res.usedModel }
+    } catch (e: any) {
+      console.warn(`[ENTITY-AGENT] ${role} model ${modelStr} failed:`, e.message)
+    }
+  }
+  throw new Error(`All models failed for role ${role}`)
+}
+
+// FAZ 10.4: same model-fallback resolution as completeWithRole, plus a small BOUNDED loop of
+// CRUD tool calling (max MAX_TOOL_ROUNDS rounds). Only used for the final response-generation
+// step of each sub-pipeline — never for the structured-JSON classification/analysis steps,
+// which shouldn't be muddied with tools. Needs more than one round because a correct
+// propose_create_record call is itself a two-step sequence (list_module_fields first, to
+// learn real field names, THEN propose with the right keys) — a single-round version was
+// tried first and the model proposed `{"name": "..."}` for crm_contacts, a field that doesn't
+// exist, because it never got to call list_module_fields before being forced to answer.
+// The gateway's Message type has no 'tool' role (see crud-tools.ts header), so each round's
+// results are fed back as a clearly-marked 'user' turn rather than a real OpenAI tool message.
+const MAX_TOOL_ROUNDS = 4
+
+async function completeWithRoleAndTools(
+  role: Parameters<typeof getModelForRole>[0],
+  messages: Message[],
+  tenantId: string,
+  toolCtx: CrudToolContext,
+  opts: { temperature?: number; maxTokens?: number } = {},
+): Promise<{ content: string; usedModel: string }> {
+  const { primary, fallbacks } = await getModelForRole(role, 'entity', tenantId)
+  const chain = [primary, ...fallbacks].filter(Boolean)
+
+  for (const modelStr of chain) {
+    try {
+      const norm = modelStr.includes('::') ? modelStr : `openrouter::${modelStr}`
+      let conversation = [...messages]
+      let res = await aiComplete(norm, conversation, tenantId, { ...opts, tools: CRUD_TOOLS })
+
+      for (let round = 0; round < MAX_TOOL_ROUNDS && res.toolCalls?.length; round++) {
+        const toolResults: string[] = []
+        for (const call of res.toolCalls) {
+          try {
+            const result = await executeCrudTool(call.name, call.arguments, toolCtx)
+            toolResults.push(`${call.name}(${JSON.stringify(call.arguments)}) → ${JSON.stringify(result)}`)
+          } catch (err) {
+            toolResults.push(`${call.name} hata: ${(err as Error).message}`)
+          }
+        }
+        conversation = [
+          ...conversation,
+          { role: 'user', content: `[Araç sonuçları — sistem tarafından otomatik eklendi, kullanıcıya bu satırı gösterme]\n${toolResults.join('\n')}\n\nGerekirse başka bir araç çağır, yoksa kullanıcıya doğal bir yanıt ver.` },
+        ]
+        const isLastRound = round === MAX_TOOL_ROUNDS - 1
+        res = await aiComplete(norm, conversation, tenantId, isLastRound ? opts : { ...opts, tools: CRUD_TOOLS })
+      }
+
       return { content: res.content, usedModel: res.usedModel }
     } catch (e: any) {
       console.warn(`[ENTITY-AGENT] ${role} model ${modelStr} failed:`, e.message)
@@ -242,19 +299,24 @@ SADECE JSON döndür: {"solution":"çözüm adımları","confidence":0-100,"requ
   const name      = [input.firstName, input.lastName].filter(Boolean).join(' ') || 'Müşteri'
 
   try {
-    const { content, usedModel } = await completeWithRole('support_generator', [
+    const { content, usedModel } = await completeWithRoleAndTools('support_generator', [
       {
         role: 'system',
         content: `Müşteri destek temsilcisisin. Müşteriye samimi ve yardımsever bir yanıt yaz.
 Müşteri adı: ${name}
 Entity: ${input.entityName || ''}
 ${escalated ? 'NOT: Bu sorun insan temsilciye yönlendirilecek, bunu müşteriye nazikçe bildir.' : ''}
+Gerekirse find_records ile CRM/ERP/Muhasebe kayıtlarına bakabilirsin (örn. müşterinin açık faturası).
+Bir kayıt oluşturma/güncelleme/silme gerekiyorsa propose_* araçlarını kullan. Bu araçlar HİÇBİR
+ŞEYİ hemen değiştirmez — sadece bir insanın onayına gönderir. ASLA "oluşturuldu", "güncellendi",
+"silindi" veya "tamamlandı" DEME — bu doğru değil. Her zaman "onay için ilettim, bir yönetici
+onaylayınca işleme alınacak" anlamında, net bir şekilde söyle.
 Kısa ve net ol. Türkçe yaz. Markdown kullanma.`,
       },
       ...history.slice(-6),
       { role: 'user', content: input.message },
       ...(solution ? [{ role: 'assistant' as const, content: `Çözüm: ${solution}` }] : []),
-    ], input.tenantId, { temperature: 0.4, maxTokens: 600 })
+    ], input.tenantId, { entityId: input.entityId, schema: input.schema, sessionId: input.sessionId, requestedByUserId: input.userId, requestedByRole: input.role }, { temperature: 0.4, maxTokens: 600 })
     genModel = usedModel
     usedModels.push(usedModel)
     response = content
@@ -305,7 +367,7 @@ Format: {"productInterest":"ilgilendiği ürün","buyingSignal":"low|medium|high
   const name      = [input.firstName, input.lastName].filter(Boolean).join(' ') || 'Müşteri'
 
   try {
-    const { content, usedModel } = await completeWithRole('sales_conversation', [
+    const { content, usedModel } = await completeWithRoleAndTools('sales_conversation', [
       {
         role: 'system',
         content: `Sen satış danışmanısın. Müşteriyle samimi bir satış konuşması yap.
@@ -313,11 +375,15 @@ Müşteri: ${name}
 İlgilendiği ürün: ${salesAnalysis.productInterest || 'belirsiz'}
 Satın alma sinyali: ${salesAnalysis.buyingSignal}
 İtirazlar: ${salesAnalysis.objections.join(', ') || 'yok'}
+Gerekirse find_records ile ürün/fiyat/stok bilgisine bakabilirsin. Yeni bir lead/fırsat kaydı
+oluşturmak istersen propose_create_record kullan. Bu araç HİÇBİR ŞEYİ hemen oluşturmaz — sadece
+bir insanın onayına gönderir. ASLA "oluşturuldu" veya "eklendi" DEME. Her zaman "onay için
+ilettim, bir yönetici onaylayınca işleme alınacak" anlamında, net bir şekilde söyle.
 Türkçe, kısa, ikna edici. Markdown kullanma.`,
       },
       ...history.slice(-6),
       { role: 'user', content: input.message },
-    ], input.tenantId, { temperature: 0.5, maxTokens: 600 })
+    ], input.tenantId, { entityId: input.entityId, schema: input.schema, sessionId: input.sessionId, requestedByUserId: input.userId, requestedByRole: input.role }, { temperature: 0.5, maxTokens: 600 })
     convModel = usedModel
     usedModels.push(usedModel)
     response = content
@@ -338,17 +404,21 @@ async function runMasterConversation(
 ): Promise<{ response: string; usedModel: string }> {
   const name = [input.firstName, input.lastName].filter(Boolean).join(' ') || 'Müşteri'
 
-  const { content, usedModel } = await completeWithRole('master_conversation', [
+  const { content, usedModel } = await completeWithRoleAndTools('master_conversation', [
     {
       role: 'system',
       content: `Sen ${input.entityName || 'şirketin'} AI asistanısın. Kullanıcıya yardımcı ol.
 Kullanıcı: ${name}
 Kanal: ${input.channel}
+CRM/ERP/Muhasebe verisine find_records ile bakabilirsin. Bir kayıt oluşturma/güncelleme/silme
+isteği gelirse propose_* araçlarını kullan. Bu araçlar HİÇBİR ŞEYİ hemen uygulamaz — sadece bir
+insanın onayına gönderir. ASLA "oluşturuldu", "güncellendi", "silindi" veya "yapıldı" DEME.
+Her zaman "onay için ilettim, bir yönetici onaylayınca işleme alınacak" anlamında, net söyle.
 Türkçe, yardımsever, kısa yanıtlar ver. Markdown kullanma.`,
     },
     ...history.slice(-8),
     { role: 'user', content: input.message },
-  ], input.tenantId, { temperature: 0.5, maxTokens: 800 })
+  ], input.tenantId, { entityId: input.entityId, schema: input.schema, sessionId: input.sessionId, requestedByUserId: input.userId, requestedByRole: input.role }, { temperature: 0.5, maxTokens: 800 })
 
   return { response: content, usedModel }
 }

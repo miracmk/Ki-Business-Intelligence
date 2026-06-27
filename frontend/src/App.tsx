@@ -14,6 +14,7 @@ import Functions from './pages/Functions'
 import FieldManager from './pages/FieldManager'
 import Import from './pages/Import'
 import Onboarding from './pages/Onboarding'
+import AiActions from './pages/AiActions'
 import CustomerService from './pages/CustomerService'
 import Fulfillment from './pages/Fulfillment'
 import Ecommerce from './pages/Ecommerce'
@@ -64,6 +65,7 @@ function AppShell() {
           <Route path="field-manager" element={<FieldManager />} />
           <Route path="import" element={<Import />} />
           <Route path="onboarding" element={<Onboarding />} />
+          <Route path="ai-actions" element={<AiActions />} />
           <Route path="customer-service" element={<CustomerService />} />
           <Route path="fulfillment" element={<Fulfillment />} />
           <Route path="ecommerce" element={<Ecommerce />} />

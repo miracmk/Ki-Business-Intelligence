@@ -91,7 +91,7 @@ export const entityAiRoutes: FastifyPluginAsync = async (app) => {
 
   // ── POST /entity-ai/chat ──────────────────────────────────────────────────
   app.post('/chat', { onRequest: [app.authenticate], config: { rateLimit: { max: 20, timeWindow: '1 minute' } } }, async (req, reply) => {
-    const user   = req.user as { sub: string; tenantId: string }
+    const user   = req.user as { sub: string; tenantId: string; role?: string }
     const parsed = chatSchema.safeParse(req.body)
     if (!parsed.success) return reply.status(400).send({ error: parsed.error.flatten() })
 
@@ -99,6 +99,7 @@ export const entityAiRoutes: FastifyPluginAsync = async (app) => {
 
     const entity = await resolveEntity(user.tenantId)
     if (!entity) return reply.status(404).send({ error: 'Entity bulunamadı' })
+    if (!entity.entityDbSchema) return reply.status(404).send({ error: 'Entity şeması hazır değil' })
 
     const limitCheck = await checkMessageLimit(user.tenantId)
     if (!limitCheck.allowed) return reply.status(429).send({ error: limitCheck.reason })
@@ -107,8 +108,10 @@ export const entityAiRoutes: FastifyPluginAsync = async (app) => {
 
     const result = await runEntityAgent({
       entityId:   entity.id,
+      schema:     entity.entityDbSchema,
       tenantId:   user.tenantId,
       userId:     user.sub,
+      role:       user.role,
       sessionId,
       message,
       channel,

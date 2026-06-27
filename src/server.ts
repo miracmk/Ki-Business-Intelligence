@@ -16,13 +16,13 @@ import { ensureQdrantConnection } from './lib/qdrant.js'
 
 import { authRoutes }         from './api/routes/auth.js'
 import { startImapPollers }   from './engine/imap-poller.js'
-import { startCrmScheduler }  from './engine/crm-sync/crm-scheduler.js'
 import { startBillingScheduler } from './engine/billing/billing.js'
 import { crmRoutes }        from './api/routes/crm.js'
 import { crmNativeRoutes }  from './api/routes/crm-native.js'
 import { metadataRoutes }   from './api/routes/metadata.js'
 import { blueprintRoutes }  from './api/routes/blueprint.js'
 import { functionRoutes }   from './api/routes/functions.js'
+import { aiActionRoutes }   from './api/routes/ai-actions.js'
 import { onboardingRoutes } from './api/routes/onboarding.js'
 import { importRoutes }     from './api/routes/import.js'
 import { erpNativeRoutes }  from './api/routes/erp-native.js'
@@ -116,6 +116,7 @@ await app.register(async (api) => {
   await api.register(metadataRoutes,   { prefix: '/metadata' })
   await api.register(blueprintRoutes,  { prefix: '/blueprint' })
   await api.register(functionRoutes,   { prefix: '/functions' })
+  await api.register(aiActionRoutes,   { prefix: '/ai-actions' })
   await api.register(onboardingRoutes, { prefix: '/onboarding' })
   await api.register(importRoutes,     { prefix: '/import' })
   await api.register(erpNativeRoutes,  { prefix: '/erp-native' })
@@ -232,7 +233,11 @@ async function start() {
     await app.listen({ port: env.PORT, host: env.HOST })
     console.log('\n🚀 Ki Platform running on ' + env.HOST + ':' + env.PORT + '\n')
     startImapPollers().catch(e => console.error('[IMAP] Poller start failed:', e))
-    startCrmScheduler().catch(e => console.error('[CrmScheduler] Start failed:', e))
+    // FAZ 10.1: CrmScheduler (periodic crm_raw_mirror sync) retired — the connector wizard
+    // is now a one-time Import action (FAZ 10.5), not a background sync. If a connection
+    // needs to refresh, the user re-runs Import; the dedup commit path won't duplicate
+    // already-imported rows. Future scheduled sync (if ever needed) belongs on the new
+    // platform primitives (workflow_rules 'scheduled' trigger / Custom Functions), not here.
     startBillingScheduler()
     scheduleDailyModelSync()
   } catch (err) {

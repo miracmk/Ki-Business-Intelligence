@@ -2165,6 +2165,128 @@ mevcut olmadığı için kapsam dışı — yukarıda gerekçelendirildi.)
 
 ---
 
+## FAZ 10 — Entity DB/KB'den Native CRM/ERP/Accounting CRUD'a Geçiş (2026-06-27)
+
+> Roadmap dışı, kullanıcı talebiyle başlatıldı: "Wizard'ı artık Entity DB/Entity KB yapısı
+> yerine aktif kullanılan CRM/ERP/Accounting'e aktarım için kullanacağız. AI için kurguladığımız
+> yapı da bu native tablolar + KB'den CRUD şeklinde olmalı." Eski "Entity DB" soyutlaması
+> (crm_raw_mirror staging + AI-keşifli tablo kataloğu + doğal-dil-SQL sorgulama) ve periyodik
+> CrmScheduler tamamen kaldırıldı; AI artık sadece native tablolara registry üzerinden CRUD
+> yapıyor. **Kritik ayrım korunuyor:** bu sadece `entity-agent.ts`'e (Entity AI — tenant'ın
+> kendi CRM/ERP/Accounting verisiyle konuşan asistan) bağlandı, `kibi-agent.ts`'e (KiBI AI —
+> platformun kendisiyle ilgili asistan) ASLA bağlanmadı.
+
+### FAZ 10.1 — Eski Entity DB Altyapısının Sökülmesi
+- Silindi: `src/engine/ai/entity-db-engine.ts`, `src/engine/ai/tools/{crm,erp}-tools.ts`,
+  `src/engine/crm-sync/crm-scheduler.ts`, `src/engine/connector/{connector-ai,types}.ts`.
+- `src/api/routes/crm.ts`: "Connector AI Catalog" bloğu (catalog list/approve/bulk-approve,
+  analyze/stream, test-query — ~150 satır) ve ölü importlar (`entityDataCatalog`,
+  `aiPipelineLogs`, `runConnectorAnalysis`) kaldırıldı. Alan-eşleme heuristikleri
+  (`FIELD_MAP_PATTERNS`, `buildMirrorMappings`, vb.) BİLEREK tutuldu — native tabloları
+  hedefliyorlar, FAZ 10.5'in Import akışında yeniden kullanılacak.
+- `src/server.ts`: `startCrmScheduler` çağrısı kaldırıldı (periyodik sync yok artık — kullanıcı
+  kararı: gelecekte sync gerekirse Custom Functions + Schedule Action/cron veya dış kaynağın
+  webhook'u kullanılacak, yeniden bir scheduler kurulmayacak).
+- Kullanıcının onayıyla eski/test verisi (Ki Business'ın test CRM kayıtları, zaten başka yerde
+  yedekli) silindi — gerçek müşteri verisi değildi.
+
+### FAZ 10.2 — Registry Genişletmesi (`hasDeletedAt`)
+- `kibiModules`'a `has_deleted_at BOOLEAN` eklendi (migration 0030) — `recordsFind`'ın
+  `deleted_at IS NULL` koşulunu hardcode etmek yerine registry'den okuması için. **Bulunan
+  bug:** önceki kod bu koşulu her modülde sabit uyguluyordu; ERP/Accounting tablolarının
+  ~12/14'ünde `deleted_at` kolonu YOK, bu yüzden `recordsFind` o modüllerde sessizce `[]`
+  dönüyordu (catch-all fallback'le maskeleniyordu). Düzeltme: `hasDeletedAt` flag + catch-all
+  fallback kaldırıldı (artık sorgu doğası gereği doğru).
+- `seed-system-fields.ts`'e `erp_products/suppliers/orders/warehouses`,
+  `acc_contacts/invoices/payments/expenses` modül tanımları eklendi (erp-native.ts/
+  accounting.ts'in COLUMN_MAP'lerinden türetildi). Seed sonucu: 12 modül, 225 alan (sonra 10.4'te 229'a çıktı).
+
+### FAZ 10.3 — AI Onay Kuyruğu (`ai_pending_actions`)
+- Yeni tablo: `entityId, moduleKey, action(create/update/delete), recordId, proposedData,
+  summary, sessionId, status(pending/approved/rejected), requestedByUserId, resolvedByUserId,
+  resolvedAt` (migration 0031 + 0032).
+- `src/engine/ai/propose-action.ts`: AI tool katmanının çağırabileceği TEK yazma-bitişik
+  fonksiyon — sadece bir pending satır ekler, asla gerçek bir yazma yapmaz.
+- `src/api/routes/ai-actions.ts`: GET `/` (liste), POST `/:id/approve`, POST `/:id/reject`.
+  **Bulunan bug (duplicate-write):** ilk versiyon önce yazıyor, sonra status'ü 'approved'
+  yapıyordu — status güncellemesi başarısız olursa satır tekrar onaylanabilir kalıyor, retry'da
+  duplicate kayıt oluşuyordu (canlı testte yakalandı). Düzeltme: önce status 'approved'a çekilip
+  (pending-only WHERE ile race kontrolü), SONRA yazma deneniyor; yazma başarısız olursa satır
+  'approved' ama uygulanmamış olarak görünür kalıyor (sessizce tekrar-onaylanabilir DEĞİL).
+  **Yetkilendirme (kullanıcı talebiyle genişletildi):** ilk versiyon onay/red'i sadece
+  `ELEVATED_ROLES`'e açmıştı — kullanıcı bunu reddetti ("kullanıcı chat aracılığıyla onay
+  verebilir, neden eledin?"): isteği yapan kullanıcının KENDİ önerisini de onaylayabilmesi
+  gerekiyor (örn. sohbette "evet onaylıyorum" diyerek), ayrıca bir admin'in araya girmesi
+  ZORUNLU olmamalı. Düzeltme: `requestedByUserId` audit alanı eklendi, yetki kontrolü
+  `ELEVATED_ROLES.has(role) || proposal.requestedByUserId === user.sub`'a gevşetildi — tam
+  audit trail korunuyor (kim istedi, kim onayladı, ne zaman).
+
+### FAZ 10.4 — AI CRUD Tool Katmanı
+- `src/engine/ai/crud-tools.ts`: `CRUD_TOOLS` — `list_module_fields`, `find_records` (Read,
+  doğrudan), `propose_create_record`/`propose_update_record`/`propose_delete_record` (Write,
+  asla doğrudan değil — `proposeAction()` çağırır). Bu dosya BİLEREK `recordsCreate/Update/
+  Delete`'i import ETMİYOR — yapısal garanti, "hatırlanması gereken bir kural" değil.
+- `src/engine/ai/entity-agent.ts`: `completeWithRoleAndTools()` — sınırlı (MAX_TOOL_ROUNDS=4)
+  çok-turlu tool-calling döngüsü. **Bulunan bug (tek-tur yetersiz):** ilk versiyon tek tur
+  tool-call destekliyordu; model `list_module_fields` çağırıp gerçek alan adlarını öğrenmeden
+  `propose_create_record`'a geçemiyordu (iki ardışık tur gerekiyor) — `crm_contacts` için var
+  olmayan bir `"name"` alanı önerdi. Çok-turlu döngüye yükseltilerek düzeltildi.
+  **Bulunan bug (yanıltıcı dil):** model onaydan ÖNCE "başarıyla oluşturuldu" diyordu (DB'de
+  yazma olmadığı doğrulandı — backend doğruydu, sadece dil yanlıştı). System prompt'lara
+  "ASLA 'oluşturuldu/güncellendi/silindi/tamamlandı' DEME, 'onay için ilettim' de" talimatı
+  eklendi (support_generator/sales_conversation/master_conversation'ın 3'ünde de).
+- **Kritik ayrım korundu:** CRUD tool'lar SADECE `entity-agent.ts`'e bağlandı, `kibi-agent.ts`'e
+  hiç dokunulmadı.
+- **Bulunan bug (owner_id orphan):** kendi-onayladığı bir AI-oluşturma sonrası kayıt, kendi
+  oluşturanına bile görünmüyordu — `owner_id` NULL kalıyordu, çünkü registry'de `ownerId` hiç
+  tanımlı değildi (`recordsCreate` sadece registry'nin bildiği kolonları yazar) ve eski
+  `injectOwnerId` (FAZ 9) registry'yi atlayan crm-native.ts'e özel bir yoldu. Düzeltme:
+  `ownerId`(crm_contacts/companies/deals) ve `createdByUserId`(crm_activities) registry'ye
+  eklendi (seed: 225→229 alan); approve handler'ı artık `recordsCreate`'e
+  `{ownerId, createdByUserId} = proposal.requestedByUserId` enjekte ediyor (bilinmeyen alan
+  zaten sessizce düşürülüyor, modül-bağımsız güvenli no-op). Canlı doğrulandı: self-approve
+  sonrası kayıt `owner_id` dolu ve aynı kullanıcının `GET /crm-native/contacts` çağrısında
+  görünür.
+- **Bulunan güvenlik açığı (kod incelemesinde, canlı testte değil — advisor review):**
+  `recordsFind/Update/Delete` hiç `user`/`role` parametresi almıyordu — AI tool katmanı
+  üzerinden FAZ 9'un owner-scope'u tamamen baypas ediliyordu. İki ayrı sızıntı: (1)
+  `find_records` kısıtlı bir rol için TÜM sahiplerin kayıtlarını döndürüyordu (native
+  `GET /crm-native/contacts` gizlerken); (2) bir kısıtlı kullanıcı, başkasının kaydının id'sini
+  öğrenip `propose_update_record` ile değişiklik önerip KENDİ onayıyla (10.3'ün gevşetilmiş
+  yetkilendirmesiyle) o kaydı değiştirebilirdi/silebilirdi — native API'de asla yapamayacağı bir
+  şey. Düzeltme: `records-bridge.ts`'e opsiyonel `actor: ScopeUser` parametresi eklendi
+  (`OWNER_COLUMN_BY_MODULE` allowlist'i — crm-native.ts'in zaten scope'ladığı 4 modülle birebir
+  aynı; Custom Functions/Import bu parametreyi vermez, davranışları DEĞİŞMEDİ). `find_records`
+  artık çağıranın `requestedByUserId`/role'üyle scope'lanıyor; `ai-actions.ts`'in approve
+  handler'ı `recordsUpdate/Delete`'i ÖNERİYİ YAPAN kullanıcının (onaylayanın değil — AI onun
+  adına hareket ediyor) kimliği+rolüyle scope'luyor — rol DB'den taze sorgulanıyor.
+  `requestedByUserId` eksikse (olmaması gerekir) fail-closed (`1=0`). **Canlı doğrulama:** iki
+  throwaway kullanıcı (victim/attacker, ikisi de `entity_sub`) + victim'e ait bir contact
+  oluşturuldu; attacker'ın `find_records`'ı victim'in kaydını GÖRMEDİ, `recordsUpdate/Delete`
+  denemesi hata fırlattı, gerçek `/ai-actions/:id/approve` endpoint'i üzerinden de aynı senaryo
+  doğrulandı (`{"error":"Onaylandı ama uygulanamadı: ... yetkiniz yok ..."}`, kayıt DB'de
+  değişmedi). `entity_main` (elevated) aktör ile aynı sorgu sınırsız çalıştı (regresyon yok).
+  Test verisi temizlendi.
+- `security-test.ts` (FAZ 7, isolate sandboxing) bu round'dan sonra tekrar çalıştırıldı — 7/7
+  geçti (FAZ 10 değişiklikleri isolate güvenliğini etkilemedi).
+
+### FAZ 10'dan Taşınan Kapsam Notları (deferred listesine ek)
+- **FAZ 10.5 (Import → native tablolara metadata-farkında yazım) henüz YAPILMADI.** Wizard'ın
+  DB/API/CSV-XLSX import tipleri zaten native tabloları taşıyor; eksik olan, import'tan gelen
+  YENİ/eşlenmemiş alanların otomatik olarak adlandırılmış `kibi_fields` custom field'ları olarak
+  registry'ye kaydedilmesi (kullanıcı: "importtan gelen metadataları oluşturması ve içindeki
+  dataları ilgili entity'e yazması gerekiyor") — şu an `crm.ts`'te tutulan eşleme heuristikleri
+  bu işin temelini oluşturuyor ama otomatik field-registration adımı henüz bağlanmadı.
+- `propose_update_record`/`propose_delete_record` önerisi oluşturulurken erişim ÖN-KONTROLÜ
+  yapmıyor (sadece onay anında uygulanıyor) — güvenlik açığı değil (gerçek kontrol onayda), ama
+  kullanıcı deneyimi: erişimi olmayan bir kayda öneri oluşturulabilir, sadece onayda başarısız
+  olur. İyileştirme fırsatı, acil değil.
+- Sohbet arayüzünde (EntityAI.tsx) kendi-öneri için satır-içi onay/red UI'ı henüz YOK — backend
+  bunu destekliyor (FAZ 10.3), ama kullanıcı bunu ayrı bir görev olarak istemedi, sadece
+  yetkilendirme modelini düzeltmemizi istedi (yapıldı).
+
+---
+
 ## Roadmap Durumu — TÜM FAZLAR (4-9) TAMAMLANDI (2026-06-26)
 
 FAZ 4 → 5 → 6 → 7 → 8 sıralı, FAZ 9 final pass olarak tamamlandı. Tek mimari override:

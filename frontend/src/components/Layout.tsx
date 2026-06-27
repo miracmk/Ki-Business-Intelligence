@@ -6,7 +6,7 @@ import {
   Sun, Moon, Menu, X, ChevronDown, ChevronRight,
   MessageSquare, Bot, Settings2, BarChart3, Database,
   Bell, CheckCheck, Wallet, Users, Boxes, Headset, Truck, ShoppingCart, Megaphone, CalendarDays, IdCard,
-  GitBranch, Code2, ListPlus, FileUp, Sparkles,
+  GitBranch, Code2, ListPlus, FileUp, Sparkles, ShieldCheck,
 } from 'lucide-react'
 import api from '../lib/api'
 
@@ -277,6 +277,14 @@ export default function Layout() {
           style={linkStyle(activeLink('/app/onboarding'))}
           onMouseEnter={hoverIn} onMouseLeave={e => hoverOut(e, activeLink('/app/onboarding'))}>
           <Sparkles size={17} /><span className="text-sm font-medium">Sektörel Şablonlar</span>
+        </Link>
+
+        {/* AI Onayları — FAZ 10.3: asistanın önerdiği create/update/delete işlemleri için onay kuyruğu */}
+        <Link to="/app/ai-actions"
+          className="flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all duration-200"
+          style={linkStyle(activeLink('/app/ai-actions'))}
+          onMouseEnter={hoverIn} onMouseLeave={e => hoverOut(e, activeLink('/app/ai-actions'))}>
+          <ShieldCheck size={17} /><span className="text-sm font-medium">AI Onayları</span>
         </Link>
 
         {/* CRM Bağlantıları expandable (eski "CRM" — harici connector senkron/izleme, route değişmedi) */}

@@ -2,7 +2,7 @@ import type { FastifyPluginAsync } from 'fastify'
 import { z } from 'zod'
 import { db } from '../../lib/db.js'
 import { sql, eq, and, desc, asc } from 'drizzle-orm'
-import { tenants, kibiEntities, kibiTokenUsage, kibiSupportTickets, kibiSupportMessages, kibiModelConfigs, kibiInternalUsers, users, platformMetrics, crmConnections, platformConfigs, platformVectorDocs, aiPipelineLogs, kibiWallets, kbDocuments, kbChunks } from '../../../db/schema.js'
+import { tenants, kibiEntities, kibiTokenUsage, kibiSupportTickets, kibiSupportMessages, kibiModelConfigs, kibiInternalUsers, users, platformMetrics, crmConnections, platformConfigs, platformVectorDocs, aiPipelineLogs, kibiWallets, kbDocuments, kbChunks, kibiPricingPackages } from '../../../db/schema.js'
 import { learnFromTicket } from '../../engine/kibi/support-pipeline.js'
 import { searchKnowledge } from '../../engine/kibi/qdrant-search.js'
 import { routeReplyToExternal } from '../../engine/kibi/ticket-router.js'
@@ -470,6 +470,32 @@ Eğer KB'deki çözümlerden biri uygunsa referans al, ama sadece yanıt metnini
       orderBy: (t, { asc }) => [asc(t.sortOrder)],
     })
     return reply.send({ plans: packages })
+  })
+
+  // PUT /admin/plans/:id — edit a pricing package (admin-only; the whole-plugin preHandler
+  // above already requires admin/supervisor, this narrows write access further since
+  // pricing changes affect every entity's billing).
+  const planUpdateSchema = z.object({
+    displayName:            z.string().min(1).optional(),
+    basePriceUsd:           z.string().optional(),
+    perMessagePriceUsd:     z.string().optional(),
+    overageMessagePriceUsd: z.string().optional(),
+    monthlyMessageLimit:    z.number().int().nullable().optional(),
+    extraSubUserPriceUsd:   z.string().optional(),
+    isActive:               z.boolean().optional(),
+  })
+  app.put('/plans/:id', async (req, reply) => {
+    if ((req.user as any)?.role !== 'admin') return reply.status(403).send({ error: 'Sadece admin fiyatlandırma düzenleyebilir' })
+    const { id } = req.params as { id: string }
+    const body = planUpdateSchema.safeParse(req.body)
+    if (!body.success) return reply.status(400).send({ error: body.error.flatten() })
+
+    const [row] = await db.update(kibiPricingPackages)
+      .set({ ...body.data, updatedAt: new Date() })
+      .where(eq(kibiPricingPackages.id, id))
+      .returning()
+    if (!row) return reply.status(404).send({ error: 'Plan bulunamadı' })
+    return reply.send({ plan: row })
   })
 
   // ── AI Provider Management ────────────────────────────────────────────────────

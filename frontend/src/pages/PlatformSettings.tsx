@@ -1,10 +1,11 @@
 import { useEffect, useState, useCallback } from 'react'
-import { Navigate } from 'react-router-dom'
+import { Navigate, Link } from 'react-router-dom'
 import {
   Database, MessageSquare, BarChart3, Brain,
   Eye, EyeOff, Save, Trash2, RefreshCw, CheckCircle, AlertCircle,
   Server, Wifi, HardDrive, Zap, Plus, X,
   BookOpen, AlertTriangle, Upload, FileText, XCircle,
+  Building2, CreditCard, ExternalLink,
 } from 'lucide-react'
 import api from '../lib/api'
 import { useAuth } from '../store/auth'
@@ -218,6 +219,8 @@ const COMM_CHANNELS: { id: string; label: string; color: string; emoji: string; 
 ]
 
 const TABS = [
+  { id: 'entities',   label: 'Entity Yönetimi', icon: Building2   },
+  { id: 'pricing',    label: 'Fiyatlandırma & Faturalama', icon: CreditCard },
   { id: 'crm',        label: 'CRM',          icon: Database      },
   { id: 'erp',        label: 'ERP',          icon: Server        },
   { id: 'accounting', label: 'Muhasebe',     icon: BarChart3     },
@@ -1150,7 +1153,7 @@ export default function PlatformSettings() {
   const { user } = useAuth()
   const isAdmin  = user?.role === 'admin'
 
-  const [tab,         setTab]         = useState('crm')
+  const [tab,         setTab]         = useState('entities')
   const [metrics,     setMetrics]     = useState<any>(null)
   const [loading,     setLoading]     = useState(true)
   const [toast,       setToast]       = useState<{ msg: string; ok: boolean } | null>(null)
@@ -1205,8 +1208,33 @@ export default function PlatformSettings() {
     setCommConfigs(p => ({ ...p, [channelId]: null }))
   }
 
+  const [plans, setPlans] = useState<any[]>([])
+  const [plansLoading, setPlansLoading] = useState(false)
+  const [editingPlan, setEditingPlan] = useState<string | null>(null)
+
+  const loadPlans = useCallback(async () => {
+    setPlansLoading(true)
+    try {
+      const r = await api.get('/admin/plans')
+      setPlans(r.data.plans ?? [])
+    } catch { /* non-fatal */ }
+    setPlansLoading(false)
+  }, [])
+
+  const savePlan = async (id: string, patch: Record<string, unknown>) => {
+    try {
+      await api.put(`/admin/plans/${id}`, patch)
+      showToast('Plan güncellendi')
+      setEditingPlan(null)
+      await loadPlans()
+    } catch (e: any) {
+      showToast(e.response?.data?.error ?? 'Güncellenemedi', false)
+    }
+  }
+
   useEffect(() => { loadAll() }, [loadAll])
   useEffect(() => { if (tab === 'comms') loadCommConfigs() }, [tab, loadCommConfigs])
+  useEffect(() => { if (tab === 'pricing') loadPlans() }, [tab, loadPlans])
 
   const card = (children: React.ReactNode, extra?: string) => (
     <div className={`rounded-2xl p-6 ${extra ?? ''}`} style={{ background: 'var(--surface)', backdropFilter: 'blur(20px)', WebkitBackdropFilter: 'blur(20px)', border: '1px solid var(--border)', boxShadow: 'var(--shadow)' }}>
@@ -1250,6 +1278,93 @@ export default function PlatformSettings() {
       </div>
 
       {loading && <div className="text-center py-12" style={{ color: 'var(--text-3)' }}>Yükleniyor...</div>}
+
+      {/* ── Entity Yönetimi Tab — quick metrics + link to the full entity list/edit page
+          (Admin.tsx already does this well; reusing it via a link avoids duplicating its
+          entity-list/edit-modal logic here). ── */}
+      {!loading && tab === 'entities' && (
+        <div className="space-y-4">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            {[
+              { label: 'Ücretli Entity', value: metrics?.paidEntities ?? '—' },
+              { label: 'Ücretsiz Entity', value: metrics?.freeEntities ?? '—' },
+              { label: 'Açık Destek Talebi', value: metrics?.openTickets ?? '—' },
+              { label: 'CRM Bağlantısı', value: metrics?.crmConnections ?? '—' },
+            ].map((c, i) => card(
+              <div key={i}>
+                <p className="text-xs" style={{ color: 'var(--text-3)' }}>{c.label}</p>
+                <p className="text-2xl font-bold mt-1" style={{ color: 'var(--text-1)' }}>{c.value}</p>
+              </div>
+            ))}
+          </div>
+          <Link to="/app/admin"
+            className="flex items-center gap-2 px-4 py-3 rounded-xl text-sm font-medium w-fit"
+            style={{ background: 'linear-gradient(135deg, var(--accent), var(--forest))', color: '#fff' }}>
+            <Building2 size={15} /> Tüm Entity'leri Görüntüle & Yönet <ExternalLink size={13} />
+          </Link>
+        </div>
+      )}
+
+      {/* ── Fiyatlandırma & Faturalama Tab — kibi_pricing_packages, edits affect every
+          entity's billing (admin-only PUT, see src/api/routes/admin.ts). ── */}
+      {!loading && tab === 'pricing' && (
+        <div className="space-y-3">
+          {plansLoading && <p style={{ color: 'var(--text-3)' }}>Yükleniyor...</p>}
+          {!plansLoading && plans.map(plan => {
+            const isEditing = editingPlan === plan.id
+            return card((
+              <div key={plan.id}>
+                <div className="flex items-center justify-between mb-3">
+                  <div>
+                    <p className="font-semibold" style={{ color: 'var(--text-1)' }}>{plan.displayName}</p>
+                    <p className="text-xs" style={{ color: 'var(--text-3)' }}>{plan.planName ?? plan.name} · Tier {plan.tier}</p>
+                  </div>
+                  {!isEditing && (
+                    <button onClick={() => setEditingPlan(plan.id)} className="text-sm" style={{ color: 'var(--accent)' }}>Düzenle</button>
+                  )}
+                </div>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+                  {[
+                    { key: 'basePriceUsd', label: 'Taban Ücret (USD)' },
+                    { key: 'perMessagePriceUsd', label: 'Mesaj Başı (USD)' },
+                    { key: 'overageMessagePriceUsd', label: 'Aşım Mesaj (USD)' },
+                    { key: 'monthlyMessageLimit', label: 'Aylık Mesaj Limiti' },
+                    { key: 'extraSubUserPriceUsd', label: 'Ek Kullanıcı (USD)' },
+                  ].map(f => (
+                    <div key={f.key}>
+                      <label className="text-xs block mb-1" style={{ color: 'var(--text-3)' }}>{f.label}</label>
+                      {isEditing ? (
+                        <input defaultValue={plan[f.key] ?? ''} id={`plan-${plan.id}-${f.key}`}
+                          className="w-full px-2 py-1.5 rounded-lg text-sm"
+                          style={{ background: 'var(--surface-2)', border: '1px solid var(--border)', color: 'var(--text-1)' }} />
+                      ) : (
+                        <p style={{ color: 'var(--text-1)' }}>{plan[f.key] ?? '—'}</p>
+                      )}
+                    </div>
+                  ))}
+                </div>
+                {isEditing && (
+                  <div className="flex gap-2 mt-3">
+                    <button onClick={() => {
+                      const patch: Record<string, unknown> = {}
+                      for (const key of ['basePriceUsd', 'perMessagePriceUsd', 'overageMessagePriceUsd', 'extraSubUserPriceUsd']) {
+                        const el = document.getElementById(`plan-${plan.id}-${key}`) as HTMLInputElement
+                        if (el) patch[key] = el.value
+                      }
+                      const limitEl = document.getElementById(`plan-${plan.id}-monthlyMessageLimit`) as HTMLInputElement
+                      if (limitEl) patch.monthlyMessageLimit = limitEl.value ? Number(limitEl.value) : null
+                      savePlan(plan.id, patch)
+                    }} className="px-3 py-1.5 rounded-lg text-xs font-medium" style={{ background: 'var(--accent)', color: '#fff' }}>
+                      <Save size={12} className="inline mr-1" /> Kaydet
+                    </button>
+                    <button onClick={() => setEditingPlan(null)} className="px-3 py-1.5 rounded-lg text-xs" style={{ color: 'var(--text-3)' }}>Vazgeç</button>
+                  </div>
+                )}
+              </div>
+            ))
+          })}
+        </div>
+      )}
 
       {/* ── CRM Tab ── */}
       {!loading && tab === 'crm' && (

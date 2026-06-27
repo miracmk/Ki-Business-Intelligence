@@ -1519,3 +1519,26 @@ export const kibiWalletTransactionsRelations = relations(kibiWalletTransactions,
   wallet: one(kibiWallets, { fields: [kibiWalletTransactions.walletId], references: [kibiWallets.id] }),
   entity: one(kibiEntities, { fields: [kibiWalletTransactions.entityId], references: [kibiEntities.id] }),
 }))
+
+// ─── Sidebar Nav Config ───────────────────────────────────────────────────────
+// Per-entity OVERRIDES over the static catalog in src/lib/nav-catalog.ts — never a whole-
+// list replace (same per-key-merge-over-static-default discipline as FAZ4.3's
+// getModuleSchema). A missing row for a given itemKey just means "use the catalog default"
+// (visible, catalog position, catalog's own defaultRoles if any).
+export const entitySidebarNavConfig = pgTable('entity_sidebar_nav_config', {
+  id:           uuid('id').primaryKey().defaultRandom(),
+  entityId:     uuid('entity_id').notNull().references(() => kibiEntities.id, { onDelete: 'cascade' }),
+  itemKey:      varchar('item_key', { length: 100 }).notNull(),
+  position:     integer('position').notNull().default(0),
+  isVisible:    boolean('is_visible').notNull().default(true),
+  // null = no entity-level restriction beyond the catalog's own defaultRoles (if any).
+  allowedRoles: jsonb('allowed_roles').$type<string[] | null>(),
+  createdAt:    timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt:    timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({
+  entityItemIdx: uniqueIndex('entity_sidebar_nav_config_entity_item_idx').on(t.entityId, t.itemKey),
+}))
+
+export const entitySidebarNavConfigRelations = relations(entitySidebarNavConfig, ({ one }) => ({
+  entity: one(kibiEntities, { fields: [entitySidebarNavConfig.entityId], references: [kibiEntities.id] }),
+}))

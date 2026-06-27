@@ -44,6 +44,7 @@ import { walletRoutes }       from './api/routes/wallet.js'
 import { entityAiRoutes }     from './api/routes/entity-ai.js'
 import { dashboardRoutes }    from './api/routes/dashboard.js'
 import { entitlementsRoutes } from './api/routes/entitlements.js'
+import { navConfigRoutes }    from './api/routes/nav-config.js'
 import { webhookRoutes }      from './api/webhooks/index.js'
 import './lib/hooks/register.js' // FAZ 5.2: registers afterSave hooks (AI fields, rule engine)
 
@@ -138,6 +139,7 @@ await app.register(async (api) => {
   await api.register(channelRoutes,       { prefix: '/channels' })
   await api.register(dashboardRoutes,     { prefix: '/dashboard' })
   await api.register(entitlementsRoutes,  { prefix: '/entitlements' })
+  await api.register(navConfigRoutes,     { prefix: '/nav-config' })
 }, { prefix: '/api/v1' })
 
 await app.register(webhookRoutes, { prefix: '/webhooks' })

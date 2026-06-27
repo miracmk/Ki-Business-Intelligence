@@ -23,7 +23,7 @@ export default function Import() {
   const [rows, setRows] = useState<PreviewRow[]>([])
   const [decisions, setDecisions] = useState<Record<number, 'create' | 'merge' | 'skip'>>({})
   const [committing, setCommitting] = useState(false)
-  const [result, setResult] = useState<{ created: number; merged: number; skipped: number } | null>(null)
+  const [result, setResult] = useState<{ created: number; merged: number; skipped: number; registeredFields?: string[] } | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   const handleFile = async (selected: File) => {
@@ -75,7 +75,7 @@ export default function Import() {
         {file && <p className="text-xs text-gray-400">{file.name}</p>}
         {uploading && <p className="text-xs text-gray-400 flex items-center gap-2"><RefreshCw size={12} className="animate-spin" /> İşleniyor...</p>}
         {error && <p className="text-sm text-red-400">{error}</p>}
-        <p className="text-xs text-gray-500">Başlık satırı şu alanları kullanmalı: firstName, lastName, email, phone, companyName</p>
+        <p className="text-xs text-gray-500">Eşleştirme için şu başlıklar önerilir: firstName, lastName, email, phone, companyName. Diğer sütunlar otomatik olarak özel alan olarak eklenir.</p>
       </div>
 
       {summary && (
@@ -119,6 +119,9 @@ export default function Import() {
         <div className="rounded-3xl border border-[#2a2a2a] bg-[#111111] p-6 text-sm text-gray-300">
           <p className="text-green-400 font-semibold mb-2">İçe aktarma tamamlandı</p>
           <p>Oluşturulan: {result.created} · Birleştirilen: {result.merged} · Atlanan: {result.skipped}</p>
+          {!!result.registeredFields?.length && (
+            <p className="text-xs text-gray-500 mt-2">Yeni özel alanlar eklendi: {result.registeredFields.join(', ')}</p>
+          )}
         </div>
       )}
     </div>

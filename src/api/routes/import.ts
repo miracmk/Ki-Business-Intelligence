@@ -1,12 +1,17 @@
 // FAZ 8.2: CSV/Excel import + dedup preview/commit. Commit reuses the FAZ 7.2 records-bridge
 // (recordsCreate/recordsUpdate) — already registry-safe column resolution, no need to
 // duplicate that logic a third time.
+// FAZ 10.5: commit also auto-registers unrecognized headers as named custom fields first
+// (src/engine/import/field-registrar.ts) — see that file's header for why this matters.
 import type { FastifyPluginAsync } from 'fastify'
 import { z } from 'zod'
 import { db } from '../../lib/db.js'
 import { queryEntitySchema } from '../../lib/entity-provisioner.js'
 import { dedupContacts, parseImportRows, parseImportRowsXlsx, type ImportRow } from '../../engine/import/dedup.js'
 import { recordsCreate, recordsUpdate } from '../../engine/functions/records-bridge.js'
+import { ensureFieldsRegistered } from '../../engine/import/field-registrar.js'
+
+const MODULE_KEY = 'crm_contacts'
 
 const isUUID = (s: string | null | undefined): boolean =>
   !!s && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)
@@ -71,20 +76,38 @@ export const importRoutes: FastifyPluginAsync = async (app) => {
     const body = decisionSchema.safeParse(req.body)
     if (!body.success) return reply.status(400).send({ error: body.error.flatten() })
 
+    // FAZ 10.5: any CSV/XLSX header that isn't a known crm_contacts column (or already a
+    // registered custom field) becomes a NAMED custom field in kibi_fields before any row is
+    // written — recordsCreate/Update only ever write registry-known keys, so without this any
+    // extra column the source file carries would be silently dropped, not even blobbed.
+    const headers = new Set<string>()
+    for (const d of body.data.decisions) {
+      if (d.action === 'skip') continue
+      for (const h of Object.keys(d.row)) headers.add(h)
+    }
+    const { headerKeyMap, registeredFields } = headers.size > 0
+      ? await ensureFieldsRegistered(entity.id, MODULE_KEY, [...headers])
+      : { headerKeyMap: new Map<string, string>(), registeredFields: [] as string[] }
+
     let created = 0
     let merged = 0
     let skipped = 0
     for (const d of body.data.decisions) {
       if (d.action === 'skip') { skipped++; continue }
-      const data = d.row as ImportRow
+      const raw = d.row as ImportRow
+      const data: Record<string, unknown> = {}
+      for (const [header, val] of Object.entries(raw)) {
+        const key = headerKeyMap.get(header)
+        if (key) data[key] = val
+      }
       if (d.action === 'create') {
-        await recordsCreate(entity.id, entity.schema, 'crm_contacts', data)
+        await recordsCreate(entity.id, entity.schema, MODULE_KEY, data)
         created++
       } else if (d.action === 'merge' && d.existingId) {
-        await recordsUpdate(entity.id, entity.schema, 'crm_contacts', d.existingId, data)
+        await recordsUpdate(entity.id, entity.schema, MODULE_KEY, d.existingId, data)
         merged++
       }
     }
-    return { ok: true, created, merged, skipped }
+    return { ok: true, created, merged, skipped, registeredFields }
   })
 }

@@ -2270,13 +2270,65 @@ mevcut olmadığı için kapsam dışı — yukarıda gerekçelendirildi.)
 - `security-test.ts` (FAZ 7, isolate sandboxing) bu round'dan sonra tekrar çalıştırıldı — 7/7
   geçti (FAZ 10 değişiklikleri isolate güvenliğini etkilemedi).
 
+### FAZ 10.5 — Import'ta Metadata-Farkında Yazım (CSV/XLSX, 2026-06-27)
+
+> Kapsam, kullanıcıya soruldu (AskUserQuestion): entity-etl.ts'in DB-bağlantı senkronizasyon
+> motoru (4 modlu, ~1000 satır) içindeki `runMirrorEtl` modu hâlâ kaynağı birebir kopyalayan
+> rastgele tablolar üretiyor — tam olarak "Entity DB" tarzı generic mirroring. Kullanıcı en
+> küçük/en geri-alınabilir kapsamı seçti: **sadece CSV/XLSX import'u düzelt, DB-connector'a
+> (entity-etl.ts) şimdilik dokunma.** O motorun ne yapılacağı (native loader'a taşı / sil / öyle
+> kalsın) ayrı, daha büyük bir karar olarak ileri bırakıldı.
+
+- `src/engine/import/field-registrar.ts` (yeni): `ensureFieldsRegistered(entityId, moduleKey,
+  headers)` — `kibi_fields`'te bilinmeyen her header için `src/api/routes/metadata.ts`'in manuel
+  "alan ekle" endpoint'inin ürettiğiyle BİREBİR aynı şekilde bir satır oluşturur
+  (`columnName: null`, `type: 'text'`, `isSystem: false`) — yani import'tan gelen yeni alanlar
+  FieldManager'da görünen, sıradan, adlandırılmış custom field'lar olur; `custom_fields`
+  JSONB'ye anonim header metniyle GÖMÜLMEZ.
+  - `toFieldKey()`: Türkçe karakterleri (ı/İ/ğ/ş/ö/ü/ç) transliterasyonla, boşluk/noktalama ile
+    ayrılmış kelimeleri camelCase'e çevirir (örn. "Şirket Adı" → `sirketAdi`, "İlçe" → `ilce`).
+    Sonuç regex'e uymuyorsa (örn. başlık tamamen sayısal: "2. Telefon") `customField{n}`'e düşer.
+  - Bir header normalize edildiğinde MEVCUT bir alana (sistem veya custom) eşleşiyorsa
+    (örn. "Email" → `email`), yeni alan AÇILMAZ — var olana yönlendirilir.
+  - Aynı import içinde FARKLI iki header aynı adaya normalize olursa (örn. "Müşteri Notu" ve
+    "musteri notu" → `musteriNotu`) ikincisi `musteriNotu2`'ye süslenir — sessizce
+    last-value-wins ile birbirini ezmesinler diye.
+- `src/api/routes/import.ts`: commit handler önce tüm satırların header birleşimini
+  `ensureFieldsRegistered`'a veriyor, sonra her satırı header→key eşlemesiyle yeniden anahtarlayıp
+  `recordsCreate`/`recordsUpdate`'e veriyor (önceden bilinmeyen header'lar TAMAMEN
+  düşürülüyordu — registry'nin bilmediği key'leri records-bridge.ts sessizce atlıyor, anonim
+  blob'a bile gitmiyordu). Yanıta `registeredFields: string[]` eklendi (görünürlük).
+  Kapsam BİLEREK `crm_contacts` ile sınırlı tutuldu (route'un zaten hardcode ettiği modül) —
+  loader'ın kendisi (`field-registrar.ts`) modül-bağımsız yazıldı, ileride başka bir import
+  yüzeyine bağlanması kolay.
+- `frontend/src/pages/Import.tsx`: ipucu metni güncellendi ("diğer sütunlar otomatik özel alan
+  olur"), sonuç panelinde yeni eklenen alanlar listeleniyor.
+- **Canlı doğrulama (gerçek HTTP, `docker exec ki_postgres psql` ile DB kontrolü):**
+  1. `firstName,lastName,email,phone,companyName,İlçe,Vergi No.,Şirket Adı` başlıklı bir satır
+     commit edildi → `registeredFields: ["ilce","vergiNo","sirketAdi"]` döndü; `kibi_fields`'te
+     orijinal Türkçe label'larla (`İlçe`, `Vergi No.`, `Şirket Adı`) 3 satır oluştu;
+     `crm_contacts.custom_fields` `{"ilce":"Kadıköy","vergiNo":"1234567890","sirketAdi":"TestCo Ltd"}`
+     olarak yazıldı (anonim blob değil, adlandırılmış key'ler).
+  2. Aynı header'larla TEKRAR import → `registeredFields: []` (mevcut alanlar yeniden
+     kullanıldı, duplicate yok).
+  3. "İlçe" ve "ilçe" (case farkı) aynı satırda → ikisi de var olan `ilce` alanına yönlendi
+     (yeni alan açılmadı) — kaynak dosyanın kendi veri kalitesi sorunu (iki sütun aynı alana
+     yazıyor, sonuncusu kazanıyor), registrar'ın hatası değil.
+  4. "Müşteri Notu" ve "musteri notu" (ikisi de GENUINELY yeni) aynı satırda →
+     `registeredFields: ["musteriNotu","musteriNotu2"]`, `custom_fields` ikisini de ayrı ayrı
+     korudu (`{"musteriNotu":"A","musteriNotu2":"B"}`) — çakışma süsleme mekanizması doğrulandı.
+  5. `GET /metadata/crm_contacts/fields` ile FieldManager'ın bu alanları gerçek, yönetilebilir
+     field olarak gördüğü doğrulandı.
+  Test verisi (4 test kişisi + 5 test field'ı) temizlendi.
+
 ### FAZ 10'dan Taşınan Kapsam Notları (deferred listesine ek)
-- **FAZ 10.5 (Import → native tablolara metadata-farkında yazım) henüz YAPILMADI.** Wizard'ın
-  DB/API/CSV-XLSX import tipleri zaten native tabloları taşıyor; eksik olan, import'tan gelen
-  YENİ/eşlenmemiş alanların otomatik olarak adlandırılmış `kibi_fields` custom field'ları olarak
-  registry'ye kaydedilmesi (kullanıcı: "importtan gelen metadataları oluşturması ve içindeki
-  dataları ilgili entity'e yazması gerekiyor") — şu an `crm.ts`'te tutulan eşleme heuristikleri
-  bu işin temelini oluşturuyor ama otomatik field-registration adımı henüz bağlanmadı.
+- **entity-etl.ts'in (DB-bağlantı senkron motoru) kaderi HENÜZ KARARLAŞTIRILMADI.**
+  `runMirrorEtl` modu hâlâ generic/rastgele tablo mirror'lıyor (kullanıcının kaldırılmasını
+  istediği "Entity DB" deseniyle aynı); `runConnectorEtl` modu ise zaten native tablolara
+  yazıyor ama unmapped alanları (`transform:'custom'`) anonim `custom_fields` blob'una koyuyor
+  (FAZ 10.5'in CSV için çözdüğü sorunun aynısı, DB-connector için hâlâ çözülmedi). Kullanıcı
+  kapsamı bilerek CSV/XLSX'le sınırladı; DB-connector/`generate-connector` akışının native
+  loader'a taşınıp taşınmayacağı (veya `runMirrorEtl`'in silinip silinmeyeceği) ayrı bir karar.
 - `propose_update_record`/`propose_delete_record` önerisi oluşturulurken erişim ÖN-KONTROLÜ
   yapmıyor (sadece onay anında uygulanıyor) — güvenlik açığı değil (gerçek kontrol onayda), ama
   kullanıcı deneyimi: erişimi olmayan bir kayda öneri oluşturulabilir, sadece onayda başarısız

@@ -1382,6 +1382,11 @@ export const aiMessagesRelations = relations(aiMessages, ({ one }) => ({
 export interface TenantSettings {
   timezone?:       string
   language?:       string
+  dateFormat?:     string  // e.g. 'DD.MM.YYYY' | 'MM/DD/YYYY' | 'YYYY-MM-DD'
+  timeFormat?:     '24h' | '12h'
+  // Keyed by 3-letter lowercase day (mon..sun); a missing day means closed. Surfaced in
+  // Entity Settings' company tab, used for portal/AI "şu an açık mıyız" style answers.
+  businessHours?:  Record<string, { open: string; close: string; closed: boolean }>
   webhookUrl?:     string
   allowedChannels?: string[]
   branding?:       { name?: string; logo?: string; color?: string }

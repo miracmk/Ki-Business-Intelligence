@@ -88,11 +88,21 @@ export const tenantRoutes: FastifyPluginAsync = async (app) => {
   // PUT /api/v1/tenants/me/settings
   app.put('/me/settings', { onRequest: [app.authenticate] }, async (req, reply) => {
     const user = req.user as { sub: string; tenantId: string }
-    const { language, timezone } = req.body as { language?: string; timezone?: string }
+    const { language, timezone, dateFormat, timeFormat, businessHours } = req.body as {
+      language?: string; timezone?: string; dateFormat?: string; timeFormat?: '24h' | '12h'
+      businessHours?: Record<string, { open: string; close: string; closed: boolean }>
+    }
     const tenant = await db.query.tenants.findFirst({ where: (t, { eq }) => eq(t.id, user.tenantId) })
     const existing = (tenant?.settings ?? {}) as Record<string, unknown>
     await db.update(tenants)
-      .set({ settings: { ...existing, ...(language ? { language } : {}), ...(timezone ? { timezone } : {}) } as any })
+      .set({ settings: {
+        ...existing,
+        ...(language ? { language } : {}),
+        ...(timezone ? { timezone } : {}),
+        ...(dateFormat ? { dateFormat } : {}),
+        ...(timeFormat ? { timeFormat } : {}),
+        ...(businessHours ? { businessHours } : {}),
+      } as any })
       .where(eq(tenants.id, user.tenantId))
     return reply.send({ ok: true })
   })

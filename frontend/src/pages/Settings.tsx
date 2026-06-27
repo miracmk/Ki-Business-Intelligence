@@ -4,7 +4,8 @@ import {
   Plus, Trash2, Copy, QrCode, RefreshCw,
   AlertTriangle, CheckCircle, XCircle, X, Camera, Save,
   Mail, Phone, MapPin, Building2, ExternalLink, UserPlus, Wand2, Zap, History,
-  Upload, FileText,
+  Upload, FileText, LayoutGrid, Sparkles, FileUp, ListPlus, GitBranch, Navigation,
+  ArrowUp, ArrowDown,
 } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import api from '../lib/api'
@@ -13,6 +14,8 @@ import { SearchableSelect } from '../components/SearchableSelect'
 import { PhoneInput } from '../components/PhoneInput'
 import { COUNTRIES, TR_PROVINCES, getTaxLabel } from '../lib/geoData'
 import { AiProviderPanel, ENTITY_MODEL_ROLE_LABELS } from '../components/AiProviderPanel'
+
+const VALID_TABS = new Set(['overview', 'account', 'company', 'ai', 'crm', 'accounting', 'channels', 'plan', 'security', 'navigation'])
 
 // ─── Entity KB category taxonomy (YFZ 33) ──────────────────────────────────────
 
@@ -753,7 +756,7 @@ function SupportAgentPanel() {
 
 // ─── Main component ───────────────────────────────────────────────────────────
 export default function Settings() {
-  const [activeTab, setActiveTab] = useState('account')
+  const [activeTab, setActiveTab] = useState('overview')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string>('')
   const [saveMsg, setSaveMsg] = useState<string>('')
@@ -761,7 +764,13 @@ export default function Settings() {
   const [tenant, setTenant] = useState<any>(null)
   const [userRole, setUserRole] = useState<string>('')
   const [currentUserPerms, setCurrentUserPerms] = useState<Record<string, boolean>>({})
-  const [accountSettings, setAccountSettings] = useState({ language: 'tr', timezone: 'Europe/Istanbul' })
+  const [accountSettings, setAccountSettings] = useState<{
+    language: string; timezone: string; dateFormat: string; timeFormat: '24h' | '12h'
+    businessHours: Record<string, { open: string; close: string; closed: boolean }>
+  }>({
+    language: 'tr', timezone: 'Europe/Istanbul', dateFormat: 'DD.MM.YYYY', timeFormat: '24h',
+    businessHours: {},
+  })
   const [crmConnections, setCrmConnections] = useState<any[]>([])
   const [accountingConnections, setAccountingConnections] = useState<any[]>([])
 
@@ -898,6 +907,9 @@ export default function Settings() {
       setAccountSettings({
         language: tenantRes.data.tenant?.settings?.language ?? 'tr',
         timezone: tenantRes.data.tenant?.settings?.timezone ?? 'Europe/Istanbul',
+        dateFormat: tenantRes.data.tenant?.settings?.dateFormat ?? 'DD.MM.YYYY',
+        timeFormat: tenantRes.data.tenant?.settings?.timeFormat ?? '24h',
+        businessHours: tenantRes.data.tenant?.settings?.businessHours ?? {},
       })
       setProfile({
         name:    tenantRes.data.profile?.name    ?? '',
@@ -1026,8 +1038,7 @@ export default function Settings() {
     // Handle OAuth callback redirect
     const params = new URLSearchParams(window.location.search)
     const tabParam = params.get('tab')
-    if (tabParam === 'crm') setActiveTab('crm')
-    if (tabParam === 'accounting') setActiveTab('accounting')
+    if (tabParam && VALID_TABS.has(tabParam)) setActiveTab(tabParam)
     if (params.get('oauth_success')) {
       const provider = params.get('provider') ?? 'OAuth'
       showSuccess(`${provider} bağlantısı başarıyla eklendi!`)
@@ -1068,15 +1079,86 @@ export default function Settings() {
         setAllPlans(Array.isArray(plansRes.data) ? plansRes.data : [])
       }).finally(() => setPlanLoading(false))
     }
+    if (activeTab === 'navigation') loadNavCatalog()
   }, [activeTab])
 
   const saveAccountSettings = async () => {
     try {
       await api.put('/tenants/me/settings', accountSettings)
-      showSuccess('Dil ve zaman dilimi kaydedildi.')
+      showSuccess('Bölgesel ayarlar kaydedildi.')
     } catch (e: any) {
       setError(e.response?.data?.error || 'Kaydedilemedi')
     }
+  }
+
+  const DAYS: { key: string; label: string }[] = [
+    { key: 'mon', label: 'Pazartesi' }, { key: 'tue', label: 'Salı' }, { key: 'wed', label: 'Çarşamba' },
+    { key: 'thu', label: 'Perşembe' }, { key: 'fri', label: 'Cuma' }, { key: 'sat', label: 'Cumartesi' }, { key: 'sun', label: 'Pazar' },
+  ]
+  const setBusinessHour = (day: string, patch: Partial<{ open: string; close: string; closed: boolean }>) => {
+    const current = accountSettings.businessHours[day] ?? { open: '09:00', close: '18:00', closed: false }
+    setAccountSettings({ ...accountSettings, businessHours: { ...accountSettings.businessHours, [day]: { ...current, ...patch } } })
+  }
+
+  // ── Navigasyon tab — admin UI over GET/PUT /nav-config (FAZ: KiBI WebApp redesign) ──
+  interface NavAdminItem {
+    key: string; group: string; label: string; icon: string; kind: string
+    defaultRoles: string[] | null; position: number; isVisible: boolean; allowedRoles: string[] | null
+  }
+  const ENTITY_ROLES = [
+    { key: 'entity_main', label: 'Yönetici' },
+    { key: 'entity_supervisor', label: 'Denetçi' },
+    { key: 'entity_sub', label: 'Alt Kullanıcı' },
+  ]
+  const [navGroupsAdmin, setNavGroupsAdmin] = useState<{ key: string; label: string }[]>([])
+  const [navItems, setNavItems] = useState<NavAdminItem[]>([])
+  const [navLoading, setNavLoading] = useState(false)
+
+  const loadNavCatalog = async () => {
+    setNavLoading(true)
+    try {
+      const r = await api.get('/nav-config/catalog')
+      setNavGroupsAdmin(r.data.groups ?? [])
+      setNavItems([...(r.data.items ?? [])].sort((a, b) => a.position - b.position))
+    } catch (e: any) {
+      setError(e.response?.data?.error || 'Navigasyon ayarları yüklenemedi')
+    }
+    setNavLoading(false)
+  }
+
+  const persistNavItems = async (items: NavAdminItem[]) => {
+    try {
+      await api.put('/nav-config', { items: items.map(i => ({ itemKey: i.key, position: i.position, isVisible: i.isVisible, allowedRoles: i.allowedRoles })) })
+    } catch (e: any) {
+      setError(e.response?.data?.error || 'Navigasyon ayarı kaydedilemedi')
+    }
+  }
+
+  const toggleNavVisible = (key: string) => {
+    const next = navItems.map(i => i.key === key ? { ...i, isVisible: !i.isVisible } : i)
+    setNavItems(next)
+    persistNavItems(next)
+  }
+
+  const toggleNavRole = (key: string, role: string) => {
+    const next = navItems.map(i => {
+      if (i.key !== key) return i
+      const current = i.allowedRoles ?? ENTITY_ROLES.map(r => r.key)
+      const updated = current.includes(role) ? current.filter(r => r !== role) : [...current, role]
+      return { ...i, allowedRoles: updated }
+    })
+    setNavItems(next)
+    persistNavItems(next)
+  }
+
+  const moveNavItem = (groupKey: string, index: number, direction: -1 | 1) => {
+    const groupItems = navItems.filter(i => i.group === groupKey)
+    const target = index + direction
+    if (target < 0 || target >= groupItems.length) return
+    const a = groupItems[index], b = groupItems[target]
+    const next = navItems.map(i => i.key === a.key ? { ...i, position: b.position } : i.key === b.key ? { ...i, position: a.position } : i)
+    setNavItems(next)
+    persistNavItems(next)
   }
 
   const saveProfile = async () => {
@@ -1483,6 +1565,7 @@ export default function Settings() {
   const canManageCompanyProfile = userRole === 'entity_main' || isAuthorizedSupervisor || userRole === 'admin' || userRole === 'supervisor'
 
   const tabs = [
+    { id: 'overview',   label: 'Genel Bakış',        icon: LayoutGrid },
     { id: 'account',    label: 'Hesap',             icon: User },
     { id: 'company',    label: 'Şirket Profili',    icon: Building2 },
     { id: 'ai',         label: 'AI Modeli',          icon: Brain },
@@ -1491,6 +1574,44 @@ export default function Settings() {
     { id: 'channels',   label: 'Kanallar',           icon: MessageSquare },
     { id: 'plan',       label: 'Plan & Kullanım',    icon: Zap },
     { id: 'security',   label: '2FA & Güvenlik',     icon: Shield },
+    { id: 'navigation', label: 'Navigasyon',         icon: Navigation },
+  ]
+
+  const OVERVIEW_CATEGORIES: { icon: any; title: string; items: { label: string; tab?: string; to?: string }[] }[] = [
+    { icon: User, title: 'Hesap & Ekip', items: [
+      { label: 'Hesap Bilgileri', tab: 'account' },
+      { label: 'Şirket Profili & Marka', tab: 'company' },
+      { label: 'Ekip Üyeleri & Davetler', tab: 'company' },
+      { label: '2FA & Güvenlik', tab: 'security' },
+    ] },
+    { icon: Sparkles, title: 'AI & Zeka', items: [
+      { label: 'AI Modeli', tab: 'ai' },
+      { label: 'KIBI AI', to: '/app/chat' },
+      { label: 'Entity AI', to: '/app/entity-ai' },
+      { label: 'AI Onayları', to: '/app/ai-actions' },
+    ] },
+    { icon: Database, title: 'Entegrasyonlar', items: [
+      { label: 'CRM / ERP Bağlayıcıları', tab: 'crm' },
+      { label: 'Muhasebe Bağlayıcıları', tab: 'accounting' },
+      { label: 'İletişim Kanalları', tab: 'channels' },
+    ] },
+    { icon: FileUp, title: 'Veri Yönetimi', items: [
+      { label: 'İçe Aktarma', to: '/app/import' },
+      { label: 'Sektörel Şablonlar', to: '/app/onboarding' },
+      { label: 'Dosyalar', to: '/app/files' },
+    ] },
+    { icon: ListPlus, title: 'Özelleştirme', items: [
+      { label: 'Alan Yöneticisi (Custom Fields)', to: '/app/field-manager' },
+      { label: 'Navigasyon Düzeni', tab: 'navigation' },
+    ] },
+    { icon: GitBranch, title: 'Otomasyon', items: [
+      { label: 'Blueprint (İş Akışları)', to: '/app/blueprint' },
+      { label: 'Fonksiyonlar', to: '/app/functions' },
+    ] },
+    { icon: Zap, title: 'Plan & Faturalama', items: [
+      { label: 'Plan & Kullanım', tab: 'plan' },
+      { label: 'Ki Wallet', to: '/app/wallet' },
+    ] },
   ]
 
   if (loading) {
@@ -1534,6 +1655,44 @@ export default function Settings() {
           </button>
         ))}
       </div>
+
+      {/* ── Overview tab — category grid linking to every entity-level setting, whether it's
+          a tab in this page or a dedicated route elsewhere (Field Manager, Functions,
+          Blueprint, Import, Onboarding, AI chat surfaces, Ki Wallet). ── */}
+      {activeTab === 'overview' && (
+        <div className="space-y-2">
+          <p className="text-sm mb-4" style={{ color: 'var(--text-3)' }}>
+            Bu işletmeye ait tüm ayarlar — AI yapılandırması, içe/dışa aktarım, entegrasyonlar,
+            özel alanlar, otomasyon ve ekip yönetimi tek bir yerden.
+          </p>
+          <div className="grid gap-4" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))' }}>
+            {OVERVIEW_CATEGORIES.map((cat, i) => (
+              <div key={i} className="rounded-2xl p-5"
+                style={{ background: 'var(--surface)', border: '1px solid var(--border)', boxShadow: 'var(--shadow)' }}>
+                <div className="flex items-center gap-2 mb-3">
+                  <div className="w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0"
+                    style={{ background: 'rgba(38,166,154,0.12)' }}>
+                    <cat.icon size={17} style={{ color: 'var(--accent)' }} />
+                  </div>
+                  <span className="font-heading font-bold text-sm" style={{ color: 'var(--text-1)' }}>{cat.title}</span>
+                </div>
+                <div className="space-y-1">
+                  {cat.items.map((item, j) => item.to ? (
+                    <Link key={j} to={item.to} className="block text-sm py-1.5" style={{ color: 'var(--accent)' }}>
+                      {item.label}
+                    </Link>
+                  ) : (
+                    <button key={j} onClick={() => setActiveTab(item.tab!)}
+                      className="block w-full text-left text-sm py-1.5" style={{ color: 'var(--accent)' }}>
+                      {item.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* ── Account tab ── */}
       {activeTab === 'account' && (
@@ -1659,6 +1818,49 @@ export default function Settings() {
                   <option value="Europe/Berlin">Europe/Berlin (UTC+1)</option>
                 </select>
               </div>
+              <div>
+                <label className="text-gray-400 text-sm mb-1 block">Tarih Biçimi</label>
+                <select value={accountSettings.dateFormat} onChange={e => setAccountSettings({ ...accountSettings, dateFormat: e.target.value })}
+                  className="w-full px-3 py-2 bg-[#0a0a0a] border border-[#2a2a2a] rounded-lg text-white text-sm">
+                  <option value="DD.MM.YYYY">31.12.2026</option>
+                  <option value="MM/DD/YYYY">12/31/2026</option>
+                  <option value="YYYY-MM-DD">2026-12-31</option>
+                </select>
+              </div>
+              <div>
+                <label className="text-gray-400 text-sm mb-1 block">Saat Biçimi</label>
+                <select value={accountSettings.timeFormat} onChange={e => setAccountSettings({ ...accountSettings, timeFormat: e.target.value as '24h' | '12h' })}
+                  className="w-full px-3 py-2 bg-[#0a0a0a] border border-[#2a2a2a] rounded-lg text-white text-sm">
+                  <option value="24h">24 saat (18:00)</option>
+                  <option value="12h">12 saat (6:00 PM)</option>
+                </select>
+              </div>
+            </div>
+            <button onClick={saveAccountSettings} className="mt-4 px-4 py-2 bg-[#6366f1] hover:bg-[#4f46e5] text-white rounded-lg text-sm">Kaydet</button>
+          </div>
+
+          {/* Business hours */}
+          <div className="p-6 bg-[#111111] rounded-xl border border-[#2a2a2a]">
+            <h3 className="text-lg font-semibold text-white mb-1">Çalışma Saatleri</h3>
+            <p className="text-gray-500 text-xs mb-4">Portal/AI yanıtlarında "şu an açık mıyız" gibi sorular için kullanılır.</p>
+            <div className="space-y-2 max-w-2xl">
+              {DAYS.map(d => {
+                const h = accountSettings.businessHours[d.key] ?? { open: '09:00', close: '18:00', closed: true }
+                return (
+                  <div key={d.key} className="flex items-center gap-3">
+                    <span className="text-gray-300 text-sm w-24 flex-shrink-0">{d.label}</span>
+                    <label className="flex items-center gap-1.5 text-xs text-gray-400">
+                      <input type="checkbox" checked={!h.closed} onChange={e => setBusinessHour(d.key, { closed: !e.target.checked })} />
+                      Açık
+                    </label>
+                    <input type="time" value={h.open} disabled={h.closed} onChange={e => setBusinessHour(d.key, { open: e.target.value })}
+                      className="px-2 py-1 bg-[#0a0a0a] border border-[#2a2a2a] rounded-lg text-white text-sm disabled:opacity-40" />
+                    <span className="text-gray-500 text-xs">—</span>
+                    <input type="time" value={h.close} disabled={h.closed} onChange={e => setBusinessHour(d.key, { close: e.target.value })}
+                      className="px-2 py-1 bg-[#0a0a0a] border border-[#2a2a2a] rounded-lg text-white text-sm disabled:opacity-40" />
+                  </div>
+                )
+              })}
             </div>
             <button onClick={saveAccountSettings} className="mt-4 px-4 py-2 bg-[#6366f1] hover:bg-[#4f46e5] text-white rounded-lg text-sm">Kaydet</button>
           </div>
@@ -3350,6 +3552,68 @@ export default function Settings() {
               </button>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* ── Navigasyon tab — visibility/order/role overrides over GET /nav-config ── */}
+      {activeTab === 'navigation' && (
+        <div className="space-y-6">
+          <p className="text-sm" style={{ color: 'var(--text-3)' }}>
+            Sol menüdeki maddelerin sırasını, görünürlüğünü ve hangi rollerin görebileceğini
+            buradan düzenleyin. Değişiklikler anında kaydedilir.
+          </p>
+          {navLoading && <p className="text-sm" style={{ color: 'var(--text-3)' }}>Yükleniyor...</p>}
+          {!navLoading && navGroupsAdmin.map(group => {
+            const items = navItems.filter(i => i.group === group.key)
+            if (items.length === 0) return null
+            return (
+              <div key={group.key} className="rounded-2xl p-5"
+                style={{ background: 'var(--surface)', border: '1px solid var(--border)', boxShadow: 'var(--shadow)' }}>
+                <h3 className="font-heading font-bold text-sm mb-3" style={{ color: 'var(--text-1)' }}>{group.label}</h3>
+                <div className="space-y-1.5">
+                  {items.map((item, idx) => {
+                    const platformLocked = !!item.defaultRoles
+                    return (
+                      <div key={item.key} className="flex items-center gap-3 py-2 px-1 rounded-lg"
+                        style={{ borderBottom: idx < items.length - 1 ? '1px solid var(--border)' : 'none' }}>
+                        <div className="flex flex-col">
+                          <button onClick={() => moveNavItem(group.key, idx, -1)} disabled={idx === 0}
+                            className="disabled:opacity-20" style={{ color: 'var(--text-3)' }}><ArrowUp size={11} /></button>
+                          <button onClick={() => moveNavItem(group.key, idx, 1)} disabled={idx === items.length - 1}
+                            className="disabled:opacity-20" style={{ color: 'var(--text-3)' }}><ArrowDown size={11} /></button>
+                        </div>
+                        <span className="text-sm flex-1" style={{ color: 'var(--text-1)' }}>
+                          {item.label}
+                          {item.kind === 'placeholder' && (
+                            <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded-full" style={{ background: 'var(--surface-3)', color: 'var(--text-3)' }}>Yakında</span>
+                          )}
+                        </span>
+                        <label className="flex items-center gap-1.5 text-xs" style={{ color: 'var(--text-2)' }}>
+                          <input type="checkbox" checked={item.isVisible} onChange={() => toggleNavVisible(item.key)} />
+                          Görünür
+                        </label>
+                        {platformLocked ? (
+                          <span className="text-xs" style={{ color: 'var(--text-3)' }}>Platform tarafından kısıtlı</span>
+                        ) : (
+                          <div className="flex items-center gap-2">
+                            {ENTITY_ROLES.map(r => {
+                              const checked = item.allowedRoles == null || item.allowedRoles.includes(r.key)
+                              return (
+                                <label key={r.key} className="flex items-center gap-1 text-[11px]" style={{ color: 'var(--text-3)' }}>
+                                  <input type="checkbox" checked={checked} onChange={() => toggleNavRole(item.key, r.key)} />
+                                  {r.label}
+                                </label>
+                              )
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+            )
+          })}
         </div>
       )}
 

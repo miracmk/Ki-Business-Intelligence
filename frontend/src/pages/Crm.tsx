@@ -1,7 +1,10 @@
 import { useEffect, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { Plus, Trash2, Edit2, X, RefreshCw } from 'lucide-react'
 import api from '../lib/api'
 import DynamicForm from '../components/DynamicForm'
+
+const VALID_VIEWS = new Set(['contacts', 'companies', 'deals', 'activities'])
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 interface Contact { id: string; fullName?: string; firstName?: string; lastName?: string; email?: string; phone?: string; companyName?: string; contactType?: string; leadStatus?: string; companyId?: string }
@@ -41,7 +44,9 @@ function Modal({ title, onClose, children }: { title: string; onClose: () => voi
 }
 
 export default function Crm() {
-  const [tab, setTab] = useState('contacts')
+  const [searchParams] = useSearchParams()
+  const initialView = searchParams.get('view')
+  const [tab, setTab] = useState(initialView && VALID_VIEWS.has(initialView) ? initialView : 'contacts')
   const [contacts, setContacts] = useState<Contact[]>([])
   const [companies, setCompanies] = useState<Company[]>([])
   const [deals, setDeals] = useState<Deal[]>([])

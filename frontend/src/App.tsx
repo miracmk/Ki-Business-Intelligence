@@ -32,6 +32,7 @@ import PlatformSettings from './pages/PlatformSettings'
 import Register from './pages/Register'
 import KiWallet from './pages/KiWallet'
 import PrivacyPolicy from './pages/PrivacyPolicy'
+import ComingSoon from './components/ComingSoon'
 function PrivateRoute({ children }: { children: React.ReactNode }) {
   const { accessToken } = useAuth()
   if (!accessToken) return <Navigate to="/app/login" replace />
@@ -81,6 +82,7 @@ function AppShell() {
           <Route path="support"    element={<Support />} />
           <Route path="wallet"     element={<KiWallet />} />
           <Route path="settings"   element={<Settings />} />
+          <Route path="coming-soon" element={<ComingSoon />} />
           <Route path="admin"             element={<AdminRoute><Admin /></AdminRoute>} />
           <Route path="admin/settings"   element={<AdminRoute><PlatformSettings /></AdminRoute>} />
           <Route path="admin/kibi-chat"  element={<AdminRoute><AiChat isAdminMode /></AdminRoute>} />

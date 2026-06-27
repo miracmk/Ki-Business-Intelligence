@@ -1,6 +1,9 @@
 import { useEffect, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { Plus, Trash2, Edit2, X, RefreshCw, AlertTriangle } from 'lucide-react'
 import api from '../lib/api'
+
+const VALID_VIEWS = new Set(['products', 'suppliers', 'orders'])
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 interface Product { id: string; sku?: string; name: string; category?: string; costPrice?: number; salePrice?: number; stockQuantity?: number; availableQuantity?: number; reorderPoint?: number; unit?: string; isActive?: boolean }
@@ -44,7 +47,9 @@ function Modal({ title, onClose, children }: { title: string; onClose: () => voi
 }
 
 export default function Erp() {
-  const [tab, setTab] = useState('products')
+  const [searchParams] = useSearchParams()
+  const initialView = searchParams.get('view')
+  const [tab, setTab] = useState(initialView && VALID_VIEWS.has(initialView) ? initialView : 'products')
   const [products, setProducts] = useState<Product[]>([])
   const [suppliers, setSuppliers] = useState<Supplier[]>([])
   const [orders, setOrders] = useState<Order[]>([])

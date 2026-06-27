@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { Plus, RefreshCw, Lock, Wallet } from 'lucide-react'
 import api from '../lib/api'
 
@@ -16,9 +17,11 @@ function F({ label, children }: { label: string; children: React.ReactNode }) {
 }
 
 export default function Personnel() {
+  const [searchParams] = useSearchParams()
+  const initialTab = searchParams.get('tab')
   const [entitled, setEntitled] = useState<boolean | null>(null)
   const [activating, setActivating] = useState(false)
-  const [tab, setTab] = useState('staff')
+  const [tab, setTab] = useState(initialTab === 'payroll' ? 'payroll' : 'staff')
   const [staff, setStaff] = useState<Staff[]>([])
   const [payroll, setPayroll] = useState<PayrollRow[]>([])
   const [loading, setLoading] = useState(false)

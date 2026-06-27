@@ -2,15 +2,20 @@ import { useState, useEffect, useRef } from 'react'
 import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { useAuth } from '../store/auth'
 import {
-  LayoutDashboard, FolderOpen, LifeBuoy, Settings, LogOut,
-  Sun, Moon, Menu, X, ChevronDown, ChevronRight,
-  MessageSquare, Bot, Settings2, BarChart3, Database,
-  Bell, CheckCheck, Wallet, Users, Boxes, Headset, Truck, ShoppingCart, Megaphone, CalendarDays, IdCard,
-  GitBranch, Code2, ListPlus, FileUp, Sparkles, ShieldCheck,
+  LogOut, Sun, Moon, Menu, X, ChevronDown, ChevronRight,
+  Bell, CheckCheck, PanelLeftClose, PanelLeftOpen,
 } from 'lucide-react'
 import api from '../lib/api'
+import { resolveIcon } from '../lib/icon-map'
 
-interface CrmModule { apiName: string; pluralLabel: string }
+// Sidebar is a thin renderer of GET /nav-config — the backend (src/lib/nav-catalog.ts +
+// entity_sidebar_nav_config overrides) is the single source of truth for what nav items
+// exist, their labels/icons/routes, and role/entitlement visibility. This component never
+// hardcodes any of that — adding a page to the product means adding one row to the backend
+// catalog, not touching this file. See KIBIPR.md nav-config section.
+
+interface NavItem { key: string; label: string; icon: string; route: string | null; kind: 'page' | 'placeholder' }
+interface NavGroup { key: string; label: string; icon: string; items: NavItem[] }
 
 const TYPE_LABEL: Record<string, string> = {
   info: 'Bilgi', warning: 'Uyarı', error: 'Hata', success: 'Başarı',
@@ -56,30 +61,22 @@ function NotifDropdown({ notifications, onRead, onReadAll }: {
   )
 }
 
-const ACCOUNTING_TABS = [
-  { key: 'summary',        label: 'Özet' },
-  { key: 'invoices',       label: 'Faturalar' },
-  { key: 'payments',       label: 'Ödemeler' },
-  { key: 'contacts',       label: 'Kişiler' },
-  { key: 'expenses',       label: 'Giderler' },
-  { key: 'reports',        label: 'Raporlar' },
-  { key: 'integrations',   label: 'Entegrasyonlar' },
-]
+// Groups with a single item (Dashboard) render as a direct link, no collapsible header.
+// Groups expanded by default mirror what a typical entity uses most (CRM/Platform/AI);
+// pure visual default, not persisted — actual visibility/order comes from the backend.
+const DEFAULT_EXPANDED = new Set(['crm', 'finance', 'platform', 'ai'])
 
 export default function Layout() {
   const location  = useLocation()
   const navigate  = useNavigate()
   const { user, clear } = useAuth()
 
-  const [sidebarOpen,  setSidebarOpen]  = useState(false)
-  const [crmOpen,      setCrmOpen]      = useState(false)
-  const [accOpen,      setAccOpen]      = useState(false)
-  const [adminOpen,    setAdminOpen]    = useState(false)
-  const [crmModules,   setCrmModules]   = useState<CrmModule[]>([])
-  const [crmLoaded,    setCrmLoaded]    = useState(false)
+  const [sidebarOpen,     setSidebarOpen]     = useState(false)
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const [navGroups,       setNavGroups]       = useState<NavGroup[]>([])
+  const [expanded,        setExpanded]        = useState<Record<string, boolean>>({})
   const [notifications, setNotifications] = useState<any[]>([])
   const [notifOpen,    setNotifOpen]    = useState(false)
-  const [aiPremiumActive, setAiPremiumActive] = useState(true) // YFZ 34: optimistic default until /entitlements resolves
   const notifRef = useRef<HTMLDivElement>(null)
 
   const [dark, setDark] = useState(() => {
@@ -93,13 +90,22 @@ export default function Layout() {
     localStorage.setItem('ki-theme', dark ? 'dark' : 'light')
   }, [dark])
 
-  // auto-expand active section
+  useEffect(() => { setSidebarOpen(false) }, [location.pathname])
+
+  // Nav tree — fetched once per session from the backend, fully role/entitlement-resolved
+  // server-side. No client-side gating logic needed here at all.
   useEffect(() => {
-    if (location.pathname.startsWith('/app/crm')) setCrmOpen(true)
-    if (location.pathname.startsWith('/app/accounting')) setAccOpen(true)
-    if (location.pathname.startsWith('/app/admin')) setAdminOpen(true)
-    setSidebarOpen(false)
-  }, [location.pathname])
+    if (!user) return
+    api.get('/nav-config').then(r => {
+      const groups: NavGroup[] = r.data.groups ?? []
+      setNavGroups(groups)
+      setExpanded(prev => {
+        const next = { ...prev }
+        for (const g of groups) if (!(g.key in next)) next[g.key] = DEFAULT_EXPANDED.has(g.key)
+        return next
+      })
+    }).catch(() => setNavGroups([]))
+  }, [user])
 
   // notification polling
   useEffect(() => {
@@ -112,17 +118,6 @@ export default function Layout() {
     return () => clearInterval(iv)
   }, [user])
 
-  // YFZ 34: KiBI AI / Entity AI nav görünürlüğü — Premium AI entitlement (kozmetik;
-  // gerçek erişim sınırı backend'in 402 gate'idir, bu sadece nav'ı temizler)
-  useEffect(() => {
-    if (!user) return
-    api.get('/entitlements').then(r => {
-      const rows = r.data.entitlements ?? []
-      const ai = rows.find((e: any) => e.moduleKey === 'ai_premium')
-      setAiPremiumActive(!!ai && (ai.status === 'active' || ai.status === 'trial'))
-    }).catch(() => setAiPremiumActive(true)) // fail-open on nav; backend 402 still enforces
-  }, [user])
-
   // close notif dropdown on outside click
   useEffect(() => {
     const handler = (e: MouseEvent) => {
@@ -132,22 +127,13 @@ export default function Layout() {
     return () => document.removeEventListener('mousedown', handler)
   }, [])
 
-  // lazy load CRM modules
-  useEffect(() => {
-    if (!crmOpen || crmLoaded) return
-    api.get('/crm/connections').then(r => {
-      const conn = r.data.connections?.[0]
-      if (!conn) { setCrmLoaded(true); return }
-      api.get(`/crm/connections/${conn.id}/modules`).then(mr => {
-        setCrmModules(mr.data.modules ?? [])
-      }).finally(() => setCrmLoaded(true))
-    }).catch(() => setCrmLoaded(true))
-  }, [crmOpen, crmLoaded])
+  const initials = user?.name ? user.name.charAt(0).toUpperCase() : 'U'
 
-  const isAdminOrSupervisor = user?.role === 'admin' || user?.role === 'supervisor'
-  const initials     = user?.name ? user.name.charAt(0).toUpperCase() : 'U'
-
-  const activeLink = (path: string) => location.pathname === path || location.pathname.startsWith(path + '/') || location.pathname.startsWith(path + '?')
+  const activeLink = (to: string) => {
+    const [path, query] = to.split('?')
+    if (query) return location.pathname === path && location.search === `?${query}`
+    return location.pathname === path || location.pathname.startsWith(path + '/')
+  }
 
   const linkStyle = (active: boolean) => active ? {
     background: 'rgba(38,166,154,0.14)',
@@ -171,24 +157,29 @@ export default function Layout() {
     }
   }
 
-  const SubItem = ({ to, label }: { to: string; label: string }) => {
-    const active = location.pathname + location.search === to || location.pathname === to
+  const itemTo = (item: NavItem) => item.kind === 'placeholder'
+    ? `/app/coming-soon?key=${item.key}&label=${encodeURIComponent(item.label)}&icon=${item.icon}`
+    : (item.route ?? '#')
+
+  const NavLink = ({ item, indent }: { item: NavItem; indent?: boolean }) => {
+    const to = itemTo(item)
+    const active = activeLink(to)
+    const Icon = resolveIcon(item.icon)
     return (
-      <Link
-        to={to}
-        className="flex items-center gap-2 pl-9 pr-3 py-2 rounded-lg text-xs transition-all duration-150"
-        style={active ? { color: 'var(--accent)', background: 'rgba(38,166,154,0.10)' } : { color: 'var(--text-3)' }}
-        onMouseEnter={e => { if (!active) { e.currentTarget.style.color = 'var(--text-1)'; e.currentTarget.style.background = 'var(--surface-3)' } }}
-        onMouseLeave={e => { if (!active) { e.currentTarget.style.color = 'var(--text-3)'; e.currentTarget.style.background = '' } }}
-      >
-        {label}
+      <Link to={to}
+        title={sidebarCollapsed ? item.label : undefined}
+        className={`flex items-center gap-3 rounded-xl transition-all duration-200 ${indent ? 'pl-9 pr-3 py-2 text-xs' : 'px-3 py-2.5 text-sm'}`}
+        style={linkStyle(active)}
+        onMouseEnter={hoverIn} onMouseLeave={e => hoverOut(e, active)}>
+        <Icon size={indent ? 15 : 17} />
+        {!sidebarCollapsed && <span className="font-medium">{item.label}</span>}
       </Link>
     )
   }
 
   const sidebar = (
     <aside
-      className={`fixed md:sticky inset-y-0 md:inset-y-auto left-0 md:top-0 z-30 w-60 h-screen flex flex-col transition-transform duration-300 md:translate-x-0 ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}`}
+      className={`fixed md:sticky inset-y-0 md:inset-y-auto left-0 md:top-0 z-30 h-screen flex flex-col transition-all duration-300 md:translate-x-0 ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'} ${sidebarCollapsed ? 'w-16' : 'w-60'}`}
       style={{
         background: 'var(--surface)',
         backdropFilter: 'blur(28px) saturate(1.8)',
@@ -202,255 +193,59 @@ export default function Layout() {
         style={{ background: 'linear-gradient(to bottom, var(--accent), transparent 70%)' }} />
 
       {/* Logo */}
-      <div className="px-5 py-4" style={{ borderBottom: '1px solid var(--border)' }}>
-        <div className="flex items-center gap-2">
-          <img src="/ki-icon.png" alt="Ki" className="w-8 h-8 object-contain rounded-lg" />
+      <div className="px-5 py-4 flex items-center gap-2" style={{ borderBottom: '1px solid var(--border)' }}>
+        <img src="/ki-icon.png" alt="Ki" className="w-8 h-8 object-contain rounded-lg flex-shrink-0" />
+        {!sidebarCollapsed && (
           <div>
             <span className="text-base font-bold" style={{ color: 'var(--accent)' }}>Ki</span>
             <span className="text-xs font-medium" style={{ color: 'var(--text-3)' }}> Business Intelligence</span>
           </div>
-        </div>
+        )}
       </div>
 
       {/* Nav */}
       <nav className="flex-1 px-3 py-4 space-y-0.5 overflow-y-auto">
-
-        {/* Dashboard */}
-        <Link to="/app/dashboard"
-          className="flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all duration-200"
-          style={linkStyle(activeLink('/app/dashboard'))}
-          onMouseEnter={hoverIn} onMouseLeave={e => hoverOut(e, activeLink('/app/dashboard'))}>
-          <LayoutDashboard size={17} /><span className="text-sm font-medium">Dashboard</span>
-        </Link>
-
-        {/* CRM (native) — YFZ 34 Faz 3: Base CRUD, ayrı sayfa/route, connector ekranından bağımsız */}
-        <Link to="/app/crm-native"
-          className="flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all duration-200"
-          style={linkStyle(activeLink('/app/crm-native'))}
-          onMouseEnter={hoverIn} onMouseLeave={e => hoverOut(e, activeLink('/app/crm-native'))}>
-          <Users size={17} /><span className="text-sm font-medium">CRM</span>
-        </Link>
-
-        {/* ERP (native) — YFZ 34 Faz 4: ürün/tedarikçi/sipariş Base CRUD */}
-        <Link to="/app/erp-native"
-          className="flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all duration-200"
-          style={linkStyle(activeLink('/app/erp-native'))}
-          onMouseEnter={hoverIn} onMouseLeave={e => hoverOut(e, activeLink('/app/erp-native'))}>
-          <Boxes size={17} /><span className="text-sm font-medium">ERP</span>
-        </Link>
-
-        {/* Blueprint — FAZ 6: deterministik geçiş kuralları + onay kuyruğu (örn. deal stage) */}
-        <Link to="/app/blueprint"
-          className="flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all duration-200"
-          style={linkStyle(activeLink('/app/blueprint'))}
-          onMouseEnter={hoverIn} onMouseLeave={e => hoverOut(e, activeLink('/app/blueprint'))}>
-          <GitBranch size={17} /><span className="text-sm font-medium">Blueprint</span>
-        </Link>
-
-        {/* Fonksiyonlar — FAZ 7: izole V8 isolate içinde çalışan özel JS fonksiyonları */}
-        <Link to="/app/functions"
-          className="flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all duration-200"
-          style={linkStyle(activeLink('/app/functions'))}
-          onMouseEnter={hoverIn} onMouseLeave={e => hoverOut(e, activeLink('/app/functions'))}>
-          <Code2 size={17} /><span className="text-sm font-medium">Fonksiyonlar</span>
-        </Link>
-
-        {/* Alan Yöneticisi — FAZ 8.3: modüllere özel alan ekleme sihirbazı */}
-        <Link to="/app/field-manager"
-          className="flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all duration-200"
-          style={linkStyle(activeLink('/app/field-manager'))}
-          onMouseEnter={hoverIn} onMouseLeave={e => hoverOut(e, activeLink('/app/field-manager'))}>
-          <ListPlus size={17} /><span className="text-sm font-medium">Alan Yöneticisi</span>
-        </Link>
-
-        {/* İçe Aktarma — FAZ 8.2: CSV/Excel kişi import + dedup */}
-        <Link to="/app/import"
-          className="flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all duration-200"
-          style={linkStyle(activeLink('/app/import'))}
-          onMouseEnter={hoverIn} onMouseLeave={e => hoverOut(e, activeLink('/app/import'))}>
-          <FileUp size={17} /><span className="text-sm font-medium">İçe Aktarma</span>
-        </Link>
-
-        {/* Sektörel Şablonlar — FAZ 8.1: industry template apply */}
-        <Link to="/app/onboarding"
-          className="flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all duration-200"
-          style={linkStyle(activeLink('/app/onboarding'))}
-          onMouseEnter={hoverIn} onMouseLeave={e => hoverOut(e, activeLink('/app/onboarding'))}>
-          <Sparkles size={17} /><span className="text-sm font-medium">Sektörel Şablonlar</span>
-        </Link>
-
-        {/* AI Onayları — FAZ 10.3: asistanın önerdiği create/update/delete işlemleri için onay kuyruğu */}
-        <Link to="/app/ai-actions"
-          className="flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all duration-200"
-          style={linkStyle(activeLink('/app/ai-actions'))}
-          onMouseEnter={hoverIn} onMouseLeave={e => hoverOut(e, activeLink('/app/ai-actions'))}>
-          <ShieldCheck size={17} /><span className="text-sm font-medium">AI Onayları</span>
-        </Link>
-
-        {/* CRM Bağlantıları expandable (eski "CRM" — harici connector senkron/izleme, route değişmedi) */}
-        <div>
-          <button
-            onClick={() => setCrmOpen(o => !o)}
-            className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all duration-200"
-            style={linkStyle(activeLink('/app/crm'))}
-            onMouseEnter={hoverIn} onMouseLeave={e => hoverOut(e, activeLink('/app/crm'))}>
-            <Database size={17} />
-            <span className="text-sm font-medium flex-1 text-left">CRM Bağlantıları</span>
-            {crmOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-          </button>
-          {crmOpen && (
-            <div className="mt-0.5 space-y-0.5">
-              <SubItem to="/app/crm" label="Tüm Modüller" />
-              {crmModules.slice(0, 12).map(m => (
-                <SubItem key={m.apiName} to={`/app/crm?module=${m.apiName}`} label={m.pluralLabel || m.apiName} />
-              ))}
-              {!crmLoaded && <p className="pl-9 text-xs py-1" style={{ color: 'var(--text-3)' }}>Yükleniyor...</p>}
+        {navGroups.map(group => {
+          if (group.items.length === 1 && group.key === 'dashboard') {
+            return <NavLink key={group.items[0].key} item={group.items[0]} />
+          }
+          const isOpen = expanded[group.key] ?? false
+          const GroupIcon = resolveIcon(group.icon)
+          return (
+            <div key={group.key} className="pt-1">
+              <button
+                onClick={() => setExpanded(e => ({ ...e, [group.key]: !e[group.key] }))}
+                className="w-full flex items-center gap-3 px-3 py-2 rounded-xl transition-all duration-200"
+                style={{ color: 'var(--text-3)' }}
+                title={sidebarCollapsed ? group.label : undefined}>
+                <GroupIcon size={15} />
+                {!sidebarCollapsed && (
+                  <>
+                    <span className="flex-1 text-left text-[11px] font-bold uppercase tracking-wider">{group.label}</span>
+                    {isOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+                  </>
+                )}
+              </button>
+              {(isOpen || sidebarCollapsed) && (
+                <div className="space-y-0.5 mt-0.5">
+                  {group.items.map(item => <NavLink key={item.key} item={item} indent={!sidebarCollapsed} />)}
+                </div>
+              )}
             </div>
-          )}
-        </div>
-
-        {/* Accounting expandable */}
-        <div>
-          <button
-            onClick={() => setAccOpen(o => !o)}
-            className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all duration-200"
-            style={linkStyle(activeLink('/app/accounting'))}
-            onMouseEnter={hoverIn} onMouseLeave={e => hoverOut(e, activeLink('/app/accounting'))}>
-            <BarChart3 size={17} />
-            <span className="text-sm font-medium flex-1 text-left">Muhasebe</span>
-            {accOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-          </button>
-          {accOpen && (
-            <div className="mt-0.5 space-y-0.5">
-              {ACCOUNTING_TABS.map(t => (
-                <SubItem key={t.key} to={`/app/accounting?tab=${t.key}`} label={t.label} />
-              ))}
-            </div>
-          )}
-        </div>
-
-        {/* Add-on Modüller — YFZ 34 Faz 5: native paid add-on'lar, her zaman nav'da görünür
-            (entitlement yoksa sayfa içinde "Etkinleştir" CTA'sı gösterilir, nav'da gizlenmez —
-            add-on'ların keşfedilebilir/satılabilir olması gerekiyor, AI'nin aksine) */}
-        <div className="pt-2 pb-1 px-3">
-          <span className="text-[10px] uppercase tracking-widest font-semibold" style={{ color: 'var(--text-3)' }}>Add-on Modüller</span>
-        </div>
-        <Link to="/app/customer-service"
-          className="flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all duration-200"
-          style={linkStyle(activeLink('/app/customer-service'))}
-          onMouseEnter={hoverIn} onMouseLeave={e => hoverOut(e, activeLink('/app/customer-service'))}>
-          <Headset size={17} /><span className="text-sm font-medium">Müşteri Hizmetleri</span>
-        </Link>
-        <Link to="/app/fulfillment"
-          className="flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all duration-200"
-          style={linkStyle(activeLink('/app/fulfillment'))}
-          onMouseEnter={hoverIn} onMouseLeave={e => hoverOut(e, activeLink('/app/fulfillment'))}>
-          <Truck size={17} /><span className="text-sm font-medium">Sevkiyat</span>
-        </Link>
-        <Link to="/app/ecommerce"
-          className="flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all duration-200"
-          style={linkStyle(activeLink('/app/ecommerce'))}
-          onMouseEnter={hoverIn} onMouseLeave={e => hoverOut(e, activeLink('/app/ecommerce'))}>
-          <ShoppingCart size={17} /><span className="text-sm font-medium">E-Ticaret</span>
-        </Link>
-        <Link to="/app/marketing"
-          className="flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all duration-200"
-          style={linkStyle(activeLink('/app/marketing'))}
-          onMouseEnter={hoverIn} onMouseLeave={e => hoverOut(e, activeLink('/app/marketing'))}>
-          <Megaphone size={17} /><span className="text-sm font-medium">Marketing</span>
-        </Link>
-        <Link to="/app/events"
-          className="flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all duration-200"
-          style={linkStyle(activeLink('/app/events'))}
-          onMouseEnter={hoverIn} onMouseLeave={e => hoverOut(e, activeLink('/app/events'))}>
-          <CalendarDays size={17} /><span className="text-sm font-medium">Etkinlikler</span>
-        </Link>
-        <Link to="/app/personnel"
-          className="flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all duration-200"
-          style={linkStyle(activeLink('/app/personnel'))}
-          onMouseEnter={hoverIn} onMouseLeave={e => hoverOut(e, activeLink('/app/personnel'))}>
-          <IdCard size={17} /><span className="text-sm font-medium">Personel</span>
-        </Link>
-
-        {/* Files */}
-        <Link to="/app/files"
-          className="flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all duration-200"
-          style={linkStyle(activeLink('/app/files'))}
-          onMouseEnter={hoverIn} onMouseLeave={e => hoverOut(e, activeLink('/app/files'))}>
-          <FolderOpen size={17} /><span className="text-sm font-medium">Dosyalar</span>
-        </Link>
-
-        {/* AI section separator — YFZ 34: KiBI AI is a Premium upsell, nav hides if not entitled */}
-        {(isAdminOrSupervisor || aiPremiumActive) && (
-        <>
-        <div className="pt-2 pb-1 px-3">
-          <span className="text-[10px] uppercase tracking-widest font-semibold" style={{ color: 'var(--text-3)' }}>Yapay Zeka</span>
-        </div>
-
-        {/* KIBI AI */}
-        <Link to="/app/chat"
-          className="flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all duration-200"
-          style={linkStyle(activeLink('/app/chat'))}
-          onMouseEnter={hoverIn} onMouseLeave={e => hoverOut(e, activeLink('/app/chat'))}>
-          <MessageSquare size={17} /><span className="text-sm font-medium">KIBI AI</span>
-        </Link>
-
-        {/* Entity AI */}
-        <Link to="/app/entity-ai"
-          className="flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all duration-200"
-          style={linkStyle(activeLink('/app/entity-ai'))}
-          onMouseEnter={hoverIn} onMouseLeave={e => hoverOut(e, activeLink('/app/entity-ai'))}>
-          <Bot size={17} /><span className="text-sm font-medium">Entity AI</span>
-        </Link>
-        </>
-        )}
-
-        {/* Support */}
-        <Link to="/app/support"
-          className="flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all duration-200"
-          style={linkStyle(activeLink('/app/support'))}
-          onMouseEnter={hoverIn} onMouseLeave={e => hoverOut(e, activeLink('/app/support'))}>
-          <LifeBuoy size={17} /><span className="text-sm font-medium">Destek</span>
-        </Link>
-
-        {/* Ki Wallet */}
-        <Link to="/app/wallet"
-          className="flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all duration-200"
-          style={linkStyle(activeLink('/app/wallet'))}
-          onMouseEnter={hoverIn} onMouseLeave={e => hoverOut(e, activeLink('/app/wallet'))}>
-          <Wallet size={17} /><span className="text-sm font-medium">Ki Wallet</span>
-        </Link>
-
-        {/* Settings */}
-        <Link to="/app/settings"
-          className="flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all duration-200"
-          style={linkStyle(activeLink('/app/settings'))}
-          onMouseEnter={hoverIn} onMouseLeave={e => hoverOut(e, activeLink('/app/settings'))}>
-          <Settings size={17} /><span className="text-sm font-medium">Ayarlar</span>
-        </Link>
-
-        {/* Platform section — admin + supervisor only */}
-        {isAdminOrSupervisor && (
-          <div>
-            <button
-              onClick={() => setAdminOpen(o => !o)}
-              className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all duration-200"
-              style={linkStyle(activeLink('/app/admin'))}
-              onMouseEnter={hoverIn} onMouseLeave={e => hoverOut(e, activeLink('/app/admin'))}>
-              <Settings2 size={17} />
-              <span className="text-sm font-medium flex-1 text-left">Platform</span>
-              {adminOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-            </button>
-            {adminOpen && (
-              <div className="mt-0.5 space-y-0.5">
-                <SubItem to="/app/admin" label="Platform Management" />
-                <SubItem to="/app/admin/settings" label="Platform Settings" />
-                <SubItem to="/app/admin/kibi-chat" label="KIBI Chat" />
-              </div>
-            )}
-          </div>
-        )}
+          )
+        })}
       </nav>
+
+      {/* Collapse toggle */}
+      <div className="px-3 py-2" style={{ borderTop: '1px solid var(--border)' }}>
+        <button onClick={() => setSidebarCollapsed(c => !c)}
+          className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-xl text-xs transition-all duration-200"
+          style={{ color: 'var(--text-3)' }}
+          onMouseEnter={hoverIn} onMouseLeave={e => hoverOut(e, false)}>
+          {sidebarCollapsed ? <PanelLeftOpen size={15} /> : <PanelLeftClose size={15} />}
+          {!sidebarCollapsed && <span>Menüyü Daralt</span>}
+        </button>
+      </div>
 
       {/* Bottom: notifications + theme + user + logout */}
       <div className="px-3 py-4 space-y-2" style={{ borderTop: '1px solid var(--border)' }}>
@@ -468,8 +263,8 @@ export default function Layout() {
                 </span>
               )}
             </div>
-            <span>Bildirimler</span>
-            {notifications.length > 0 && (
+            {!sidebarCollapsed && <span>Bildirimler</span>}
+            {!sidebarCollapsed && notifications.length > 0 && (
               <span className="ml-auto text-xs px-1.5 py-0.5 rounded-full font-bold text-white"
                 style={{ background: 'var(--accent)' }}>
                 {notifications.length}
@@ -494,7 +289,7 @@ export default function Layout() {
           {dark
             ? <Sun  size={16} style={{ color: 'var(--accent)' }} />
             : <Moon size={16} style={{ color: 'var(--accent)' }} />}
-          <span>{dark ? 'Açık Tema' : 'Koyu Tema'}</span>
+          {!sidebarCollapsed && <span>{dark ? 'Açık Tema' : 'Koyu Tema'}</span>}
         </button>
 
         <div className="flex items-center gap-3 px-3 py-2">
@@ -502,15 +297,17 @@ export default function Layout() {
             style={{ background: 'linear-gradient(135deg, var(--accent), var(--forest))' }}>
             {initials}
           </div>
-          <div className="flex-1 min-w-0">
-            <p className="text-sm font-medium truncate" style={{ color: 'var(--text-1)' }}>{user?.name || 'Kullanıcı'}</p>
-            <p className="text-xs truncate" style={{ color: 'var(--text-3)' }}>{user?.email}</p>
-          </div>
+          {!sidebarCollapsed && (
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-medium truncate" style={{ color: 'var(--text-1)' }}>{user?.name || 'Kullanıcı'}</p>
+              <p className="text-xs truncate" style={{ color: 'var(--text-3)' }}>{user?.email}</p>
+            </div>
+          )}
         </div>
 
         <button onClick={() => { clear(); navigate('/app/login') }}
           className="w-full flex items-center gap-3 px-3 py-2 rounded-xl text-sm transition-all duration-200 text-red-400 hover:bg-red-500/10">
-          <LogOut size={16} /><span>Çıkış Yap</span>
+          <LogOut size={16} /> {!sidebarCollapsed && <span>Çıkış Yap</span>}
         </button>
       </div>
     </aside>
